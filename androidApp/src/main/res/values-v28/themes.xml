@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 内容延伸进刘海/挖孔区，配合 enableEdgeToEdge 实现顶部沉浸 -->
+    <style name="Theme.AgentReins" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+</resources>

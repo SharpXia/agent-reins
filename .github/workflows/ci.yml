@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: Android (assembleDebug)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        run: ./gradlew :androidApp:assembleDebug --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentreins-debug-apk
+          path: androidApp/build/outputs/apk/debug/*.apk
+
+  desktop:
+    name: Desktop (uber jar)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build desktop uber jar
+        run: ./gradlew :desktopApp:packageUberJarForCurrentOS --stacktrace
+
+      - name: Upload jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentreins-desktop-jar
+          path: desktopApp/build/compose/jars/*.jar
+
+  ios:
+    name: iOS (framework link)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Link iOS frameworks (simulator + device, debug)
+        run: ./gradlew :composeApp:linkDebugFrameworkIosSimulatorArm64 :composeApp:linkDebugFrameworkIosArm64 --stacktrace
+
+      - name: Upload simulator framework
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentreins-ios-sim-framework
+          path: composeApp/build/bin/iosSimulatorArm64/debugFramework/*.framework

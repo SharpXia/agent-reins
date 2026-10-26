@@ -1,0 +1,29 @@
+# agent 本地目录（官方 Android skills 等，不入库）
+.agents/
+
+# 构建产物
+build/
+.gradle/
+.kotlin/
+kotlin-js-store/
+
+# IDE / 本机
+.idea/
+*.iml
+local.properties
+.DS_Store
+xcuserdata/
+*.xcuserstate
+
+# 本机密钥（网关地址 / API Key），绝不提交
+.env
+.device-identity.json
+
+# 本机签名 Team ID（公开仓库不携带）
+iosApp/Configuration/Config.local.xcconfig
+
+# 协议探针原始录制（含其它会话私有内容，绝不入库；fixture 经 make-fixture.mjs 脱敏后进 commonTest）
+scripts/fixtures/
+
+# 项目文档与设计笔记（含内网拓扑/设备标识等隐私内容，仅本地保留，不入库不发布）
+docs/

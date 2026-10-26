@@ -1,0 +1,47 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
+plugins {
+    alias(libs.plugins.kotlinMultiplatform)
+    alias(libs.plugins.androidMultiplatformLibrary)
+    alias(libs.plugins.composeMultiplatform)
+    alias(libs.plugins.composeCompiler)
+}
+
+// KMP UI 库：全部界面代码在 commonMain，由 androidApp / desktopApp / iosApp 壳工程消费
+kotlin {
+    android {
+        namespace = "dev.sharpxia.agentreins.ui"
+        compileSdk = 37
+        minSdk = 26
+        compilerOptions.jvmTarget = JvmTarget.JVM_17
+    }
+    jvm("desktop") {
+        compilerOptions { jvmTarget.set(JvmTarget.JVM_17) }
+    }
+    // Kotlin 2.4 起 apple framework 不再默认创建，需显式声明（静态库，免动态签名问题）
+    iosArm64 {
+        binaries.framework {
+            baseName = "composeApp"
+            isStatic = true
+        }
+    }
+    iosSimulatorArm64 {
+        binaries.framework {
+            baseName = "composeApp"
+            isStatic = true
+        }
+    }
+
+    sourceSets {
+        commonMain.dependencies {
+            implementation(project(":shared"))
+            implementation(libs.compose.runtime)
+            implementation(libs.compose.foundation)
+            implementation(libs.compose.material3)
+            implementation(libs.compose.ui)
+            implementation(libs.compose.material.icons.core)
+            implementation(libs.kotlinx.coroutines.core)
+            implementation(libs.kotlinx.serialization.json)
+        }
+    }
+}

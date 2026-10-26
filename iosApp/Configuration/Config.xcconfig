@@ -1,0 +1,11 @@
+TEAM_ID=
+BUNDLE_ID=dev.sharpxia.agentreins
+APP_NAME=AgentReins
+JAVA_HOME=
+
+// 本机覆盖文件（已被 .gitignore 忽略）：TEAM_ID（真机签名）与 JAVA_HOME
+// （Xcode GUI 不继承 shell 环境，Compile Kotlin 脚本阶段靠它注入）都写在这里。
+// include 必须在默认值之后——后写的赋值生效。
+#include? "Config.local.xcconfig"
+// 签名团队不写死在 pbxproj（公开仓库不携带个人 Team ID），由此注入。
+DEVELOPMENT_TEAM = $(TEAM_ID)

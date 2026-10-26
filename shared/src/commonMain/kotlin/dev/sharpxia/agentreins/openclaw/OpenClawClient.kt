@@ -521,15 +521,28 @@ class OpenClawClient(
         }
     }
 
-    /** 重连后补发：PENDING 优先于 SENT，FIFO；断连即停（剩余下轮再补）。 */
+    /**
+     * 重连后补发：PENDING 优先于 SENT，FIFO；断连即停（剩余下轮再补）。
+     * P3 修复（flush 尾随丢失窗口）：flush 进行中新入队的命令不在第一轮快照里，
+     * 循环结束后只对**本轮未尝试过**的条目补一轮——已失败的条目不原地自旋
+     * （持续失败由下次 send/reconnect 触发新一轮 flush 兜底）。
+     */
     private suspend fun flushOutbox() {
-        val cmds = Outbox.flushOrder(cache.loadOutbox(gatewayId))
-        if (cmds.isEmpty()) return
-        for (cmd in cmds) {
-            if (_status.value !is GatewayStatus.Connected || explicitClose) break
-            sendOutboxCommand(cmd)
+        try {
+            val attempted = mutableSetOf<String>()
+            while (true) {
+                val cmds = Outbox.flushOrder(cache.loadOutbox(gatewayId))
+                    .filter { it.idempotencyKey !in attempted }
+                if (cmds.isEmpty()) return
+                for (cmd in cmds) {
+                    if (_status.value !is GatewayStatus.Connected || explicitClose) return
+                    attempted += cmd.idempotencyKey
+                    sendOutboxCommand(cmd)
+                }
+            }
+        } finally {
+            refreshOutboxCount()
         }
-        refreshOutboxCount()
     }
 
     /**
@@ -548,6 +561,11 @@ class OpenClawClient(
 
     private fun refreshOutboxCount() {
         _outboxPendingCount.value = if (cache.available) cache.loadOutbox(gatewayId).size else 0
+    }
+
+    /** UI「立即重发」入口：排程一次即刻 flush（重连时同路，单飞防并发重复回显）。 */
+    fun retryPendingNow() {
+        scheduleFlush(0)
     }
 
     override suspend fun respondApproval(requestId: String, approved: Boolean) {

@@ -18,8 +18,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import dev.sharpxia.agentreins.ui.ConnectionScreen
 import dev.sharpxia.agentreins.ui.SessionsScreen
+import dev.sharpxia.agentreins.ui.theme.AgentReinsTheme
 
-/** M0/M1：单 Activity/Application 双页；导航升级（Compose Navigation）在 M2 随对话流引入。 */
+/** 单 Activity/Application 双页；导航升级（Compose Navigation）随 M3 引入。 */
 private enum class AppScreen { SESSIONS, CONNECTION }
 
 @Composable
@@ -27,10 +28,12 @@ fun App(prebuilt: AppModel? = null) {
     val model = prebuilt ?: remember { AppModel() }
     var current by remember { mutableStateOf(AppScreen.SESSIONS) }
 
-    MaterialTheme {
+    // 设计基线（M2.6）：明暗跟随系统，token 见 ui/theme/Theme.kt
+    AgentReinsTheme {
         Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
             bottomBar = {
-                NavigationBar {
+                NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
                     NavigationBarItem(
                         selected = current == AppScreen.SESSIONS,
                         onClick = { current = AppScreen.SESSIONS },

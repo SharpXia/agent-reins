@@ -13,6 +13,7 @@ import dev.sharpxia.agentreins.openclaw.ConnectionStore
 import dev.sharpxia.agentreins.openclaw.GatewayRpcException
 import dev.sharpxia.agentreins.openclaw.OpenClawClient
 import dev.sharpxia.agentreins.openclaw.Outbox
+import dev.sharpxia.agentreins.openclaw.SessionOverlay
 import dev.sharpxia.agentreins.openclaw.StoredConnection
 import dev.sharpxia.agentreins.crypto.secureRandomBytes
 import dev.sharpxia.agentreins.openclaw.epochMs
@@ -52,13 +53,16 @@ class AppModel(
         private set
     var sessions by mutableStateOf<List<Session>>(emptyList())
         private set
+    /** 当前会话发送队列待补发条数，聊天页显示排队提示。 */
+    var queuedCount by mutableStateOf(0)
+        private set
+    /** 当前会话的 PENDING 待发命令（聊天页「未发出」气泡 + 重试/删除 UI）。 */
+    var pendingOutbox by mutableStateOf<List<Outbox.Command>>(emptyList())
+        private set
     var selectedSession by mutableStateOf<String?>(null)
         private set
     /** 当前选中会话的对话流状态（聊天页唯一数据源）。 */
     var conversation by mutableStateOf<ConversationState?>(null)
-        private set
-    /** 当前会话发送队列待补发条数，聊天页显示排队提示。 */
-    var queuedCount by mutableStateOf(0)
         private set
     var busy by mutableStateOf(false)
         private set
@@ -94,6 +98,34 @@ class AppModel(
     /** 向上翻页加载中去重（防 scroll 事件连发重复请求）。 */
     private var loadingOlder = false
 
+    // ---- 会话列表本地 overlay（M2.6：pinned/archived 本地显式状态，网关同步留 M3+） ----
+    /** 网关/缓存视图（未叠 overlay 的原始列表）。 */
+    private var rawSessions: List<Session> = emptyList()
+    /** 本地覆盖层（kv 持久化，跨重启）。 */
+    private var sessionOverlay = emptyMap<String, SessionOverlay.Entry>()
+
+    /** overlay 叠加后发布到 UI 状态（网关刷新与本地操作共用同一出口）。 */
+    private fun publishSessions() {
+        sessions = SessionOverlay.apply(rawSessions, sessionOverlay)
+    }
+
+    /** 归档/置顶（本地即时生效 + kv 持久化；离线可用）。 */
+    fun setSessionArchived(session: Session, archived: Boolean) {
+        sessionOverlay = SessionOverlay.toggled(sessionOverlay, session.id, archived = archived)
+        persistSessionOverlay()
+        publishSessions()
+    }
+
+    fun setSessionPinned(session: Session, pinned: Boolean) {
+        sessionOverlay = SessionOverlay.toggled(sessionOverlay, session.id, pinned = pinned)
+        persistSessionOverlay()
+        publishSessions()
+    }
+
+    private fun persistSessionOverlay() {
+        runCatching { cache.kvPut(gatewayId, OVERLAY_KEY, SessionOverlay.serialize(sessionOverlay)) }
+    }
+
     init {
         // 记住上次连接：预填地址与 Key；deviceToken 是扫码配对成功后的免 token 凭证
         runCatching { ConnectionStore.load() }.getOrNull()?.let { stored ->
@@ -106,7 +138,10 @@ class AppModel(
         // 冷启动先读缓存（M2.5 验收项：断网冷启动可见上次列表；连接成功后被网关权威覆盖）
         runCatching { cache.loadSessions(gatewayId) }.getOrNull()
             ?.takeIf { it.isNotEmpty() }
-            ?.let { sessions = it }
+            ?.let { rawSessions = it }
+        // overlay（pinned/archived 本地状态）随后叠加并发布
+        sessionOverlay = SessionOverlay.parse(runCatching { cache.kvGet(gatewayId, OVERLAY_KEY) }.getOrNull())
+        publishSessions()
         // iOS 进后台 WS 必死：回前台自动用已存配置重连（显式断开除外）
         scope.launch {
             appForegroundEvents.collect {
@@ -197,7 +232,8 @@ class AppModel(
         statusJob = scope.launch { c.status.collect { status = it } }
         sessionsJob = scope.launch {
             c.sessions.collect { list ->
-                sessions = list
+                rawSessions = list
+                publishSessions()
                 // Dev 直连：列表就绪后自动打开目标会话
                 val auto = devAutoSelectKey
                 if (auto != null && selectedSession == null) {
@@ -213,7 +249,7 @@ class AppModel(
         }
         outboxJob = scope.launch {
             c.outboxPendingCount.collect { total ->
-                // 聊天页排队提示只看当前会话
+                // 聊天页排队提示与「未发出」气泡只看当前会话
                 val key = selectedSession
                 queuedCount = when {
                     key == null -> 0
@@ -221,6 +257,7 @@ class AppModel(
                     else -> runCatching { cache.loadOutbox(gatewayId).count { it.sessionKey == key } }
                         .getOrDefault(0)
                 }
+                refreshPendingOutbox()
             }
         }
         scope.launch {
@@ -288,12 +325,12 @@ class AppModel(
     }
 
     fun select(session: Session?) {
-        // 切走前把旧会话在途草稿立即落库（P1：500ms 去抖窗口内切会话不能串草稿/丢草稿）
+        // 切走前把旧会话在途草稿立即落库（P1：500ms 去抖窗口内切会话不能串草稿/丢草稿）。
+        // P3 修复：无条件写入（含空值）——只写非空会让「已发送清空的草稿」写不进去，
+        // 旧槽位残留已发送文本，切回时复活。
         selectedSession?.let { old ->
             draftPersistJob?.cancel()
-            if (draftState.value.isNotEmpty()) {
-                runCatching { cache.kvPut(gatewayId, draftKey(old), draftState.value) }
-            }
+            runCatching { cache.kvPut(gatewayId, draftKey(old), draftState.value) }
         }
         selectedSession = session?.id
         conversation = null
@@ -304,10 +341,35 @@ class AppModel(
         queuedCount = runCatching {
             cache.loadOutbox(gatewayId).count { it.sessionKey == session.id }
         }.getOrDefault(0)
+        refreshPendingOutbox()
         draftState.value = runCatching { cache.kvGet(gatewayId, draftKey(session.id)) }.getOrNull() ?: ""
         val c = client ?: return
         c.clearUnread(session.id)
         openConversation(c, session.id)
+    }
+
+    /** 当前会话 PENDING 待发命令快照（聊天页「未发出」气泡的数据源）。 */
+    private fun refreshPendingOutbox() {
+        val key = selectedSession ?: run { pendingOutbox = emptyList(); return }
+        pendingOutbox = runCatching {
+            cache.loadOutbox(gatewayId).filter {
+                it.sessionKey == key && it.status == Outbox.Command.Status.PENDING
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    /** 删除一条待发消息（用户放弃发送）。删除即从队列消失，不再补发。 */
+    fun deleteQueued(cmd: Outbox.Command) {
+        runCatching { cache.deleteOutbox(cmd.idempotencyKey, gatewayId) }
+        queuedCount = runCatching {
+            cache.loadOutbox(gatewayId).count { it.sessionKey == selectedSession }
+        }.getOrDefault(0)
+        refreshPendingOutbox()
+    }
+
+    /** 立即重试待发队列（在线时即刻补发；离线由重连自动补发兜底）。 */
+    fun retryQueuedNow() {
+        client?.retryPendingNow()
     }
 
     private fun openConversation(c: OpenClawClient, sessionKey: String) {
@@ -328,16 +390,28 @@ class AppModel(
         val key = selectedSession ?: return
         val text = draft.trim()
         if (text.isEmpty()) return
-        val c = client
         draft = ""
+        sendText(key, text)
+    }
+
+    /** 消息长按「重发」：把一段文本再次走发送管线（不经草稿，M2.6）。 */
+    fun resendText(text: String) {
+        val key = selectedSession ?: return
+        val t = text.trim()
+        if (t.isEmpty()) return
+        sendText(key, t)
+    }
+
+    private fun sendText(sessionKey: String, text: String) {
+        val c = client
         if (c == null) {
             // 尚无 client（冷启动离线）：直接入缓存队列，连接成功后由 flush 补发
-            enqueueOffline(key, text)
+            enqueueOffline(sessionKey, text)
             return
         }
         scope.launch {
             try {
-                c.send(key, text)
+                c.send(sessionKey, text)
             } catch (e: GatewayRpcException) {
                 lastError = when (e.code) {
                     "SEND_QUEUED" -> "已进入发送队列，重连后自动补发"
@@ -375,6 +449,7 @@ class AppModel(
                 gatewayId,
             )
             queuedCount = cache.loadOutbox(gatewayId).count { it.sessionKey == sessionKey }
+            refreshPendingOutbox()
             lastError = "当前离线，消息已排队（连接后自动补发）"
         }
     }
@@ -407,4 +482,9 @@ class AppModel(
     }
 
     private fun draftKey(sessionKey: String) = "draft:$sessionKey"
+
+    private companion object {
+        /** session overlay（pinned/archived 本地状态）的 kv 槽位（M2.6）。 */
+        const val OVERLAY_KEY = "sessionOverlay:v1"
+    }
 }

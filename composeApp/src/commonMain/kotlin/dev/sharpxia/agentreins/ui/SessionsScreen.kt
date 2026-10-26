@@ -41,6 +41,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -51,24 +52,22 @@ import dev.sharpxia.agentreins.model.GatewayStatus
 import dev.sharpxia.agentreins.model.Message
 import dev.sharpxia.agentreins.model.Session
 import dev.sharpxia.agentreins.model.ToolCallEvent
+import dev.sharpxia.agentreins.openclaw.SessionListMapper
 
 /**
- * 会话列表 + 对话流（M2）。
+ * 会话列表 + 对话流（M2；M2.5 增：离线可见缓存列表、未读点、置顶、归档过滤、排队提示）。
  * 对话页唯一数据源是 model.conversation（ConversationState）：历史回填 + agent 事件流
  * 归并，LazyColumn 增量渲染；工具调用走 ToolCallCard。
  */
 @Composable
 fun SessionsScreen(model: AppModel, modifier: Modifier = Modifier) {
-    if (model.status !is GatewayStatus.Connected) {
-        EmptyState(model, modifier)
-        return
-    }
-
     val selected = model.selectedSession
-    if (selected == null) {
-        SessionList(model, modifier)
-    } else {
-        ChatScreen(model, selected, modifier)
+    when {
+        // 断网冷启动仍可见缓存列表（M2.5：缓存是加速层，离线可读）
+        selected == null && model.sessions.isNotEmpty() ->
+            SessionList(model, modifier, offline = model.status !is GatewayStatus.Connected)
+        selected == null -> EmptyState(model, modifier)
+        else -> ChatScreen(model, selected, modifier)
     }
 }
 
@@ -125,22 +124,39 @@ private fun EmptyState(model: AppModel, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun SessionList(model: AppModel, modifier: Modifier = Modifier) {
+private fun SessionList(model: AppModel, modifier: Modifier = Modifier, offline: Boolean = false) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    var showArchived by remember { mutableStateOf(false) }
+    // 归档默认过滤；置顶排序由 SessionListMapper.merge 保证
+    val visible = remember(model.sessions, showArchived) {
+        SessionListMapper.visibleForList(model.sessions, showArchived)
+    }
     StatusBarTapEffect {
-        if (model.sessions.isNotEmpty()) {
+        if (visible.isNotEmpty()) {
             scope.launch { listState.animateScrollToItem(0) }
         }
     }
     Column(modifier.fillMaxSize()) {
-        Text(
-            "会话（${model.sessions.size}）",
-            style = MaterialTheme.typography.titleMedium,
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.padding(16.dp, 16.dp, 16.dp, 8.dp),
-        )
+        ) {
+            Text(
+                if (offline) "会话（${visible.size}，离线缓存）" else "会话（${visible.size}）",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.weight(1f),
+            )
+            // 归档过滤开关（有归档会话才亮）
+            val archivedCount = model.sessions.count { it.archived }
+            if (archivedCount > 0) {
+                TextButton(onClick = { showArchived = !showArchived }) {
+                    Text(if (showArchived) "隐藏归档" else "归档($archivedCount)")
+                }
+            }
+        }
         LazyColumn(state = listState) {
-            items(model.sessions, key = { it.id }) { s ->
+            items(visible, key = { it.id }) { s ->
                 SessionRow(s, onClick = { model.select(s) })
             }
         }
@@ -155,28 +171,60 @@ private fun SessionRow(session: Session, onClick: () -> Unit) {
     ) {
         Column(Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // 置顶标识
+                if (session.pinned) {
+                    Text("📌 ", style = MaterialTheme.typography.bodyLarge)
+                }
                 Text(
                     session.title ?: session.id,
                     style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = if (session.unread > 0) FontWeight.SemiBold else FontWeight.Normal,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
+                // 未读点（M2.5 A8：非当前会话事件计数）
+                if (session.unread > 0) {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(start = 6.dp),
+                    ) {
+                        Text(
+                            if (session.unread > 99) "99+" else session.unread.toString(),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                        )
+                    }
+                }
                 formatRelativeTime(session.lastActiveAtMs).takeIf { it.isNotEmpty() }?.let {
                     Text(
                         it,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 6.dp),
                     )
                 }
             }
-            Text(
-                session.id,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // 渠道/类型标识（kind：main/telegram/…）
+                session.kind?.takeIf { it.isNotBlank() }?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.padding(end = 6.dp),
+                    )
+                }
+                Text(
+                    session.id,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }
@@ -225,6 +273,20 @@ private fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier =
     Column(modifier.fillMaxSize().dismissKeyboardOnTap()) {
         ChatTopBar(model, sessionKey, runActive)
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        // 发送队列提示（M2.5 outbox：断线排队，重连自动补发）
+        if (model.queuedCount > 0) {
+            Surface(
+                color = MaterialTheme.colorScheme.tertiaryContainer,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    "⏳ ${model.queuedCount} 条消息待发送，重连后自动补发",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                )
+            }
+        }
 
         Box(Modifier.weight(1f).fillMaxWidth()) {
             LazyColumn(

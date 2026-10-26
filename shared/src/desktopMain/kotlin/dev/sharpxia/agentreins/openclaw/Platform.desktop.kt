@@ -29,3 +29,5 @@ actual fun writeStoredConnectionJson(json: String) {
     connectionFile.setReadable(false, false)
     connectionFile.setReadable(true, true)
 }
+
+actual fun epochMs(): Long = System.currentTimeMillis()

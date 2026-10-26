@@ -3,13 +3,19 @@ package dev.sharpxia.agentreins
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import dev.sharpxia.agentreins.db.CacheStore
+import dev.sharpxia.agentreins.db.SqlCacheStore
+import dev.sharpxia.agentreins.db.createAppDriver
 import dev.sharpxia.agentreins.model.ConversationState
 import dev.sharpxia.agentreins.model.GatewayStatus
 import dev.sharpxia.agentreins.model.Session
 import dev.sharpxia.agentreins.openclaw.ConnectionStore
 import dev.sharpxia.agentreins.openclaw.GatewayRpcException
 import dev.sharpxia.agentreins.openclaw.OpenClawClient
+import dev.sharpxia.agentreins.openclaw.Outbox
 import dev.sharpxia.agentreins.openclaw.StoredConnection
+import dev.sharpxia.agentreins.crypto.secureRandomBytes
+import dev.sharpxia.agentreins.openclaw.epochMs
 import dev.sharpxia.agentreins.openclaw.parsePairingSetupCode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -21,6 +27,8 @@ import kotlinx.coroutines.launch
 /**
  * 连接配置 + 网关客户端生命周期 + 会话/对话流状态。
  * M2：对话流为单一数据源（ConversationState），发送即乐观回显、流式归并、终局回填历史。
+ * M2.5：冷启动先读缓存（断网可见上次列表）、草稿持久化（kv）、未读计数联动、
+ *       发送走 outbox 队列（离线排队、重连自动补发）。
  */
 class AppModel(
     /** Dev 直连预填（desktop 壳的 AGENTREINS_DEV_* 入口）；普通构造留空，走连接页。 */
@@ -49,7 +57,9 @@ class AppModel(
     /** 当前选中会话的对话流状态（聊天页唯一数据源）。 */
     var conversation by mutableStateOf<ConversationState?>(null)
         private set
-    var draft by mutableStateOf("")
+    /** 当前会话发送队列待补发条数，聊天页显示排队提示。 */
+    var queuedCount by mutableStateOf(0)
+        private set
     var busy by mutableStateOf(false)
         private set
     var lastError by mutableStateOf<String?>(null)
@@ -57,12 +67,28 @@ class AppModel(
     var hasPairedCredential by mutableStateOf(false)
         private set
 
+    /** 草稿（per-session 持久化到 kv，500ms 去抖）。 */
+    private val draftState = mutableStateOf("")
+    var draft: String
+        get() = draftState.value
+        set(value) {
+            draftState.value = value
+            scheduleDraftPersist()
+        }
+
+    /** 本地缓存（M2.5 数据基座）。driver 不可用时 Noop 降级，全部能力退化为无缓存。 */
+    private val cache: CacheStore = SqlCacheStore.open(createAppDriver())
+    private val gatewayId = SqlCacheStore.DEFAULT_GATEWAY_ID
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var client: OpenClawClient? = null
     private var deviceToken: String? = null
     private var statusJob: Job? = null
     private var sessionsJob: Job? = null
+    private var activityJob: Job? = null
+    private var outboxJob: Job? = null
     private var conversationJob: Job? = null
+    private var draftPersistJob: Job? = null
     /** 用户主动断开时置位，回前台不自动重连；connect() 成功路径清零。 */
     private var explicitDisconnect = false
     /** 向上翻页加载中去重（防 scroll 事件连发重复请求）。 */
@@ -77,6 +103,10 @@ class AppModel(
             deviceToken = stored.deviceToken
             hasPairedCredential = stored.deviceToken != null
         }
+        // 冷启动先读缓存（M2.5 验收项：断网冷启动可见上次列表；连接成功后被网关权威覆盖）
+        runCatching { cache.loadSessions(gatewayId) }.getOrNull()
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { sessions = it }
         // iOS 进后台 WS 必死：回前台自动用已存配置重连（显式断开除外）
         scope.launch {
             appForegroundEvents.collect {
@@ -157,11 +187,13 @@ class AppModel(
         // 旧客户端先收尾（重连场景）：WS 任务与 HttpClient 不能泄漏
         val old = client
         if (old != null) scope.launch { runCatching { old.disconnect() } }
-        val c = OpenClawClient(scope)
+        val c = OpenClawClient(scope, cache)
         client = c
         // collector 必须在 connect() 前挂上：PairingPending 等中间状态发生在 connect() 返回之前
         statusJob?.cancel()
         sessionsJob?.cancel()
+        activityJob?.cancel()
+        outboxJob?.cancel()
         statusJob = scope.launch { c.status.collect { status = it } }
         sessionsJob = scope.launch {
             c.sessions.collect { list ->
@@ -170,6 +202,24 @@ class AppModel(
                 val auto = devAutoSelectKey
                 if (auto != null && selectedSession == null) {
                     list.firstOrNull { it.id == auto }?.let { select(it) }
+                }
+            }
+        }
+        // 非当前会话的 agent 事件 → 未读 +1（A8 叠加）；当前会话不计数
+        activityJob = scope.launch {
+            c.sessionActivity.collect { key ->
+                if (key != selectedSession) c.incrementUnread(key)
+            }
+        }
+        outboxJob = scope.launch {
+            c.outboxPendingCount.collect { total ->
+                // 聊天页排队提示只看当前会话
+                val key = selectedSession
+                queuedCount = when {
+                    key == null -> 0
+                    total == 0 -> 0
+                    else -> runCatching { cache.loadOutbox(gatewayId).count { it.sessionKey == key } }
+                        .getOrDefault(0)
                 }
             }
         }
@@ -238,12 +288,25 @@ class AppModel(
     }
 
     fun select(session: Session?) {
+        // 切走前把旧会话在途草稿立即落库（P1：500ms 去抖窗口内切会话不能串草稿/丢草稿）
+        selectedSession?.let { old ->
+            draftPersistJob?.cancel()
+            if (draftState.value.isNotEmpty()) {
+                runCatching { cache.kvPut(gatewayId, draftKey(old), draftState.value) }
+            }
+        }
         selectedSession = session?.id
         conversation = null
         conversationJob?.cancel()
         conversationJob = null
-        val c = client ?: return
         session ?: return
+        // 切会话即清未读 + 恢复该会话草稿与排队计数（重启/切换均生效）
+        queuedCount = runCatching {
+            cache.loadOutbox(gatewayId).count { it.sessionKey == session.id }
+        }.getOrDefault(0)
+        draftState.value = runCatching { cache.kvGet(gatewayId, draftKey(session.id)) }.getOrNull() ?: ""
+        val c = client ?: return
+        c.clearUnread(session.id)
         openConversation(c, session.id)
     }
 
@@ -257,20 +320,68 @@ class AppModel(
         }
     }
 
+    /**
+     * 发送（M2.5 outbox 语义）：client 在线时立即发；失败/离线进队列（消息不静默丢失），
+     * 重连后由 client.flushOutbox 自动补发（同幂等键）。
+     */
     fun send() {
         val key = selectedSession ?: return
         val text = draft.trim()
         if (text.isEmpty()) return
-        val c = client ?: return
+        val c = client
         draft = ""
+        if (c == null) {
+            // 尚无 client（冷启动离线）：直接入缓存队列，连接成功后由 flush 补发
+            enqueueOffline(key, text)
+            return
+        }
         scope.launch {
             try {
                 c.send(key, text)
+            } catch (e: GatewayRpcException) {
+                lastError = when (e.code) {
+                    "SEND_QUEUED" -> "已进入发送队列，重连后自动补发"
+                    else -> e.message
+                }
             } catch (e: Exception) {
                 lastError = e.message
             }
         }
     }
+
+    /** 无 client 时的离线入队（与 client.send 的限额/键规则一致）。 */
+    private fun enqueueOffline(sessionKey: String, text: String) {
+        if (!cache.available) {
+            // 存储不可用 = 没有队列：诚实报错，不谎报"已排队"（消息不静默丢失原则）
+            lastError = "当前离线且本地存储不可用，消息未发出，请连接后重试"
+            draft = text
+            return
+        }
+        val now = epochMs()
+        val existing = runCatching { cache.loadOutbox(gatewayId) }.getOrDefault(emptyList())
+        Outbox.checkLimit(existing, now)?.let {
+            lastError = it
+            draft = text
+            return
+        }
+        runCatching {
+            cache.upsertOutbox(
+                Outbox.Command(
+                    idempotencyKey = Outbox.newKey(now, randomSuffix()),
+                    sessionKey = sessionKey,
+                    text = text,
+                    createdAtMs = now,
+                ),
+                gatewayId,
+            )
+            queuedCount = cache.loadOutbox(gatewayId).count { it.sessionKey == sessionKey }
+            lastError = "当前离线，消息已排队（连接后自动补发）"
+        }
+    }
+
+    /** idempotencyKey 随机后缀（hexString 是 shared internal，这里本地实现同语义）。 */
+    private fun randomSuffix(): String = secureRandomBytes(4)
+        .joinToString("") { (it.toInt() and 0xFF).toString(16).padStart(2, '0') }
 
     fun disconnect() {
         explicitDisconnect = true
@@ -280,6 +391,20 @@ class AppModel(
         conversation = null
         conversationJob?.cancel()
         conversationJob = null
-        sessions = emptyList()
+        // sessions 保留缓存列表（M2.5：断开后仍可离线浏览上次列表）
     }
+
+    /** 草稿持久化：500ms 去抖写 kv。**调度时捕获值快照**——job 触发时才读状态会把
+     *  切换后的新会话草稿写进旧会话槽位（P1 竞态）；配合 select() 的切换前冲刷双保险。 */
+    private fun scheduleDraftPersist() {
+        val key = selectedSession ?: return
+        val snapshot = draftState.value
+        draftPersistJob?.cancel()
+        draftPersistJob = scope.launch {
+            delay(500)
+            runCatching { cache.kvPut(gatewayId, draftKey(key), snapshot) }
+        }
+    }
+
+    private fun draftKey(sessionKey: String) = "draft:$sessionKey"
 }

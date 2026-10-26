@@ -3,7 +3,9 @@ package dev.sharpxia.agentreins.openclaw
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
+import platform.Foundation.NSDate
 import platform.Foundation.NSHomeDirectory
+import platform.Foundation.timeIntervalSince1970
 import platform.posix.fclose
 import platform.posix.fopen
 import platform.posix.fread
@@ -50,3 +52,5 @@ actual fun writeDeviceSeed(seed: ByteArray) = writeBytes(seedPath(), seed)
 actual fun readStoredConnectionJson(): String? = readBytes(connectionPath(), 16 * 1024)?.decodeToString()
 
 actual fun writeStoredConnectionJson(json: String) = writeBytes(connectionPath(), json.encodeToByteArray())
+
+actual fun epochMs(): Long = (NSDate().timeIntervalSince1970 * 1000.0).toLong()

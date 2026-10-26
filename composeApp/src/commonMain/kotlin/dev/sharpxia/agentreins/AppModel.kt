@@ -99,10 +99,11 @@ class AppModel(
     private var loadingOlder = false
 
     // ---- 会话列表本地 overlay（M2.6：pinned/archived 本地显式状态，网关同步留 M3+） ----
+    // mutableStateOf：collector 在 Default 线程写、UI 线程读写，走 snapshot 保证可见性
     /** 网关/缓存视图（未叠 overlay 的原始列表）。 */
-    private var rawSessions: List<Session> = emptyList()
+    private var rawSessions by mutableStateOf<List<Session>>(emptyList())
     /** 本地覆盖层（kv 持久化，跨重启）。 */
-    private var sessionOverlay = emptyMap<String, SessionOverlay.Entry>()
+    private var sessionOverlay by mutableStateOf(emptyMap<String, SessionOverlay.Entry>())
 
     /** overlay 叠加后发布到 UI 状态（网关刷新与本地操作共用同一出口）。 */
     private fun publishSessions() {
@@ -112,18 +113,26 @@ class AppModel(
     /** 归档/置顶（本地即时生效 + kv 持久化；离线可用）。 */
     fun setSessionArchived(session: Session, archived: Boolean) {
         sessionOverlay = SessionOverlay.toggled(sessionOverlay, session.id, archived = archived)
-        persistSessionOverlay()
+        scheduleOverlayPersist()
         publishSessions()
     }
 
     fun setSessionPinned(session: Session, pinned: Boolean) {
         sessionOverlay = SessionOverlay.toggled(sessionOverlay, session.id, pinned = pinned)
-        persistSessionOverlay()
+        scheduleOverlayPersist()
         publishSessions()
     }
 
-    private fun persistSessionOverlay() {
-        runCatching { cache.kvPut(gatewayId, OVERLAY_KEY, SessionOverlay.serialize(sessionOverlay)) }
+    /** overlay 持久化：300ms 去抖（滑动连做合并写；单 job 串行天然防乱序）。 */
+    private var overlayPersistJob: Job? = null
+
+    private fun scheduleOverlayPersist() {
+        val snapshot = sessionOverlay
+        overlayPersistJob?.cancel()
+        overlayPersistJob = scope.launch {
+            delay(300)
+            runCatching { cache.kvPut(gatewayId, OVERLAY_KEY, SessionOverlay.serialize(snapshot)) }
+        }
     }
 
     init {
@@ -248,15 +257,13 @@ class AppModel(
             }
         }
         outboxJob = scope.launch {
-            c.outboxPendingCount.collect { total ->
-                // 聊天页排队提示与「未发出」气泡只看当前会话
+            // 变更序号驱动（而非条数）：PENDING→SENT 不改条数，靠条数会漏刷新
+            // （「未发出」气泡不消失/同屏与回显重复，review P2-1）
+            c.outboxChanges.collect {
                 val key = selectedSession
-                queuedCount = when {
-                    key == null -> 0
-                    total == 0 -> 0
-                    else -> runCatching { cache.loadOutbox(gatewayId).count { it.sessionKey == key } }
-                        .getOrDefault(0)
-                }
+                queuedCount = if (key == null) 0 else runCatching {
+                    cache.loadOutbox(gatewayId).count { it.sessionKey == key }
+                }.getOrDefault(0)
                 refreshPendingOutbox()
             }
         }

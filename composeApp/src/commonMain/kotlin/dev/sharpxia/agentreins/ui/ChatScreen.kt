@@ -96,18 +96,23 @@ internal fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier 
     val contentRowCount = rows.size + pending.size
     val lastTextLen = (state?.entries?.lastOrNull() as? Message)?.content?.length ?: 0
     val runActive = state?.activeRunId != null
+    // 列表实际会发出的总行数：内容行 + 「加载更早」头 + 空态 + 生成中行（按数据算，
+    // 不读 layoutInfo——组合帧它可能还是上一帧的值，差一项目标偏短）
+    val totalRows = contentRowCount +
+        (if (state?.hasMoreHistory == true && contentRowCount > 0) 1 else 0) +
+        (if (contentRowCount == 0 && !runActive) 1 else 0) +
+        (if (runActive) 1 else 0)
     // 首次有内容：直接定位到底部；此后仅贴底时跟随新消息
-    LaunchedEffect(contentRowCount, lastTextLen, runActive) {
-        val count = listState.layoutInfo.totalItemsCount
-        if (count == 0) return@LaunchedEffect
+    LaunchedEffect(totalRows, lastTextLen, runActive) {
+        if (totalRows == 0) return@LaunchedEffect
         if (!initialScrollDone) {
-            listState.scrollToItem(count - 1)
+            listState.scrollToItem(totalRows - 1)
             initialScrollDone = true
             return@LaunchedEffect
         }
         val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-        if (lastVisible >= count - 2) {
-            listState.animateScrollToItem(count - 1)
+        if (lastVisible >= totalRows - 3) {
+            listState.animateScrollToItem(totalRows - 1)
         }
     }
     // 贴底检测：离开底部即亮出「查看最新」
@@ -196,8 +201,7 @@ internal fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier 
                 Surface(
                     onClick = {
                         haptics.tap()
-                        val last = contentRowCount + (if (runActive) 1 else 0)
-                        if (last > 0) scope.launch { listState.animateScrollToItem(last - 1) }
+                        if (totalRows > 0) scope.launch { listState.animateScrollToItem(totalRows - 1) }
                     },
                     shape = CircleShape,
                     color = MaterialTheme.colorScheme.surfaceContainerHighest,

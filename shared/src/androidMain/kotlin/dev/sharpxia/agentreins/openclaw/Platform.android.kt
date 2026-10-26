@@ -27,3 +27,5 @@ actual fun writeStoredConnectionJson(json: String) {
     connectionFile.parentFile?.mkdirs()
     connectionFile.writeText(json)
 }
+
+actual fun epochMs(): Long = System.currentTimeMillis()

@@ -1,0 +1,99 @@
+-- M2.5 数据基座 schema v1（ADR #5，单库四表）。
+-- 缓存是加速层不是真相源：chat.history / sessions.list 始终权威，本库随时可整库重建。
+-- 全部行带 gatewayId 列留多网关缝（A2），v1.0 恒为单网关常量（CacheStore.DEFAULT_GATEWAY_ID）。
+
+CREATE TABLE cachedSessions (
+    gatewayId TEXT NOT NULL,
+    key TEXT NOT NULL,
+    title TEXT,
+    preview TEXT,
+    updatedAtMs INTEGER,
+    unread INTEGER NOT NULL DEFAULT 0,
+    pinned INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
+    kind TEXT,
+    PRIMARY KEY (gatewayId, key)
+);
+
+replaceAllSession:
+INSERT OR REPLACE INTO cachedSessions(gatewayId, key, title, preview, updatedAtMs, unread, pinned, archived, kind)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+selectSessions:
+SELECT * FROM cachedSessions
+WHERE gatewayId = ?
+ORDER BY pinned DESC, updatedAtMs DESC;
+
+clearSessions:
+DELETE FROM cachedSessions WHERE gatewayId = ?;
+
+CREATE TABLE cachedMessages (
+    gatewayId TEXT NOT NULL,
+    sessionKey TEXT NOT NULL,
+    entryId TEXT NOT NULL,
+    ord INTEGER NOT NULL, -- 会话内递增序号，恢复时的渲染顺序
+    payload TEXT NOT NULL, -- ChatEntry JSON（与内存模型同构，A3）
+    tsMs INTEGER,
+    PRIMARY KEY (gatewayId, sessionKey, entryId)
+);
+
+replaceMessage:
+INSERT OR REPLACE INTO cachedMessages(gatewayId, sessionKey, entryId, ord, payload, tsMs)
+VALUES (?, ?, ?, ?, ?, ?);
+
+selectMessages:
+SELECT * FROM cachedMessages
+WHERE gatewayId = ? AND sessionKey = ?
+ORDER BY ord ASC;
+
+clearMessages:
+DELETE FROM cachedMessages WHERE gatewayId = ? AND sessionKey = ?;
+
+CREATE TABLE outboxCommands (
+    idempotencyKey TEXT NOT NULL,
+    gatewayId TEXT NOT NULL,
+    sessionKey TEXT NOT NULL,
+    text TEXT NOT NULL,
+    status TEXT NOT NULL, -- PENDING / SENT（待 history 退休）
+    retryCount INTEGER NOT NULL DEFAULT 0,
+    lastError TEXT,
+    createdAtMs INTEGER NOT NULL,
+    PRIMARY KEY (idempotencyKey, gatewayId)
+);
+
+insertOutboxCommand:
+INSERT OR REPLACE INTO outboxCommands(idempotencyKey, gatewayId, sessionKey, text, status, retryCount, lastError, createdAtMs)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+selectOutboxCommands:
+SELECT * FROM outboxCommands
+WHERE gatewayId = ?
+ORDER BY createdAtMs ASC, idempotencyKey ASC;
+
+selectOutboxBySession:
+SELECT * FROM outboxCommands
+WHERE gatewayId = ? AND sessionKey = ?
+ORDER BY createdAtMs ASC, idempotencyKey ASC;
+
+updateOutboxCommand:
+UPDATE outboxCommands SET status = ?, retryCount = ?, lastError = ?
+WHERE idempotencyKey = ? AND gatewayId = ?;
+
+deleteOutboxCommand:
+DELETE FROM outboxCommands WHERE idempotencyKey = ? AND gatewayId = ?;
+
+CREATE TABLE kv (
+    gatewayId TEXT NOT NULL,
+    k TEXT NOT NULL,
+    v TEXT NOT NULL,
+    PRIMARY KEY (gatewayId, k)
+);
+
+putKv:
+INSERT OR REPLACE INTO kv(gatewayId, k, v) VALUES (?, ?, ?);
+
+getKv:
+SELECT v FROM kv WHERE gatewayId = ? AND k = ?;
+
+deleteKv:
+DELETE FROM kv WHERE gatewayId = ? AND k = ?;

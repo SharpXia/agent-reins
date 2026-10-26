@@ -19,3 +19,6 @@ expect fun readStoredConnectionJson(): String?
 
 /** 持久化最近连接配置（JSON 字符串）。介质与 device seed 同级，M3 一并迁 Keychain/Keystore。 */
 expect fun writeStoredConnectionJson(json: String)
+
+/** 当前 epoch 毫秒（outbox 时间戳/限频窗口用；避免引入 kotlinx-datetime）。 */
+expect fun epochMs(): Long

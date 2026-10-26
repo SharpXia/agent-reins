@@ -3,6 +3,9 @@ package dev.sharpxia.agentreins.openclaw
 import dev.sharpxia.agentreins.AgentClient
 import dev.sharpxia.agentreins.GatewayConfig
 import dev.sharpxia.agentreins.crypto.secureRandomBytes
+import dev.sharpxia.agentreins.db.CacheStore
+import dev.sharpxia.agentreins.db.NoopCacheStore
+import dev.sharpxia.agentreins.db.SqlCacheStore
 import dev.sharpxia.agentreins.model.ApprovalRequest
 import dev.sharpxia.agentreins.model.ConversationState
 import dev.sharpxia.agentreins.model.GatewayStatus
@@ -35,20 +38,25 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
-/** 网关 RPC 失败（res.ok=false）。[hint] 携带协议约定的补救提示；[requestId] 为待批准配对请求。 */
+/**
+ * 网关 RPC 失败（res.ok=false）。[hint] 携带协议约定的补救提示；[requestId] 为待批准配对请求；
+ * [retryable]/[retryAfterMs] 为服务器错误帧的结构化重试指令（A11，驱动重连退避）。
+ */
 class GatewayRpcException(
     val code: String,
     message: String,
     val hint: String? = null,
     val requestId: String? = null,
+    val retryable: Boolean = false,
+    val retryAfterMs: Long? = null,
 ) : Exception("[$code] $message" + (hint?.let { " — $it" } ?: ""))
 
 /** connect 帧 auth 段的三种凭证；v3 签名 token 槽位与服务器 resolveSignatureToken 对齐。 */
@@ -71,8 +79,20 @@ private sealed class ConnectAuth(val authKey: String, val value: String) {
  *   经 AgentEventParser 归并为各会话 ConversationState（M2：消息流 + 工具调用卡片）
  * - sessions.send 两阶段：受理回 runId+started，回复经 agent 事件流（snapshot 全量）；
  *   run 终局后自动 chat.history 回填，补齐事件流没有的工具参数/结果
+ *
+ * M2.5 数据基座集成：
+ * - 会话列表全量分页（hasMore/nextOffset 循环）+ sessions.changed 增量刷新 + 本地缓存
+ * - 消息缓存：会话流首建即播种本地缓存（重启秒开），history 拉取成功后落库
+ * - 发送队列 outbox（A4 简化版）：断线排队、重连自动补发（同幂等键）、history 出现才退休
+ * - 连接韧性：断线指数退避重连（尊重 retryable/retryAfterMs 与 pauseReconnect）；
+ *   agent 事件 seq 缺口 → history 回填
+ * - 缓存不可用时全部能力静默降级为无缓存行为（缓存非真相源，丢失不伤在线功能）
  */
-class OpenClawClient(private val scope: CoroutineScope) : AgentClient {
+class OpenClawClient(
+    private val scope: CoroutineScope,
+    private val cache: CacheStore = NoopCacheStore,
+    private val gatewayId: String = SqlCacheStore.DEFAULT_GATEWAY_ID,
+) : AgentClient {
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -95,6 +115,34 @@ class OpenClawClient(private val scope: CoroutineScope) : AgentClient {
 
     private var nextId = 0
 
+    // ---- M2.5：连接韧性与发送队列状态 ----
+
+    /** 用户/上层显式断开：置位后重连 supervisor 退出；connect() 入口清零。 */
+    private var explicitClose = false
+    /** 网关维护标志（hello/shutdown 携带 pauseReconnect）：为 true 停止自动重连。 */
+    private var pauseReconnect = false
+    private var reconnectAttempt = 0
+    private var reconnectJob: Job? = null
+    private var pauseReevalJob: Job? = null
+    /** 上次成功连接的配置（内部重连目标）；hello 成功后以 deviceToken 更新。 */
+    private var lastConfig: GatewayConfig? = null
+    /** 服务器错误帧给出的重试指令（下次退避优先采用）。 */
+    private var lastRetryAfterMs: Long? = null
+    /** per-session history 回填限频（seq 缺口连发时不打爆网关）。 */
+    private val lastBackfillAtMs = mutableMapOf<String, Long>()
+    private val seqTracker = SeqTracker()
+
+    /** agent 事件活动流（sessionKey）：供 UI 做非当前会话的未读计数（A8）。 */
+    private val _sessionActivity = MutableSharedFlow<String>(extraBufferCapacity = 64)
+    val sessionActivity: SharedFlow<String> = _sessionActivity.asSharedFlow()
+
+    /** 待补发队列条数（PENDING+SENT 未退休）。 */
+    private val _outboxPendingCount = MutableStateFlow(0)
+    val outboxPendingCount: StateFlow<Int> = _outboxPendingCount.asStateFlow()
+
+    /** 客户端侧未读计数（per-device UI 态，网关值只在冷启动播种）。 */
+    private val localUnread = mutableMapOf<String, Int>()
+
     /** 最近一次 operator hello-ok 下发的设备凭证（配对成功后可免共享 token 直连）。 */
     var deviceToken: String? = null
         private set
@@ -102,25 +150,40 @@ class OpenClawClient(private val scope: CoroutineScope) : AgentClient {
     private val _approvals = MutableSharedFlow<ApprovalRequest>(extraBufferCapacity = 16)
     override val approvals: SharedFlow<ApprovalRequest> = _approvals.asSharedFlow()
 
+    init {
+        // 冷启动播种缓存列表：collector 挂上（StateFlow 立即回放）即见上次列表，不闪空
+        if (cache.available) {
+            runCatching { cache.loadSessions(gatewayId) }.getOrNull()
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { _sessions.value = it }
+        }
+    }
+
     override suspend fun conversation(sessionKey: String): StateFlow<ConversationState> =
         mutex.withLock { flowForUnlocked(sessionKey) }.asStateFlow()
 
     /**
      * 回填会话历史（进入会话页时调用，重置分页）：offset=0 取最新 [limit] 条；
      * 与事件态合并（参数/结果来自 transcript）。offset 语义已实测：从最新往前的偏移。
+     * 拉取失败时静默保留会话流现有内容（本地缓存播种，离线可读），重连周期自动刷新。
      */
     override suspend fun loadHistory(sessionKey: String, limit: Int) {
-        val res = rpc(
-            "chat.history",
-            buildJsonObject {
-                put("sessionKey", sessionKey); put("limit", limit); put("offset", 0)
-            },
-        )
+        val res = try {
+            rpc(
+                "chat.history",
+                buildJsonObject {
+                    put("sessionKey", sessionKey); put("limit", limit); put("offset", 0)
+                },
+            )
+        } catch (e: Exception) {
+            return
+        }
         val flow = mutex.withLock { flowForUnlocked(sessionKey) }
         flow.value = AgentEventParser.mergeHistory(flow.value, AgentEventParser.mapHistory(sessionKey, res))
         mutex.withLock {
             historyOffsets[sessionKey] = if (res.bool("hasMore") == true) limit else 0
         }
+        afterHistoryFetched(sessionKey, res)
     }
 
     /** 向上翻页懒加载：按已加载数 offset 取更早一页，前插去重。hasMore 见 [ConversationState]. */
@@ -136,6 +199,7 @@ class OpenClawClient(private val scope: CoroutineScope) : AgentClient {
         val flow = mutex.withLock { flowForUnlocked(sessionKey) }
         flow.value = AgentEventParser.mergeHistoryOlder(flow.value, AgentEventParser.mapHistory(sessionKey, res))
         mutex.withLock { historyOffsets[sessionKey] = offset + limit }
+        afterHistoryFetched(sessionKey, res)
     }
 
     /**
@@ -156,10 +220,66 @@ class OpenClawClient(private val scope: CoroutineScope) : AgentClient {
         mutex.withLock {
             historyOffsets[sessionKey] = if (res.bool("hasMore") == true) fetchLimit else 0
         }
+        afterHistoryFetched(sessionKey, res)
+    }
+
+    /** history 拉取成功的公共后置：消息落库 + outbox 退休对账（该 turn 进 transcript 才退休）。 */
+    private fun afterHistoryFetched(sessionKey: String, res: JsonObject) {
+        if (cache.available) {
+            scope.launch { persistConversation(sessionKey) }
+        }
+        retireFromHistory(sessionKey, res)
+    }
+
+    private suspend fun persistConversation(sessionKey: String) {
+        val flow = mutex.withLock { flowForUnlocked(sessionKey) }
+        runCatching { cache.saveMessages(gatewayId, sessionKey, flow.value.entries) }
+            .onFailure { /* 缓存层故障不伤在线功能 */ }
+    }
+
+    /** outbox 对账：history 里 user 消息的 idempotencyKey 命中 → 退休（删除）。 */
+    private fun retireFromHistory(sessionKey: String, res: JsonObject) {
+        if (!cache.available) return
+        val keys = res["messages"]?.jsonArray
+            ?.mapNotNull { m -> (m as? JsonObject)?.takeIf { it.str("role") == "user" }?.str("idempotencyKey") }
+            .orEmpty()
+        if (keys.isEmpty()) return
+        val retired = cache.loadOutbox(gatewayId).filter {
+            it.sessionKey == sessionKey && Outbox.shouldRetire(it, keys)
+        }
+        retired.forEach { cache.deleteOutbox(it.idempotencyKey, gatewayId) }
+        if (retired.isNotEmpty()) refreshOutboxCount()
     }
 
     override suspend fun connect(config: GatewayConfig) {
-        disconnect()
+        // 旧连接收尾：先停重连 supervisor 与维护复评，再拆传输层；explicitClose 全程置位防误触发
+        explicitClose = true
+        reconnectJob?.cancel()
+        reconnectJob = null
+        pauseReevalJob?.cancel()
+        pauseReevalJob = null
+        teardownTransport()
+        explicitClose = false
+        pauseReconnect = false
+        reconnectAttempt = ReconnectPolicy.RESET_ATTEMPT
+        seqTracker.reset()
+        lastRetryAfterMs = null
+        _status.value = GatewayStatus.Connecting
+        connectOnce(config)
+        lastConfig = config.copy(
+            deviceToken = deviceToken ?: config.deviceToken,
+            bootstrapToken = if (deviceToken != null) null else config.bootstrapToken,
+        )
+        // 连接成功后常驻重连 supervisor：观察 wsJob 结束 → 指数退避重试
+        reconnectJob = scope.launch { reconnectLoop() }
+    }
+
+    /**
+     * 单次连接（含扫码配对两腿）：hello 成功即拉会话列表并补发队列。
+     * 抛错由调用方处理（外层 connect 抛给上层；重连循环吞掉继续退避）。
+     */
+    private suspend fun connectOnce(config: GatewayConfig) {
+        teardownTransport()
         _status.value = GatewayStatus.Connecting
 
         val client = HttpClient { install(WebSockets) }
@@ -193,18 +313,519 @@ class OpenClawClient(private val scope: CoroutineScope) : AgentClient {
 
         try {
             withTimeout(if (config.bootstrapToken != null) 160_000L else CONNECT_TIMEOUT_MS) { hello.await() }
-            refreshSessions()
         } catch (e: Exception) {
+            if (e is GatewayRpcException) {
+                if (e.retryable) lastRetryAfterMs = e.retryAfterMs
+            }
             _status.value = GatewayStatus.Error(e.message)
             throw e
         }
-        // 远端关闭时把 Connected 态翻成 Error
-        scope.launch {
-            wsJob?.join()
-            if (_status.value is GatewayStatus.Connected) {
-                _status.value = GatewayStatus.Error("connection closed by gateway")
+        lastRetryAfterMs = null
+        refreshSessions()
+        scheduleFlush()
+    }
+
+    /**
+     * 断线自动重连循环（A11）：仅对「成功连过之后」的意外断线生效（explicitClose /
+     * 从未连接成功则直接退出）。指数退避 + 服务器 retryAfterMs 指令优先 + 尊重
+     * pauseReconnect；重连目标恒为上次成功配置（多地址 failover 是上层 connect() 职责）。
+     */
+    private suspend fun reconnectLoop() {
+        while (!explicitClose) {
+            val job = wsJob ?: return
+            job.join()
+            if (explicitClose) return
+            if (_status.value is GatewayStatus.Connected) return
+            val cfg = lastConfig ?: return
+            reconnectAttempt += 1
+            val decision = ReconnectPolicy.decisionFor(reconnectAttempt, lastRetryAfterMs, pauseReconnect)
+            if (decision.stop || decision.delayMs == null) {
+                val paused = pauseReconnect
+                _status.value = GatewayStatus.Error(
+                    if (paused) "网关维护中（pauseReconnect），自动重连已暂停" else "连接已断开，自动重连已停止",
+                )
+                if (paused) {
+                    // 维护窗口兜底（P2）：60s 后复评一次——网关重启完成即可自动恢复；
+                    // 若仍处于维护（重连 hello 又置位）则继续按 pauseReconnect 停止。
+                    // job 存字段并在 connect/disconnect 一并取消（P3-b：防脱管 supervisor 双开互拆）
+                    pauseReevalJob?.cancel()
+                    pauseReevalJob = scope.launch {
+                        delay(PAUSE_REEVALUATE_DELAY_MS)
+                        if (!explicitClose && _status.value !is GatewayStatus.Connected) {
+                            pauseReconnect = false
+                            reconnectAttempt = ReconnectPolicy.RESET_ATTEMPT
+                            reconnectJob = scope.launch { reconnectLoop() }
+                        }
+                    }
+                }
+                return
+            }
+            delay(decision.delayMs)
+            if (explicitClose) return
+            try {
+                connectOnce(cfg)
+                reconnectAttempt = ReconnectPolicy.RESET_ATTEMPT
+                seqTracker.reset() // seq 空间随新连接归零；活跃会话随后逐个回填补帧
+                scope.launch {
+                    mutex.withLock { conversations.keys.toList() }.forEach { key ->
+                        runCatching { reloadHistoryPreservingPages(key, HISTORY_PAGE_LIMIT) }
+                    }
+                }
+            } catch (e: GatewayRpcException) {
+                if (e.retryable) lastRetryAfterMs = e.retryAfterMs
+                if (wsJob == null) return // connectOnce 已把传输层拆干净，重连无目标
+            } catch (e: Exception) {
+                if (wsJob == null) return
             }
         }
+    }
+
+    /** 拆传输层（不置 explicitClose、不动 status）：ws/http/pending/outboard 缓冲全清。 */
+    private suspend fun teardownTransport() {
+        wsJob?.cancel()
+        wsJob = null
+        http?.close()
+        http = null
+        // 断线期间排队的陈旧 req 不得重放到新连接（重放会以新 id 关联旧请求）
+        while (outbound.tryReceive().isSuccess) Unit
+        mutex.withLock {
+            pending.values.forEach { it.cancel() }
+            pending.clear()
+            runsByKey.clear()
+            // conversations 保留：重连后同 key 的 StateFlow 继续复用，UI 无需重新订阅
+        }
+    }
+
+    override suspend fun disconnect() {
+        explicitClose = true
+        reconnectJob?.cancel()
+        reconnectJob = null
+        pauseReevalJob?.cancel()
+        pauseReevalJob = null
+        teardownTransport()
+        _status.value = GatewayStatus.Disconnected
+    }
+
+    private suspend fun rpc(method: String, params: JsonObject = JsonObject(emptyMap())): JsonObject =
+        withTimeout(RPC_TIMEOUT_MS) {
+            val id = "ar-${nextId()}"
+            val deferred = CompletableDeferred<JsonObject>()
+            mutex.withLock { pending[id] = deferred }
+            try {
+                outbound.send(
+                    buildJsonObject {
+                        put("type", "req"); put("id", id); put("method", method)
+                        put("params", params)
+                    }.toString(),
+                )
+            } catch (e: Throwable) {
+                mutex.withLock { pending.remove(id) } // 断线期间发送失败：不留悬挂 pending
+                throw e
+            }
+            try {
+                deferred.await()
+            } catch (e: Throwable) {
+                mutex.withLock { pending.remove(id) } // 超时/取消：条目不可复用，防陈旧响应误配
+                throw e
+            }
+        }
+
+    // ---- 发送队列（A4 文本简化版） ----
+
+    /**
+     * 发送（M2.5 outbox 语义）：入队 + 立即尝试。在线且成功 → SENT + 乐观回显（M2 同款
+     * runId 回显语义）；离线/失败/超时 → 保持 PENDING（消息不静默丢失），重连后自动补发
+     * （同幂等键）。存储不可用（Noop）时退回 M2 直发语义——没有队列就不谎报"已排队"，
+     * 失败透传真实错误（P1：静默丢失比诚实失败更糟）。
+     * @throws GatewayRpcException code=OUTBOX_LIMIT（限额拒绝）或 SEND_QUEUED（已排队待补发）
+     */
+    override suspend fun send(sessionId: String, content: String) {
+        if (!cache.available) {
+            sendDirect(sessionId, content)
+            return
+        }
+        val now = epochMs()
+        val existing = cache.loadOutbox(gatewayId)
+        Outbox.checkLimit(existing, now)?.let { throw GatewayRpcException("OUTBOX_LIMIT", it) }
+        val cmd = Outbox.Command(
+            idempotencyKey = Outbox.newKey(now, secureRandomBytes(4).hexString()),
+            sessionKey = sessionId,
+            text = content,
+            createdAtMs = now,
+        )
+        cache.upsertOutbox(cmd, gatewayId)
+        refreshOutboxCount()
+        val connected = _status.value is GatewayStatus.Connected
+        val accepted = connected && sendOutboxCommand(cmd)
+        if (!accepted) {
+            // 已连接但本轮失败（如 RPC 超时）：安排延迟补发，不必等下次重连
+            if (_status.value is GatewayStatus.Connected) scheduleFlush(SEND_RETRY_DELAY_MS)
+            throw GatewayRpcException("SEND_QUEUED", "发送失败，已进入发送队列（重连后自动补发）")
+        }
+    }
+
+    /** M2 直发语义（缓存不可用时的降级路径）：成功乐观回显，失败抛真实错误。 */
+    private suspend fun sendDirect(sessionId: String, content: String) {
+        val res = rpc(
+            "sessions.send",
+            buildJsonObject {
+                put("key", sessionId)
+                put("message", content)
+                put("timeoutMs", 60_000)
+            },
+        )
+        val runId = res.str("runId") ?: throw GatewayRpcException("PROTOCOL", "sessions.send: no runId")
+        mutex.withLock { runsByKey[runId] = sessionId }
+        val flow = mutex.withLock { flowForUnlocked(sessionId) }
+        flow.value = flow.value.copy(
+            entries = flow.value.entries + Message(
+                id = "${AgentEventParser.LOCAL_ECHO_PREFIX}$runId",
+                sessionId = sessionId,
+                role = Message.Role.USER,
+                content = content,
+            ),
+        )
+    }
+
+    /** 单条补发：成功置 SENT 并乐观回显；结果不明/失败保持 PENDING、重试计数+1。 */
+    private suspend fun sendOutboxCommand(cmd: Outbox.Command): Boolean {
+        return try {
+            val res = rpc(
+                "sessions.send",
+                buildJsonObject {
+                    put("key", cmd.sessionKey)
+                    put("message", cmd.text)
+                    put("timeoutMs", 60_000)
+                    put("idempotencyKey", cmd.idempotencyKey)
+                },
+            )
+            val runId = res.str("runId") ?: throw GatewayRpcException("PROTOCOL", "sessions.send: no runId")
+            mutex.withLock { runsByKey[runId] = cmd.sessionKey }
+            cache.upsertOutbox(Outbox.afterSendAttempt(cmd, ok = true, error = null), gatewayId)
+            // 乐观回显（M2 语义）：id 带 runId，历史回填时由 mergeHistory 对账去重
+            val flow = mutex.withLock { flowForUnlocked(cmd.sessionKey) }
+            flow.value = flow.value.copy(
+                entries = flow.value.entries + Message(
+                    id = "${AgentEventParser.LOCAL_ECHO_PREFIX}$runId",
+                    sessionId = cmd.sessionKey,
+                    role = Message.Role.USER,
+                    content = cmd.text,
+                ),
+            )
+            refreshOutboxCount()
+            true
+        } catch (e: Exception) {
+            cache.upsertOutbox(Outbox.afterSendAttempt(cmd, ok = false, error = e.message), gatewayId)
+            refreshOutboxCount()
+            false
+        }
+    }
+
+    /** 重连后补发：PENDING 优先于 SENT，FIFO；断连即停（剩余下轮再补）。 */
+    private suspend fun flushOutbox() {
+        val cmds = Outbox.flushOrder(cache.loadOutbox(gatewayId))
+        if (cmds.isEmpty()) return
+        for (cmd in cmds) {
+            if (_status.value !is GatewayStatus.Connected || explicitClose) break
+            sendOutboxCommand(cmd)
+        }
+        refreshOutboxCount()
+    }
+
+    /**
+     * 补发排程（单飞）：连接成功与发送失败共用，防双 flush 并发重复回显。
+     * 失败重试用退避间隔，连发合并为一次。
+     */
+    private var flushJob: Job? = null
+
+    private fun scheduleFlush(delayMs: Long = 0) {
+        if (flushJob?.isActive == true) return
+        flushJob = scope.launch {
+            if (delayMs > 0) delay(delayMs)
+            flushOutbox()
+        }
+    }
+
+    private fun refreshOutboxCount() {
+        _outboxPendingCount.value = if (cache.available) cache.loadOutbox(gatewayId).size else 0
+    }
+
+    override suspend fun respondApproval(requestId: String, approved: Boolean) {
+        // M3 接入 exec.approval.* 方法族；M1 仅保留接缝
+        throw GatewayRpcException("UNSUPPORTED", "approval 流 M3 实现")
+    }
+
+    /** 仅供已持有 [mutex] 的调用方使用——kotlinx Mutex 不可重入，嵌套 withLock 自死锁。
+     *  首建时播种本地缓存（重启秒开；缓存非真相源，随后的 history 拉取权威覆盖）。 */
+    private fun flowForUnlocked(sessionKey: String): MutableStateFlow<ConversationState> =
+        conversations.getOrPut(sessionKey) {
+            val cached = if (cache.available) {
+                runCatching { cache.loadMessages(gatewayId, sessionKey) }.getOrDefault(emptyList())
+            } else {
+                emptyList()
+            }
+            MutableStateFlow(
+                ConversationState(
+                    sessionKey,
+                    entries = cached,
+                    hasMoreHistory = cached.size >= HISTORY_PAGE_LIMIT,
+                ),
+            )
+        }
+
+    // ---- 会话列表：全量分页 + 增量 + 缓存 ----
+
+    /**
+     * sessions.list 全量分页拉取（A6）：hasMore/nextOffset 循环到尽。
+     * 成功后合并本地未读计数、写缓存；失败静默保留现有列表（缓存/上次值）。
+     */
+    suspend fun refreshSessions() {
+        val all = mutableListOf<Session>()
+        var offset = 0L
+        while (true) {
+            val res = try {
+                rpc(
+                    "sessions.list",
+                    buildJsonObject {
+                        put("sortBy", "activity")
+                        put("limit", SessionListMapper.PAGE_SIZE)
+                        put("offset", offset)
+                    },
+                )
+            } catch (e: Exception) {
+                return
+            }
+            val page = SessionListMapper.parsePage(res)
+            all += page.sessions
+            if (!page.hasMore) break
+            val next = page.nextOffset ?: break // hasMore 但无游标：防协议异常死循环
+            if (next <= offset) break
+            offset = next
+            if (all.size > MAX_SESSIONS) break // 硬护栏
+        }
+        _sessions.value = SessionListMapper.merge(all, emptyList(), keepMissing = false)
+            .map { s -> localUnread[s.id]?.let { s.copy(unread = it) } ?: s }
+        if (cache.available) runCatching { cache.saveSessions(gatewayId, _sessions.value) }
+    }
+
+    /** sessions.changed 增量（A6）：800ms 去抖合并连发事件，整表重取 + 缓存合并。 */
+    private fun scheduleSessionsRefresh() {
+        if (sessionsRefreshJob?.isActive == true) return
+        sessionsRefreshJob = scope.launch {
+            delay(SESSIONS_REFRESH_DEBOUNCE_MS)
+            runCatching { refreshSessions() }
+        }
+    }
+
+    private var sessionsRefreshJob: Job? = null
+
+    /** UI 选中会话即清未读（本地计数归零 + 列表更新 + 缓存同步）。 */
+    fun clearUnread(sessionKey: String) {
+        localUnread.remove(sessionKey)
+        mutateSession(sessionKey) { it.copy(unread = 0) }
+    }
+
+    /** 非当前会话收到 agent 事件 → 未读 +1（A8 叠加）。由 AppModel 判定「非当前」后调用。 */
+    fun incrementUnread(sessionKey: String) {
+        val current = _sessions.value.firstOrNull { it.id == sessionKey }?.unread ?: 0
+        localUnread[sessionKey] = (localUnread[sessionKey] ?: current) + 1
+        mutateSession(sessionKey) { it.copy(unread = localUnread[sessionKey] ?: 0) }
+    }
+
+    private fun mutateSession(sessionKey: String, transform: (Session) -> Session) {
+        _sessions.value = _sessions.value.map { if (it.id == sessionKey) transform(it) else it }
+        schedulePersistSessions() // 未读随 agent 事件高频变化：列表落库去抖，防每帧全表重写
+    }
+
+    private var sessionsPersistJob: Job? = null
+
+    private fun schedulePersistSessions() {
+        if (sessionsPersistJob?.isActive == true) return
+        sessionsPersistJob = scope.launch {
+            delay(SESSIONS_PERSIST_DEBOUNCE_MS)
+            if (cache.available) runCatching { cache.saveSessions(gatewayId, _sessions.value) }
+        }
+    }
+
+    // ---- 事件路由 ----
+
+    private suspend fun route(obj: JsonObject) {
+        when (obj.str("type")) {
+            "res" -> {
+                val id = obj.str("id") ?: return
+                val deferred = mutex.withLock { pending.remove(id) } ?: return
+                if (obj["ok"]?.jsonPrimitive?.contentOrNull == "true") {
+                    deferred.complete(obj["payload"]?.jsonObject ?: JsonObject(emptyMap()))
+                } else {
+                    val err = obj["error"]?.jsonObject
+                    val details = err?.get("details")?.jsonObject
+                    deferred.completeExceptionally(
+                        GatewayRpcException(
+                            err?.str("code") ?: "UNKNOWN",
+                            err?.str("message") ?: "rpc failed",
+                            hint = details?.str("requestId"),
+                            retryable = err?.bool("retryable") ?: false,
+                            retryAfterMs = err?.long("retryAfterMs") ?: details?.long("retryAfterMs"),
+                        ),
+                    )
+                }
+            }
+            "event" -> {
+                // seq 缺口检测（A10 简化）：帧级 seq 是连接级全局序号（M1 录制实锤，非
+                // per-session），且对**全部事件帧**连续计数——只在 agent 分支观察会把
+                // sessions.changed 等穿插帧误判成缺口，故在路由层统一喂入。
+                // 缺口 = 丢帧 → 全部活跃会话 history 回填（限频防打爆）。
+                val gap = seqTracker.observe(FRAME_SEQ_TRACKER_KEY, obj.long("seq"))
+                if (gap > 0) {
+                    mutex.withLock { conversations.keys.toList() }.forEach { stale ->
+                        scheduleBackfill(stale, BACKFILL_RATE_LIMIT_MS)
+                    }
+                }
+                handleEvent(obj.str("event") ?: return, obj["payload"]?.jsonObject ?: JsonObject(emptyMap()), obj)
+            }
+        }
+    }
+
+    private suspend fun handleEvent(event: String, payload: JsonObject, frame: JsonObject) {
+        when (event) {
+            "agent" -> handleAgentEvent(payload)
+            "sessions.changed" -> scheduleSessionsRefresh()
+            "shutdown" -> {
+                // 网关维护/重启：暂停自动重连（上层 connect() 或回前台可恢复）
+                pauseReconnect = payload.bool("pauseReconnect") ?: true
+            }
+            else -> Unit // M3 扩展 session.approval
+        }
+    }
+
+    private suspend fun handleAgentEvent(payload: JsonObject) {
+        val decoded = AgentEventParser.decode(payload) ?: return
+        // operator 连接收到全量广播（含活跃 subagent），按 sessionKey 分流到各自会话状态
+        val key = payload.str("sessionKey") ?: mutex.withLock { runsByKey[payload.str("runId")] } ?: return
+        val flow = mutex.withLock { flowForUnlocked(key) }
+        flow.value = AgentEventParser.apply(flow.value, decoded)
+        _sessionActivity.emit(key)
+        // run 终局后回填 transcript：工具参数/结果只在 chat.history 里，事件态仅含耗时
+        if (decoded is AgentEventParser.AgentStreamEvent.Lifecycle && decoded.phase == "end") {
+            scheduleBackfill(key, HISTORY_RELOAD_DELAY)
+        }
+    }
+
+    /** history 回填排程：限频窗口内合并连发请求；[delayMs] 覆盖限频（终局回填必须执行）。 */
+    private fun scheduleBackfill(sessionKey: String, delayMs: Long) {
+        scope.launch {
+            delay(delayMs)
+            val now = epochMs()
+            val last = lastBackfillAtMs[sessionKey] ?: 0L
+            if (now - last < BACKFILL_RATE_LIMIT_MS) return@launch
+            lastBackfillAtMs[sessionKey] = now
+            runCatching { reloadHistoryPreservingPages(sessionKey, HISTORY_PAGE_LIMIT) }
+        }
+    }
+
+    /**
+     * 打开一条 WS 会话走完 challenge → connect → hello-ok，返回 hello payload。
+     * [holdOpen]=true 时完成 hello 后进入常驻收发循环（最终连接）；false 时拿到
+     * hello 即返回，会话随即关闭（配对腿）。
+     */
+    private suspend fun openSession(
+        client: HttpClient,
+        url: String,
+        identity: DeviceIdentity,
+        hello: CompletableDeferred<JsonObject>,
+        role: String,
+        clientMode: String,
+        scopes: List<String>,
+        auth: ConnectAuth,
+        holdOpen: Boolean,
+    ): JsonObject {
+        var helloPayload: JsonObject? = null
+        client.webSocket(urlString = url) {
+            // 1) 等服务器 connect.challenge（nonce/ts，签名原料）
+            var challenge: JsonObject? = null
+            while (challenge == null) {
+                val frame = incoming.receive()
+                if (frame !is Frame.Text) continue
+                val obj = json.parseToJsonElement(frame.readText()).jsonObject
+                if (obj.str("event") == "connect.challenge") {
+                    challenge = obj["payload"]?.jsonObject
+                }
+            }
+            val ch = challenge!!
+
+            // 2) 发 connect（设备签名）
+            val connId = "ar-${nextId()}"
+            send(Frame.Text(connectFrame(connId, identity, ch, role, clientMode, scopes, auth).toString()))
+
+            // 3) 等 hello-ok
+            while (helloPayload == null) {
+                val frame = incoming.receive()
+                if (frame !is Frame.Text) continue
+                val obj = json.parseToJsonElement(frame.readText()).jsonObject
+                if (obj.str("type") != "res" || obj.str("id") != connId) continue
+                if (obj["ok"]?.jsonPrimitive?.contentOrNull == "true") {
+                    helloPayload = obj["payload"]?.jsonObject
+                } else {
+                    val err = obj["error"]?.jsonObject
+                    val details = err?.get("details")?.jsonObject
+                    val message = err?.str("message") ?: "connect rejected"
+                    val requestId = details?.str("requestId")
+                    throw GatewayRpcException(
+                        err?.str("code") ?: "UNKNOWN",
+                        message,
+                        hint = when {
+                            requestId != null ->
+                                "待批准设备 requestId=$requestId，owner 执行 openclaw devices approve"
+                            message.contains("setup code") ->
+                                "setup code 已失效或已使用，请重新执行 openclaw qr 生成"
+                            else -> null
+                        },
+                        requestId = requestId,
+                        retryable = err?.bool("retryable") ?: false,
+                        retryAfterMs = err?.long("retryAfterMs") ?: details?.long("retryAfterMs"),
+                    )
+                }
+            }
+            val payload = helloPayload!!
+
+            if (role == "operator") {
+                val granted = payload["auth"]?.jsonObject
+                    ?.get("scopes")?.jsonArray
+                    ?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                    .orEmpty()
+                if (!granted.containsAll(REQUIRED_SCOPES)) {
+                    throw GatewayRpcException(
+                        "FORBIDDEN",
+                        "granted scopes insufficient: $granted（纯 token 连接会被清空 scope，需设备配对）",
+                    )
+                }
+                payload["auth"]?.jsonObject?.str("deviceToken")?.let { deviceToken = it }
+                // 网关维护标志：hello 明示 pauseReconnect 时停自动重连（A11）
+                if (payload.bool("pauseReconnect") == true) pauseReconnect = true
+            }
+            if (!holdOpen) return@webSocket
+
+            hello.complete(payload)
+            _status.value = GatewayStatus.Connected(payload["server"]?.jsonObject?.str("version"))
+
+            launch {
+                while (true) {
+                    val text = outbound.receive()
+                    send(Frame.Text(text))
+                }
+            }
+
+            // 4) 接收主循环
+            while (true) {
+                val frame = incoming.receive()
+                when (frame) {
+                    is Frame.Ping -> send(Frame.Pong(frame.data))
+                    is Frame.Text -> route(json.parseToJsonElement(frame.readText()).jsonObject)
+                    else -> Unit
+                }
+            }
+        }
+        return helloPayload ?: error("session closed before hello")
     }
 
     /**
@@ -255,222 +876,6 @@ class OpenClawClient(private val scope: CoroutineScope) : AgentClient {
             role = "operator", clientMode = "ui", scopes = REQUIRED_SCOPES,
             auth = ConnectAuth.Device(operatorToken), holdOpen = true,
         )
-    }
-
-    /**
-     * 打开一条 WS 会话走完 challenge → connect → hello-ok，返回 hello payload。
-     * [holdOpen]=true 时完成 hello 后进入常驻收发循环（最终连接）；false 时拿到
-     * hello 即返回，会话随即关闭（配对腿）。
-     */
-    private suspend fun openSession(
-        client: HttpClient,
-        url: String,
-        identity: DeviceIdentity,
-        hello: CompletableDeferred<JsonObject>,
-        role: String,
-        clientMode: String,
-        scopes: List<String>,
-        auth: ConnectAuth,
-        holdOpen: Boolean,
-    ): JsonObject {
-        var helloPayload: JsonObject? = null
-        client.webSocket(urlString = url) {
-            // 1) 等服务器 connect.challenge（nonce/ts，签名原料）
-            var challenge: JsonObject? = null
-            while (challenge == null) {
-                val frame = incoming.receive()
-                if (frame !is Frame.Text) continue
-                val obj = json.parseToJsonElement(frame.readText()).jsonObject
-                if (obj.str("event") == "connect.challenge") {
-                    challenge = obj["payload"]?.jsonObject
-                }
-            }
-            val ch = challenge!!
-
-            // 2) 发 connect（设备签名）
-            val connId = "ar-${nextId()}"
-            send(Frame.Text(connectFrame(connId, identity, ch, role, clientMode, scopes, auth).toString()))
-
-            // 3) 等 hello-ok
-            while (helloPayload == null) {
-                val frame = incoming.receive()
-                if (frame !is Frame.Text) continue
-                val obj = json.parseToJsonElement(frame.readText()).jsonObject
-                if (obj.str("type") != "res" || obj.str("id") != connId) continue
-                if (obj["ok"]?.jsonPrimitive?.contentOrNull == "true") {
-                    helloPayload = obj["payload"]?.jsonObject
-                } else {
-                    val err = obj["error"]?.jsonObject
-                    val message = err?.str("message") ?: "connect rejected"
-                    val requestId = err?.get("details")?.jsonObject?.str("requestId")
-                    throw GatewayRpcException(
-                        err?.str("code") ?: "UNKNOWN",
-                        message,
-                        hint = when {
-                            requestId != null ->
-                                "待批准设备 requestId=$requestId，owner 执行 openclaw devices approve"
-                            message.contains("setup code") ->
-                                "setup code 已失效或已使用，请重新执行 openclaw qr 生成"
-                            else -> null
-                        },
-                        requestId = requestId,
-                    )
-                }
-            }
-            val payload = helloPayload!!
-
-            if (role == "operator") {
-                val granted = payload["auth"]?.jsonObject
-                    ?.get("scopes")?.jsonArray
-                    ?.mapNotNull { it.jsonPrimitive.contentOrNull }
-                    .orEmpty()
-                if (!granted.containsAll(REQUIRED_SCOPES)) {
-                    throw GatewayRpcException(
-                        "FORBIDDEN",
-                        "granted scopes insufficient: $granted（纯 token 连接会被清空 scope，需设备配对）",
-                    )
-                }
-                payload["auth"]?.jsonObject?.str("deviceToken")?.let { deviceToken = it }
-            }
-            if (!holdOpen) return@webSocket
-
-            hello.complete(payload)
-            _status.value = GatewayStatus.Connected(payload["server"]?.jsonObject?.str("version"))
-
-            launch {
-                while (true) {
-                    val text = outbound.receive()
-                    send(Frame.Text(text))
-                }
-            }
-
-            // 4) 接收主循环
-            while (true) {
-                val frame = incoming.receive()
-                when (frame) {
-                    is Frame.Ping -> send(Frame.Pong(frame.data))
-                    is Frame.Text -> route(json.parseToJsonElement(frame.readText()).jsonObject)
-                    else -> Unit
-                }
-            }
-        }
-        return helloPayload ?: error("session closed before hello")
-    }
-
-    override suspend fun disconnect() {
-        wsJob?.cancel()
-        wsJob = null
-        http?.close()
-        http = null
-        mutex.withLock {
-            pending.values.forEach { it.cancel() }
-            pending.clear()
-            runsByKey.clear()
-            // conversations 保留：重连后同 key 的 StateFlow 继续复用，UI 无需重新订阅
-        }
-        _status.value = GatewayStatus.Disconnected
-    }
-
-    private suspend fun rpc(method: String, params: JsonObject = JsonObject(emptyMap())): JsonObject =
-        withTimeout(RPC_TIMEOUT_MS) {
-            val id = "ar-${nextId()}"
-            val deferred = CompletableDeferred<JsonObject>()
-            mutex.withLock { pending[id] = deferred }
-            outbound.send(
-                buildJsonObject {
-                    put("type", "req"); put("id", id); put("method", method)
-                    put("params", params)
-                }.toString(),
-            )
-            deferred.await()
-        }
-
-    override suspend fun send(sessionId: String, content: String) {
-        val res = rpc(
-            "sessions.send",
-            buildJsonObject {
-                put("key", sessionId)
-                put("message", content)
-                put("timeoutMs", 60_000)
-            },
-        )
-        val runId = res.str("runId") ?: throw GatewayRpcException("PROTOCOL", "sessions.send: no runId")
-        mutex.withLock { runsByKey[runId] = sessionId }
-        // 乐观回显：id 带 runId，历史回填时由 mergeHistory 对账去重
-        val flow = mutex.withLock { flowForUnlocked(sessionId) }
-        flow.value = flow.value.copy(
-            entries = flow.value.entries + Message(
-                id = "${AgentEventParser.LOCAL_ECHO_PREFIX}$runId",
-                sessionId = sessionId,
-                role = Message.Role.USER,
-                content = content,
-            ),
-        )
-    }
-
-    override suspend fun respondApproval(requestId: String, approved: Boolean) {
-        // M3 接入 exec.approval.* 方法族；M1 仅保留接缝
-        throw GatewayRpcException("UNSUPPORTED", "approval 流 M3 实现")
-    }
-
-    private suspend fun flowFor(sessionKey: String): MutableStateFlow<ConversationState> =
-        mutex.withLock { flowForUnlocked(sessionKey) }
-
-    /** 仅供已持有 [mutex] 的调用方使用——kotlinx Mutex 不可重入，嵌套 withLock 自死锁。 */
-    private fun flowForUnlocked(sessionKey: String): MutableStateFlow<ConversationState> =
-        conversations.getOrPut(sessionKey) { MutableStateFlow(ConversationState(sessionKey)) }
-
-    suspend fun refreshSessions() {
-        val res = rpc("sessions.list", buildJsonObject { put("sortBy", "activity") })
-        val rows = res["sessions"]?.jsonArray ?: return
-        _sessions.value = rows.mapNotNull { row ->
-            val o = row.jsonObject
-            val key = o.str("key") ?: return@mapNotNull null
-            Session(
-                id = key,
-                title = o.str("label") ?: o.str("displayName") ?: key.substringAfterLast(':'),
-                preview = null,
-                lastActiveAtMs = o["updatedAt"]?.jsonPrimitive?.longOrNull,
-            )
-        }
-    }
-
-    private suspend fun route(obj: JsonObject) {
-        when (obj.str("type")) {
-            "res" -> {
-                val id = obj.str("id") ?: return
-                val deferred = mutex.withLock { pending.remove(id) } ?: return
-                if (obj["ok"]?.jsonPrimitive?.contentOrNull == "true") {
-                    deferred.complete(obj["payload"]?.jsonObject ?: JsonObject(emptyMap()))
-                } else {
-                    val err = obj["error"]?.jsonObject
-                    deferred.completeExceptionally(
-                        GatewayRpcException(
-                            err?.str("code") ?: "UNKNOWN",
-                            err?.str("message") ?: "rpc failed",
-                            hint = err?.get("details")?.jsonObject?.str("requestId"),
-                        ),
-                    )
-                }
-            }
-            "event" -> handleEvent(obj.str("event") ?: return, obj["payload"]?.jsonObject ?: return)
-        }
-    }
-
-    private suspend fun handleEvent(event: String, payload: JsonObject) {
-        if (event != "agent") return // M3 扩展 session.approval / sessions.changed
-        val decoded = AgentEventParser.decode(payload) ?: return
-        // operator 连接收到全量广播（含活跃 subagent），按 sessionKey 分流到各自会话状态
-        val key = payload.str("sessionKey") ?: mutex.withLock { runsByKey[payload.str("runId")] } ?: return
-        val flow = mutex.withLock { flowForUnlocked(key) }
-        flow.value = AgentEventParser.apply(flow.value, decoded)
-        // run 终局后回填 transcript：工具参数/结果只在 chat.history 里，事件态仅含耗时
-        if (decoded is AgentEventParser.AgentStreamEvent.Lifecycle && decoded.phase == "end") {
-            scope.launch {
-                delay(HISTORY_RELOAD_DELAY)
-                runCatching { reloadHistoryPreservingPages(key, HISTORY_PAGE_LIMIT) }
-            }
-        }
     }
 
     /**
@@ -541,8 +946,9 @@ class OpenClawClient(private val scope: CoroutineScope) : AgentClient {
 
     private fun nextId(): Int = nextId++
 
-    private fun JsonObject.str(key: String): String? = this[key]?.jsonPrimitive?.contentOrNull
-    private fun JsonObject.bool(key: String): Boolean? = this[key]?.jsonPrimitive?.booleanOrNull
+    private fun JsonObject.str(key: String): String? = (this[key] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
+    private fun JsonObject.bool(key: String): Boolean? = (this[key] as? kotlinx.serialization.json.JsonPrimitive)?.booleanOrNull
+    private fun JsonObject.long(key: String): Long? = (this[key] as? kotlinx.serialization.json.JsonPrimitive)?.longOrNull
 
     private companion object {
         val REQUIRED_SCOPES = listOf("operator.read", "operator.write")
@@ -552,6 +958,20 @@ class OpenClawClient(private val scope: CoroutineScope) : AgentClient {
         const val HISTORY_RELOAD_DELAY = 2_000L
         /** 单页历史条数（进入会话初始加载与翻页共用）。 */
         const val HISTORY_PAGE_LIMIT = 50
+        /** seq 缺口回填限频窗口（缺口连发时不打爆网关；误限只损失即时性，终局回填兜底）。 */
+        const val BACKFILL_RATE_LIMIT_MS = 3_000L
+        /** 帧级 seq 全局跟踪键（连接级序号，见 handleAgentEvent 注释）。 */
+        const val FRAME_SEQ_TRACKER_KEY = "__frame_seq__"
+        /** sessions.changed 去抖窗口。 */
+        const val SESSIONS_REFRESH_DEBOUNCE_MS = 800L
+        /** 会话列表落库去抖（未读高频变化的写放大防护）。 */
+        const val SESSIONS_PERSIST_DEBOUNCE_MS = 1_000L
+        /** 已连接但发送失败后的补发延迟。 */
+        const val SEND_RETRY_DELAY_MS = 5_000L
+        /** pauseReconnect 维护窗口复评延迟。 */
+        const val PAUSE_REEVALUATE_DELAY_MS = 60_000L
+        /** 全量分页硬护栏（异常协议下防失控）。 */
+        const val MAX_SESSIONS = 5_000
         /** 扫码配对含 owner 手动 approve 的等待窗口，外层 hello 超时随之一并放宽。 */
         val PAIRING_WAIT_TIMEOUT = 150.seconds
         val PAIRING_RETRY_INTERVAL = 3.seconds

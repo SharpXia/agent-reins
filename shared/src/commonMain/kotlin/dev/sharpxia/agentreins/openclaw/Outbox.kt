@@ -69,4 +69,12 @@ object Outbox {
     fun flushOrder(cmds: List<Command>): List<Command> = cmds
         .filter { it.status == Command.Status.PENDING || it.status == Command.Status.SENT }
         .sortedWith(compareBy({ if (it.status == Command.Status.PENDING) 0 else 1 }, { it.createdAtMs }, { it.idempotencyKey }))
+
+    /**
+     * 一轮 flush 应尝试的命令：flushOrder 过滤掉本轮已尝试过的幂等键（M2.6 尾随窗口
+     * 修复的核心语义——flush 进行中新入队的命令下一轮被捞到立即补发；已失败的条目
+     * 不再原地自旋，等下次 send/reconnect 触发新一轮）。
+     */
+    fun pendingForRound(all: List<Command>, attempted: Set<String>): List<Command> =
+        flushOrder(all).filter { it.idempotencyKey !in attempted }
 }

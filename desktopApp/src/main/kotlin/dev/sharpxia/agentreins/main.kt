@@ -13,7 +13,7 @@ fun main() {
     val devUrl = System.getenv("AGENTREINS_DEV_URL")
     val devKey = System.getenv("AGENTREINS_DEV_KEY")
     val prebuilt = devUrl?.let {
-        AppModel(url = it, apiKey = devKey.orEmpty()).apply {
+        AppModel(initialUrl = it, initialApiKey = devKey.orEmpty()).apply {
             devAutoConnect = true
             devAutoSelectKey = System.getenv("AGENTREINS_DEV_SESSION") ?: "agent:main:main"
         }

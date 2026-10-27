@@ -68,16 +68,18 @@ object SessionListMapper {
     /**
      * 新列表 ⊕ 本地列表合并：fresh 行字段为准（网关权威），fresh 未覆盖的会话若仍在
      * cached 里（可能只是分页尾页未及）按 [keepMissing]=true 保留——防「翻页中断丢会话」。
-     * 排序：置顶在前，其后按 lastActiveAtMs 降序（无时间戳排最后）。
      */
     fun merge(fresh: List<Session>, cached: List<Session>, keepMissing: Boolean = true): List<Session> {
         val freshByKey = fresh.associateBy { it.id }
         val merged = fresh + (if (keepMissing) cached.filter { it.id !in freshByKey } else emptyList())
-        return merged.sortedWith(
-            compareByDescending<Session> { it.pinned }
-                .thenByDescending { it.lastActiveAtMs ?: Long.MIN_VALUE },
-        )
+        return sort(merged)
     }
+
+    /** 列表统一排序：置顶在前，其后按 lastActiveAtMs 降序（无时间戳排最后）。 */
+    fun sort(sessions: List<Session>): List<Session> = sessions.sortedWith(
+        compareByDescending<Session> { it.pinned }
+            .thenByDescending { it.lastActiveAtMs ?: Long.MIN_VALUE },
+    )
 
     /** 列表过滤：归档默认隐藏（UI 提供「显示归档」开关时再放开）。 */
     fun visibleForList(sessions: List<Session>, includeArchived: Boolean = false): List<Session> =

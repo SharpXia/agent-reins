@@ -3,6 +3,10 @@ BUNDLE_ID=dev.sharpxia.agentreins
 APP_NAME=AgentReins
 JAVA_HOME=
 
+// M2.5 SQLDelight 起静态 framework 内 SQLiter cinterop 需要 app 侧链接
+// libsqlite3（pbxproj 的 OTHER_LDFLAGS 带 $(inherited)，此处自动追加）
+OTHER_LDFLAGS = -lsqlite3
+
 // 本机覆盖文件（已被 .gitignore 忽略）：TEAM_ID（真机签名）与 JAVA_HOME
 // （Xcode GUI 不继承 shell 环境，Compile Kotlin 脚本阶段靠它注入）都写在这里。
 // include 必须在默认值之后——后写的赋值生效。

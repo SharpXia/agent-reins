@@ -13,6 +13,7 @@ import dev.sharpxia.agentreins.openclaw.ConnectionStore
 import dev.sharpxia.agentreins.openclaw.GatewayRpcException
 import dev.sharpxia.agentreins.openclaw.OpenClawClient
 import dev.sharpxia.agentreins.openclaw.Outbox
+import dev.sharpxia.agentreins.openclaw.SessionOverlay
 import dev.sharpxia.agentreins.openclaw.StoredConnection
 import dev.sharpxia.agentreins.crypto.secureRandomBytes
 import dev.sharpxia.agentreins.openclaw.epochMs
@@ -31,12 +32,14 @@ import kotlinx.coroutines.launch
  *       发送走 outbox 队列（离线排队、重连自动补发）。
  */
 class AppModel(
-    /** Dev 直连预填（desktop 壳的 AGENTREINS_DEV_* 入口）；普通构造留空，走连接页。 */
-    url: String = "",
-    apiKey: String = "",
+    /** Dev 直连预填（desktop 壳的 AGENTREINS_DEV_* 入口）；普通构造留空，走连接页。
+     *  命名注意：不能叫 url/apiKey——无 val/var 的构造参数会在 init 块与属性初始化器
+     *  作用域内遮蔽同名属性，init 的自动连接判据将永远读到空串（冷启动失联的根因）。 */
+    initialUrl: String = "",
+    initialApiKey: String = "",
 ) {
-    var url by mutableStateOf(url)
-    var apiKey by mutableStateOf(apiKey)
+    var url by mutableStateOf(initialUrl)
+    var apiKey by mutableStateOf(initialApiKey)
     /** Dev 模式：构造后立即连接（desktop 壳）。 */
     var devAutoConnect = false
     /** Dev 模式：会话列表就绪后自动打开该会话。 */
@@ -52,13 +55,16 @@ class AppModel(
         private set
     var sessions by mutableStateOf<List<Session>>(emptyList())
         private set
+    /** 当前会话发送队列待补发条数，聊天页显示排队提示。 */
+    var queuedCount by mutableStateOf(0)
+        private set
+    /** 当前会话的 PENDING 待发命令（聊天页「未发出」气泡 + 重试/删除 UI）。 */
+    var pendingOutbox by mutableStateOf<List<Outbox.Command>>(emptyList())
+        private set
     var selectedSession by mutableStateOf<String?>(null)
         private set
     /** 当前选中会话的对话流状态（聊天页唯一数据源）。 */
     var conversation by mutableStateOf<ConversationState?>(null)
-        private set
-    /** 当前会话发送队列待补发条数，聊天页显示排队提示。 */
-    var queuedCount by mutableStateOf(0)
         private set
     var busy by mutableStateOf(false)
         private set
@@ -94,19 +100,59 @@ class AppModel(
     /** 向上翻页加载中去重（防 scroll 事件连发重复请求）。 */
     private var loadingOlder = false
 
+    // ---- 会话列表本地 overlay（M2.6：pinned/archived 本地显式状态，网关同步留 M3+） ----
+    // mutableStateOf：collector 在 Default 线程写、UI 线程读写，走 snapshot 保证可见性
+    /** 网关/缓存视图（未叠 overlay 的原始列表）。 */
+    private var rawSessions by mutableStateOf<List<Session>>(emptyList())
+    /** 本地覆盖层（kv 持久化，跨重启）。 */
+    private var sessionOverlay by mutableStateOf(emptyMap<String, SessionOverlay.Entry>())
+
+    /** overlay 叠加后发布到 UI 状态（网关刷新与本地操作共用同一出口）。 */
+    private fun publishSessions() {
+        sessions = SessionOverlay.apply(rawSessions, sessionOverlay)
+    }
+
+    /** 归档/置顶（本地即时生效 + kv 持久化；离线可用）。 */
+    fun setSessionArchived(session: Session, archived: Boolean) {
+        sessionOverlay = SessionOverlay.toggled(sessionOverlay, session.id, archived = archived)
+        scheduleOverlayPersist()
+        publishSessions()
+    }
+
+    fun setSessionPinned(session: Session, pinned: Boolean) {
+        sessionOverlay = SessionOverlay.toggled(sessionOverlay, session.id, pinned = pinned)
+        scheduleOverlayPersist()
+        publishSessions()
+    }
+
+    /** overlay 持久化：300ms 去抖（滑动连做合并写；单 job 串行天然防乱序）。 */
+    private var overlayPersistJob: Job? = null
+
+    private fun scheduleOverlayPersist() {
+        val snapshot = sessionOverlay
+        overlayPersistJob?.cancel()
+        overlayPersistJob = scope.launch {
+            delay(300)
+            runCatching { cache.kvPut(gatewayId, OVERLAY_KEY, SessionOverlay.serialize(snapshot)) }
+        }
+    }
+
     init {
         // 记住上次连接：预填地址与 Key；deviceToken 是扫码配对成功后的免 token 凭证
-        runCatching { ConnectionStore.load() }.getOrNull()?.let { stored ->
-            if (this.url.isBlank()) this.url = stored.url
-            if (this.apiKey.isBlank()) this.apiKey = stored.apiKey
-            alternateUrls = stored.urls
-            deviceToken = stored.deviceToken
-            hasPairedCredential = stored.deviceToken != null
+        runCatching { ConnectionStore.load() }.getOrNull()?.let {
+            if (this.url.isBlank()) this.url = it.url
+            if (this.apiKey.isBlank()) this.apiKey = it.apiKey
+            alternateUrls = it.urls
+            deviceToken = it.deviceToken
+            hasPairedCredential = it.deviceToken != null
         }
         // 冷启动先读缓存（M2.5 验收项：断网冷启动可见上次列表；连接成功后被网关权威覆盖）
         runCatching { cache.loadSessions(gatewayId) }.getOrNull()
             ?.takeIf { it.isNotEmpty() }
-            ?.let { sessions = it }
+            ?.let { rawSessions = it }
+        // overlay（pinned/archived 本地状态）随后叠加并发布
+        sessionOverlay = SessionOverlay.parse(runCatching { cache.kvGet(gatewayId, OVERLAY_KEY) }.getOrNull())
+        publishSessions()
         // iOS 进后台 WS 必死：回前台自动用已存配置重连（显式断开除外）
         scope.launch {
             appForegroundEvents.collect {
@@ -116,11 +162,27 @@ class AppModel(
                     val connectedLike = st is GatewayStatus.Connected ||
                         st is GatewayStatus.Connecting || st is GatewayStatus.PairingPending
                     if (!connectedLike && url.isNotBlank() && (deviceToken != null || apiKey.isNotBlank())) {
+                        resetAutoRetry() // 前台事件 = 网络环境可能变化，退避计数清零重新起算
                         connect()
                     }
                 }
             }
         }
+        // 响应式重连（真机反馈：应「条件满足再连」而非定时盲试）：网络路径恢复即连。
+        // StateFlow 回放当前值——冷启动即做一次判定；此后 Wi-Fi/VPN 路径每次变化再触发。
+        scope.launch {
+            networkAvailable.collect { available ->
+                if (!available || explicitDisconnect || busy) return@collect
+                val st = status
+                val connectedLike = st is GatewayStatus.Connected ||
+                    st is GatewayStatus.Connecting || st is GatewayStatus.PairingPending
+                if (!connectedLike && url.isNotBlank() && (deviceToken != null || apiKey.isNotBlank())) {
+                    resetAutoRetry()
+                    connect()
+                }
+            }
+        }
+        // 已有可用配置（deviceToken 免扫码 / 共享 Key）则启动即连——不再要求每次手动点连接
         // 已有可用配置（deviceToken 免扫码 / 共享 Key）则启动即连——不再要求每次手动点连接
         if (url.isNotBlank() && (deviceToken != null || apiKey.isNotBlank())) connect()
         if (devAutoConnect) connect() // dev 通道重复调用被 busy 守卫挡掉
@@ -184,6 +246,7 @@ class AppModel(
         lastError = null
         explicitDisconnect = false
         connectedUrl = null
+        autoRetryJob?.cancel() // 手动/重入连接优先，别让在途退避重试插进来
         // 旧客户端先收尾（重连场景）：WS 任务与 HttpClient 不能泄漏
         val old = client
         if (old != null) scope.launch { runCatching { old.disconnect() } }
@@ -197,7 +260,8 @@ class AppModel(
         statusJob = scope.launch { c.status.collect { status = it } }
         sessionsJob = scope.launch {
             c.sessions.collect { list ->
-                sessions = list
+                rawSessions = list
+                publishSessions()
                 // Dev 直连：列表就绪后自动打开目标会话
                 val auto = devAutoSelectKey
                 if (auto != null && selectedSession == null) {
@@ -212,15 +276,14 @@ class AppModel(
             }
         }
         outboxJob = scope.launch {
-            c.outboxPendingCount.collect { total ->
-                // 聊天页排队提示只看当前会话
+            // 变更序号驱动（而非条数）：PENDING→SENT 不改条数，靠条数会漏刷新
+            // （「未发出」气泡不消失/同屏与回显重复，review P2-1）
+            c.outboxChanges.collect {
                 val key = selectedSession
-                queuedCount = when {
-                    key == null -> 0
-                    total == 0 -> 0
-                    else -> runCatching { cache.loadOutbox(gatewayId).count { it.sessionKey == key } }
-                        .getOrDefault(0)
-                }
+                queuedCount = if (key == null) 0 else runCatching {
+                    cache.loadOutbox(gatewayId).count { it.sessionKey == key }
+                }.getOrDefault(0)
+                refreshPendingOutbox()
             }
         }
         scope.launch {
@@ -251,6 +314,7 @@ class AppModel(
                 val connected = successUrl
                     ?: throw (lastTransportError ?: IllegalStateException("connect failed"))
                 connectedUrl = connected
+                resetAutoRetry() // 连上了，退避重试收队
                 // 扫码/连接成功即记住本次配置与设备凭证（M1 存 Documents，M3 迁 Keychain）
                 // 主地址保持用户输入/QR 主地址（到家优先 LAN），备用列表原样保存
                 deviceToken = c.deviceToken ?: deviceToken
@@ -276,8 +340,39 @@ class AppModel(
                 status = GatewayStatus.Error(e.message)
             } finally {
                 busy = false
+                // 自动连接失败（冷启动时网络/VPN 路由常未就绪）：有界退避重试，
+                // 覆盖「启动后几十秒内链路才通」的时序；成功/前台事件/手动操作会重置
+                if (status is GatewayStatus.Error) scheduleAutoRetry()
             }
         }
+    }
+
+    // ---- 自动连接退避重试（真机反馈：冷启动无法连接，网络/VPN 路由未就绪的时序问题） ----
+    private var autoRetryJob: Job? = null
+    private var autoRetryAttempts = 0
+
+    private fun scheduleAutoRetry() {
+        autoRetryJob?.cancel()
+        if (explicitDisconnect) return
+        if (deviceToken == null && apiKey.isBlank()) return // 没有可用凭据不空转
+        if (autoRetryAttempts >= AUTO_RETRY_MAX_ATTEMPTS) return
+        val delayMs = 2_000L shl autoRetryAttempts.coerceAtMost(4) // 2s→4s→8s→16s→32s
+        autoRetryAttempts++
+        autoRetryJob = scope.launch {
+            delay(delayMs)
+            val st = status
+            val retryable = st is GatewayStatus.Disconnected || st is GatewayStatus.Error
+            if (!explicitDisconnect && retryable) {
+                connect()
+            }
+        }
+    }
+
+    /** 成功/回前台时重置退避计数，取消在途重试。 */
+    private fun resetAutoRetry() {
+        autoRetryAttempts = 0
+        autoRetryJob?.cancel()
+        autoRetryJob = null
     }
 
     /** 扫码结果入口：拿到 setup code 即自动发起配对连接。 */
@@ -288,12 +383,12 @@ class AppModel(
     }
 
     fun select(session: Session?) {
-        // 切走前把旧会话在途草稿立即落库（P1：500ms 去抖窗口内切会话不能串草稿/丢草稿）
+        // 切走前把旧会话在途草稿立即落库（P1：500ms 去抖窗口内切会话不能串草稿/丢草稿）。
+        // P3 修复：无条件写入（含空值）——只写非空会让「已发送清空的草稿」写不进去，
+        // 旧槽位残留已发送文本，切回时复活。
         selectedSession?.let { old ->
             draftPersistJob?.cancel()
-            if (draftState.value.isNotEmpty()) {
-                runCatching { cache.kvPut(gatewayId, draftKey(old), draftState.value) }
-            }
+            runCatching { cache.kvPut(gatewayId, draftKey(old), draftState.value) }
         }
         selectedSession = session?.id
         conversation = null
@@ -304,10 +399,35 @@ class AppModel(
         queuedCount = runCatching {
             cache.loadOutbox(gatewayId).count { it.sessionKey == session.id }
         }.getOrDefault(0)
+        refreshPendingOutbox()
         draftState.value = runCatching { cache.kvGet(gatewayId, draftKey(session.id)) }.getOrNull() ?: ""
         val c = client ?: return
         c.clearUnread(session.id)
         openConversation(c, session.id)
+    }
+
+    /** 当前会话 PENDING 待发命令快照（聊天页「未发出」气泡的数据源）。 */
+    private fun refreshPendingOutbox() {
+        val key = selectedSession ?: run { pendingOutbox = emptyList(); return }
+        pendingOutbox = runCatching {
+            cache.loadOutbox(gatewayId).filter {
+                it.sessionKey == key && it.status == Outbox.Command.Status.PENDING
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    /** 删除一条待发消息（用户放弃发送）。删除即从队列消失，不再补发。 */
+    fun deleteQueued(cmd: Outbox.Command) {
+        runCatching { cache.deleteOutbox(cmd.idempotencyKey, gatewayId) }
+        queuedCount = runCatching {
+            cache.loadOutbox(gatewayId).count { it.sessionKey == selectedSession }
+        }.getOrDefault(0)
+        refreshPendingOutbox()
+    }
+
+    /** 立即重试待发队列（在线时即刻补发；离线由重连自动补发兜底）。 */
+    fun retryQueuedNow() {
+        client?.retryPendingNow()
     }
 
     private fun openConversation(c: OpenClawClient, sessionKey: String) {
@@ -328,16 +448,28 @@ class AppModel(
         val key = selectedSession ?: return
         val text = draft.trim()
         if (text.isEmpty()) return
-        val c = client
         draft = ""
+        sendText(key, text)
+    }
+
+    /** 消息长按「重发」：把一段文本再次走发送管线（不经草稿，M2.6）。 */
+    fun resendText(text: String) {
+        val key = selectedSession ?: return
+        val t = text.trim()
+        if (t.isEmpty()) return
+        sendText(key, t)
+    }
+
+    private fun sendText(sessionKey: String, text: String) {
+        val c = client
         if (c == null) {
             // 尚无 client（冷启动离线）：直接入缓存队列，连接成功后由 flush 补发
-            enqueueOffline(key, text)
+            enqueueOffline(sessionKey, text)
             return
         }
         scope.launch {
             try {
-                c.send(key, text)
+                c.send(sessionKey, text)
             } catch (e: GatewayRpcException) {
                 lastError = when (e.code) {
                     "SEND_QUEUED" -> "已进入发送队列，重连后自动补发"
@@ -375,6 +507,7 @@ class AppModel(
                 gatewayId,
             )
             queuedCount = cache.loadOutbox(gatewayId).count { it.sessionKey == sessionKey }
+            refreshPendingOutbox()
             lastError = "当前离线，消息已排队（连接后自动补发）"
         }
     }
@@ -386,6 +519,7 @@ class AppModel(
     fun disconnect() {
         explicitDisconnect = true
         connectedUrl = null
+        resetAutoRetry() // 用户主动断开不自动重连
         scope.launch { client?.disconnect() }
         selectedSession = null
         conversation = null
@@ -407,4 +541,12 @@ class AppModel(
     }
 
     private fun draftKey(sessionKey: String) = "draft:$sessionKey"
+
+    private companion object {
+        /** session overlay（pinned/archived 本地状态）的 kv 槽位（M2.6）。 */
+        const val OVERLAY_KEY = "sessionOverlay:v1"
+
+        /** 自动连接退避重试上限（2s→4s→8s→16s→32s，约 1 分钟窗口）。 */
+        const val AUTO_RETRY_MAX_ATTEMPTS = 5
+    }
 }

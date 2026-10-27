@@ -1,0 +1,122 @@
+name: TestFlight
+
+# 远程验收出包：手动 dispatch 或推 beta-* tag。
+# 依赖仓库 Secrets：ASC_API_KEY_P8_BASE64 / ASC_API_KEY_ID / ASC_API_ISSUER_ID / APPLE_TEAM_ID
+# （ASC = App Store Connect，Team API Key；.p8 内容 base64 后入 secrets，绝不入库）。
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'beta-*'
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  ios-testflight:
+    name: iOS → TestFlight
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Write ASC API key to disk
+        run: |
+          echo "${{ secrets.ASC_API_KEY_P8_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+
+      - name: Write Config.local.xcconfig (TEAM_ID + JAVA_HOME)
+        run: |
+          cat > iosApp/Configuration/Config.local.xcconfig <<EOF
+          TEAM_ID=${{ secrets.APPLE_TEAM_ID }}
+          JAVA_HOME=$JAVA_HOME
+          EOF
+
+      - name: Build fastlane api key json
+        run: |
+          python3 - <<'PYEOF'
+          import base64, json, os
+          key = base64.b64decode(os.environ["ASC_API_KEY_P8_BASE64"]).decode()
+          cfg = {
+              "key_id": os.environ["ASC_API_KEY_ID"],
+              "issuer_id": os.environ["ASC_API_ISSUER_ID"],
+              "key": key,
+              "in_house": False,
+          }
+          with open(os.environ["RUNNER_TEMP"] + "/asc-key.json", "w") as f:
+              json.dump(cfg, f)
+          PYEOF
+        env:
+          ASC_API_KEY_P8_BASE64: ${{ secrets.ASC_API_KEY_P8_BASE64 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+
+      - name: Archive (App Store signing, build number = epoch seconds)
+        run: |
+          set -o pipefail
+          BUILD=$(date +%s)
+          echo "BUILD_NUMBER=$BUILD" >> "$GITHUB_ENV"
+          xcodebuild \
+            -project iosApp/iosApp.xcodeproj \
+            -scheme iosApp \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/AgentReins.xcarchive \
+            CURRENT_PROJECT_VERSION=$BUILD \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
+            -authenticationKeyID "${{ secrets.ASC_API_KEY_ID }}" \
+            -authenticationKeyIssuerID "${{ secrets.ASC_API_ISSUER_ID }}" \
+            archive 2>&1 | tail -40
+
+      - name: Export IPA (TestFlight / app-store-connect)
+        run: |
+          cat > build/ExportOptions.plist <<'PLEOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store-connect</string>
+            <key>teamID</key>
+            <string>${{ secrets.APPLE_TEAM_ID }}</string>
+            <key>signingStyle</key>
+            <string>automatic</string>
+            <key>uploadSymbols</key>
+            <true/>
+          </dict>
+          </plist>
+          PLEOF
+          xcodebuild \
+            -exportArchive \
+            -archivePath build/AgentReins.xcarchive \
+            -exportOptionsPlist build/ExportOptions.plist \
+            -exportPath build/ipa \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
+            -authenticationKeyID "${{ secrets.ASC_API_KEY_ID }}" \
+            -authenticationKeyIssuerID "${{ secrets.ASC_API_ISSUER_ID }}" \
+            2>&1 | tail -60
+
+      - name: Upload to TestFlight
+        run: |
+          brew install fastlane
+          fastlane pilot upload \
+            --api_key_path "$RUNNER_TEMP/asc-key.json" \
+            --ipa build/ipa/AgentReins.ipa \
+            --skip_waiting
+
+      - name: Cleanup key material
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/AuthKey.p8" "$RUNNER_TEMP/asc-key.json"
+
+      - name: Summary
+        run: |
+          echo "✅ 已上传 TestFlight（build ${{ env.BUILD_NUMBER }}）。处理约 10–30 分钟后，TestFlight app 内可见/可更新。" >> "$GITHUB_STEP_SUMMARY"

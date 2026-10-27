@@ -51,8 +51,8 @@ fun ToolCallCard(card: ToolCallEvent, modifier: Modifier = Modifier) {
     var expanded by remember(card.id) { mutableStateOf(false) }
 
     Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceContainer,
         modifier = modifier.fillMaxWidth(),
     ) {
         Column(

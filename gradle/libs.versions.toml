@@ -9,6 +9,7 @@ composeMaterial3 = "1.9.0"
 composeMaterialIcons = "1.7.3"
 kotlin = "2.4.21"
 kotlinx-coroutines = "1.11.0"
+kotlinx-datetime = "0.7.1"
 kotlinx-serialization-json = "1.11.0"
 ktor = "3.6.0"
 # SQLDelight 2.4.x：KMP 三端 SQLite（ADR #5）；Room 是 Android-only 不可用
@@ -23,6 +24,7 @@ compose-runtime = { module = "org.jetbrains.compose.runtime:runtime", version.re
 compose-ui = { module = "org.jetbrains.compose.ui:ui", version.ref = "composeMultiplatform" }
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
 kotlinx-coroutines-swing = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-swing", version.ref = "kotlinx-coroutines" }
+kotlinx-datetime = { module = "org.jetbrains.kotlinx:kotlinx-datetime", version.ref = "kotlinx-datetime" }
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinx-serialization-json" }
 ktor-client-cio = { module = "io.ktor:ktor-client-cio", version.ref = "ktor" }
 ktor-client-core = { module = "io.ktor:ktor-client-core", version.ref = "ktor" }

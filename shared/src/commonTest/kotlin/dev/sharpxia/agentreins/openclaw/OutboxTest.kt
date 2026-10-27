@@ -97,4 +97,29 @@ class OutboxTest {
         val order = Outbox.flushOrder(list).map { it.idempotencyKey }
         assertEquals(listOf("c", "d", "b", "a"), order)
     }
+
+    // ---- 尾随窗口（M2.6 P3 修复语义） ----
+
+    @Test
+    fun pendingForRoundExcludesAlreadyAttempted() {
+        val list = listOf(cmd(key = "a"), cmd(key = "b"), cmd(key = "c", status = Outbox.Command.Status.SENT))
+        val round = Outbox.pendingForRound(list, attempted = setOf("a"))
+        assertEquals(listOf("b", "c"), round.map { it.idempotencyKey })
+    }
+
+    @Test
+    fun pendingForRoundPicksUpTailArrivalsNextRound() {
+        // 模拟：flush 进行中（a/b 已尝试）新入队 d → 下一轮 reload 捞到 d 立即补发
+        val midFlush = listOf(cmd(key = "a"), cmd(key = "b"))
+        val afterTailArrival = midFlush + cmd(key = "d", createdAt = 900)
+        val attempted = setOf("a", "b")
+        val secondRound = Outbox.pendingForRound(afterTailArrival, attempted)
+        assertEquals(listOf("d"), secondRound.map { it.idempotencyKey })
+    }
+
+    @Test
+    fun pendingForRoundStopsWhenAllAttempted() {
+        val list = listOf(cmd(key = "a"), cmd(key = "b"))
+        assertTrue(Outbox.pendingForRound(list, attempted = setOf("a", "b")).isEmpty())
+    }
 }

@@ -1,63 +1,71 @@
 package dev.sharpxia.agentreins.ui
 
-import androidx.compose.foundation.clickable
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.launch
 import dev.sharpxia.agentreins.AppModel
-import dev.sharpxia.agentreins.model.ConversationState
 import dev.sharpxia.agentreins.model.GatewayStatus
-import dev.sharpxia.agentreins.model.Message
 import dev.sharpxia.agentreins.model.Session
-import dev.sharpxia.agentreins.model.ToolCallEvent
 import dev.sharpxia.agentreins.openclaw.SessionListMapper
+import kotlin.math.abs
+import dev.sharpxia.agentreins.ui.theme.ArTheme
+import kotlin.math.roundToInt
+import kotlinx.coroutines.launch
 
 /**
- * 会话列表 + 对话流（M2；M2.5 增：离线可见缓存列表、未读点、置顶、归档过滤、排队提示）。
- * 对话页唯一数据源是 model.conversation（ConversationState）：历史回填 + agent 事件流
- * 归并，LazyColumn 增量渲染；工具调用走 ToolCallCard。
+ * 会话列表（M2.6 新基线）：头像 + 标题 + 预览 + 时间/未读，滑动操作（右滑置顶、
+ * 左滑归档）与长按菜单；归档默认过滤、断网可见缓存列表（M2.5 语义不变）。
+ * pinned/archived 走本地 overlay（AppModel），网关同步留 M3+（探针：需 operator.admin）。
  */
 @Composable
 fun SessionsScreen(model: AppModel, modifier: Modifier = Modifier) {
@@ -67,7 +75,77 @@ fun SessionsScreen(model: AppModel, modifier: Modifier = Modifier) {
         selected == null && model.sessions.isNotEmpty() ->
             SessionList(model, modifier, offline = model.status !is GatewayStatus.Connected)
         selected == null -> EmptyState(model, modifier)
-        else -> ChatScreen(model, selected, modifier)
+        else -> ChatWithBackGesture(model, selected, modifier)
+    }
+}
+
+/**
+ * 对话页 + iOS 边缘返回：底层铺**真实**会话列表，左缘起手横向拖拽时对话页平移、
+ * 列表以 0.3 倍速视差露出（真机反馈「应该可以露出底部页面」）。
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ChatWithBackGesture(model: AppModel, sessionKey: String, modifier: Modifier = Modifier) {
+    var backDragPx by remember { mutableStateOf(0f) }
+    var edgeDragArmed by remember { mutableStateOf(false) }
+    var screenWidthPx by remember { mutableStateOf(1f) }
+    val scope = rememberCoroutineScope()
+    val haptics = rememberHapticPlayer()
+    val edgeWidthPx = with(LocalDensity.current) { 28.dp.toPx() }
+    val commitFraction = 0.3f
+
+    Box(modifier.fillMaxSize()) {
+        // 底层：真实列表（平时被对话页完全盖住；拖拽时视差平移并压暗）
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    translationX = backDragPx * 0.3f
+                    val progress = if (screenWidthPx > 1f) backDragPx / (screenWidthPx * commitFraction) else 0f
+                    alpha = if (backDragPx > 0f) (0.55f + 0.45f * (1f - progress.coerceIn(0f, 1f))) else 1f
+                },
+        ) {
+            if (model.sessions.isNotEmpty()) {
+                SessionList(model, Modifier.fillMaxSize(), offline = model.status !is GatewayStatus.Connected)
+            } else {
+                EmptyState(model, Modifier.fillMaxSize())
+            }
+        }
+        // 顶层：对话页 + 左缘手势
+        Box(
+            Modifier
+                .fillMaxSize()
+                .shadow(if (backDragPx > 0f) 12.dp else 0.dp)
+                .offset { IntOffset(backDragPx.roundToInt(), 0) }
+                .onSizeChanged { screenWidthPx = it.width.toFloat().coerceAtLeast(1f) }
+                .pointerInput(Unit) {
+                    detectHorizontalDragGestures(
+                        onDragStart = { start -> edgeDragArmed = start.x <= edgeWidthPx },
+                        onDragEnd = {
+                            if (!edgeDragArmed) return@detectHorizontalDragGestures
+                            edgeDragArmed = false
+                            if (backDragPx > screenWidthPx * commitFraction) {
+                                haptics.tap()
+                                model.select(null)
+                                backDragPx = 0f
+                            } else {
+                                val from = backDragPx
+                                scope.launch {
+                                    animate(from, 0f, animationSpec = spring()) { v, _ -> backDragPx = v }
+                                }
+                            }
+                        },
+                        onDragCancel = { edgeDragArmed = false; backDragPx = 0f },
+                    ) { change, dragAmount ->
+                        if (edgeDragArmed) {
+                            backDragPx = (backDragPx + dragAmount).coerceIn(0f, screenWidthPx)
+                            change.consume()
+                        }
+                    }
+                },
+        ) {
+            ChatScreen(model, sessionKey, Modifier.fillMaxSize())
+        }
     }
 }
 
@@ -80,21 +158,24 @@ private fun EmptyState(model: AppModel, modifier: Modifier = Modifier) {
     ) {
         when (val st = model.status) {
             is GatewayStatus.Connecting -> {
-                CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.5.dp)
-                Spacer(Modifier.size(10.dp))
+                CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.5.dp, color = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.size(12.dp))
                 Text("连接中…", style = MaterialTheme.typography.titleMedium)
             }
             is GatewayStatus.PairingPending -> {
-                CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.5.dp)
-                Spacer(Modifier.size(10.dp))
+                CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.5.dp, color = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.size(12.dp))
                 Text("等待 owner 批准设备…", style = MaterialTheme.typography.titleMedium)
                 st.requestId?.let {
                     Spacer(Modifier.size(4.dp))
-                    Text("requestId: $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "requestId: $it",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
             else -> {
-                val st = model.status
                 if (st is GatewayStatus.Error) {
                     Text("自动连接失败", style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.size(4.dp))
@@ -102,6 +183,7 @@ private fun EmptyState(model: AppModel, modifier: Modifier = Modifier) {
                         st.message ?: "未知错误",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
+                        textAlign = TextAlign.Center,
                     )
                     Spacer(Modifier.size(4.dp))
                     Text(
@@ -127,10 +209,12 @@ private fun EmptyState(model: AppModel, modifier: Modifier = Modifier) {
 private fun SessionList(model: AppModel, modifier: Modifier = Modifier, offline: Boolean = false) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val haptics = rememberHapticPlayer()
     var showArchived by remember { mutableStateOf(false) }
-    // 归档默认过滤；置顶排序由 SessionListMapper.merge 保证
+    // 归档是独立视图：只列归档会话（真机反馈）；主列表默认过滤归档
     val visible = remember(model.sessions, showArchived) {
-        SessionListMapper.visibleForList(model.sessions, showArchived)
+        if (showArchived) model.sessions.filter { it.archived }
+        else SessionListMapper.visibleForList(model.sessions)
     }
     StatusBarTapEffect {
         if (visible.isNotEmpty()) {
@@ -140,64 +224,176 @@ private fun SessionList(model: AppModel, modifier: Modifier = Modifier, offline:
     Column(modifier.fillMaxSize()) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(16.dp, 16.dp, 16.dp, 8.dp),
+            modifier = Modifier.padding(start = 16.dp, end = 8.dp, top = 16.dp, bottom = 8.dp),
         ) {
-            Text(
-                if (offline) "会话（${visible.size}，离线缓存）" else "会话（${visible.size}）",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.weight(1f),
-            )
-            // 归档过滤开关（有归档会话才亮）
+            Column(Modifier.weight(1f)) {
+                Text(if (showArchived) "归档" else "会话", style = MaterialTheme.typography.titleLarge)
+                Text(
+                    when {
+                        showArchived -> "${visible.size} 个归档会话"
+                        offline -> "离线中 · 显示缓存列表"
+                        else -> "${visible.size} 个会话"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            // 归档视图开关（有归档会话才亮）
             val archivedCount = model.sessions.count { it.archived }
             if (archivedCount > 0) {
                 TextButton(onClick = { showArchived = !showArchived }) {
-                    Text(if (showArchived) "隐藏归档" else "归档($archivedCount)")
+                    Text(if (showArchived) "返回" else "归档($archivedCount)")
                 }
             }
         }
         LazyColumn(state = listState) {
             items(visible, key = { it.id }) { s ->
-                SessionRow(s, onClick = { model.select(s) })
+                SwipeableSessionRow(
+                    session = s,
+                    onClick = { model.select(s) },
+                    onPin = { pinned ->
+                        if (pinned) haptics.success() else haptics.tap()
+                        model.setSessionPinned(s, pinned)
+                    },
+                    onArchive = { archived ->
+                        haptics.tap()
+                        model.setSessionArchived(s, archived)
+                    },
+                )
             }
         }
     }
 }
 
+/**
+ * 可滑动的会话行：StartToEnd（右滑）= 置顶/取消置顶，EndToStart（左滑）= 归档/取消归档。
+ * confirmValueChange 返回 false = 执行动作后弹回（swipe-to-act，非滑动删除）。
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SessionRow(session: Session, onClick: () -> Unit) {
-    Card(
-        onClick = onClick,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+private fun SwipeableSessionRow(
+    session: Session,
+    onClick: () -> Unit,
+    onPin: (Boolean) -> Unit,
+    onArchive: (Boolean) -> Unit,
+) {
+    // confirmValueChange 在 remember 的 state 里只捕获一次，经 rememberUpdatedState 读最新会话
+    val currentSession by rememberUpdatedState(session)
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            when (value) {
+                SwipeToDismissBoxValue.StartToEnd -> {
+                    onPin(!currentSession.pinned)
+                    false
+                }
+                SwipeToDismissBoxValue.EndToStart -> {
+                    onArchive(!currentSession.archived)
+                    false
+                }
+                SwipeToDismissBoxValue.Settled -> false
+            }
+        },
+    )
+    SwipeToDismissBox(
+        state = dismissState,
+        backgroundContent = {
+            // 按实时偏移量渐显：拖动一开始就有色块与图标（此前 targetValue 过半才变，
+            // 大半段拖动空白——真机反馈「没有明显指示器」实锤）
+            SwipeActionBackground(
+                offsetPx = runCatching { dismissState.requireOffset() }.getOrDefault(0f),
+                pinned = session.pinned,
+                archived = session.archived,
+            )
+        },
     ) {
-        Column(Modifier.padding(12.dp)) {
+        SessionRowContent(
+            session = session,
+            onClick = onClick,
+            onPin = onPin,
+            onArchive = onArchive,
+        )
+    }
+}
+
+/** 滑动背景：拖动即现的方向色块 + 图标 + 动作文案（随滑动进度淡入）。 */
+@Composable
+private fun SwipeActionBackground(offsetPx: Float, pinned: Boolean, archived: Boolean) {
+    if (abs(offsetPx) < 1f) return
+    val thresholdPx = with(LocalDensity.current) { 64.dp.toPx() }
+    val progress = (abs(offsetPx) / thresholdPx).coerceIn(0f, 1f)
+    val pin = offsetPx > 0f
+    val container = if (pin) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.secondaryContainer
+    val content = if (pin) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSecondaryContainer
+    val icon = when {
+        pin -> ArIcons.Pin
+        archived -> ArIcons.Unarchive
+        else -> ArIcons.Archive
+    }
+    val label = when {
+        pin -> if (pinned) "取消置顶" else "置顶"
+        archived -> "取消归档"
+        else -> "归档"
+    }
+    Surface(color = container.copy(alpha = 0.3f + 0.7f * progress), modifier = Modifier.fillMaxSize()) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = if (pin) Arrangement.Start else Arrangement.End,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 24.dp)
+                .graphicsLayer { alpha = progress },
+        ) {
+            if (!pin) {
+                Text(label, style = MaterialTheme.typography.labelLarge, color = content)
+                Spacer(Modifier.size(8.dp))
+            }
+            Icon(icon, contentDescription = label, tint = content, modifier = Modifier.size(22.dp))
+            if (pin) {
+                Spacer(Modifier.size(8.dp))
+                Text(label, style = MaterialTheme.typography.labelLarge, color = content)
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SessionRowContent(
+    session: Session,
+    onClick: () -> Unit,
+    onPin: (Boolean) -> Unit,
+    onArchive: (Boolean) -> Unit,
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    val tokens = ArTheme.tokens
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(onClick = onClick, onLongClick = { menuOpen = true })
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+    ) {
+        SessionAvatar(session)
+        Spacer(Modifier.size(tokens.spaceM.dp))
+        Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // 置顶标识
                 if (session.pinned) {
-                    Text("📌 ", style = MaterialTheme.typography.bodyLarge)
+                    Icon(
+                        ArIcons.Pin,
+                        contentDescription = "已置顶",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(13.dp),
+                    )
+                    Spacer(Modifier.size(4.dp))
                 }
                 Text(
                     session.title ?: session.id,
                     style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = if (session.unread > 0) FontWeight.SemiBold else FontWeight.Normal,
+                    fontWeight = if (session.unread > 0) FontWeight.SemiBold else FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f, fill = false),
                 )
-                // 未读点（M2.5 A8：非当前会话事件计数）
-                if (session.unread > 0) {
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(start = 6.dp),
-                    ) {
-                        Text(
-                            if (session.unread > 99) "99+" else session.unread.toString(),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onPrimary,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
-                        )
-                    }
-                }
                 formatRelativeTime(session.lastActiveAtMs).takeIf { it.isNotEmpty() }?.let {
                     Text(
                         it,
@@ -208,276 +404,89 @@ private fun SessionRow(session: Session, onClick: () -> Unit) {
                 }
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // 渠道/类型标识（kind：main/telegram/…）
-                session.kind?.takeIf { it.isNotBlank() }?.let {
-                    Text(
-                        it,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.tertiary,
-                        modifier = Modifier.padding(end = 6.dp),
-                    )
-                }
                 Text(
-                    session.id,
+                    session.preview?.takeIf { it.isNotBlank() } ?: session.id,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
                 )
-            }
-        }
-    }
-}
-
-@Composable
-private fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier = Modifier) {
-    val state = model.conversation
-    val listState = rememberLazyListState()
-    val scope = rememberCoroutineScope()
-    var initialScrollDone by remember { mutableStateOf(false) }
-    var showJumpToLatest by remember { mutableStateOf(false) }
-
-    // 首次有内容：直接定位到底部（历史是旧→新排列）；此后仅贴底时跟随新消息
-    val entryCount = state?.entries?.size ?: 0
-    val lastTextLen = (state?.entries?.lastOrNull() as? Message)?.content?.length ?: 0
-    val runActive = state?.activeRunId != null
-    LaunchedEffect(entryCount, lastTextLen, runActive) {
-        val count = listState.layoutInfo.totalItemsCount
-        if (count == 0) return@LaunchedEffect
-        if (!initialScrollDone) {
-            listState.scrollToItem(count - 1)
-            initialScrollDone = true
-            return@LaunchedEffect
-        }
-        val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-        if (lastVisible >= count - 2) {
-            listState.animateScrollToItem(count - 1)
-        }
-    }
-
-    // 贴底检测：离开底部即亮出「查看最新」（新回复/新卡片到达时用户正在翻旧消息）
-    LaunchedEffect(listState) {
-        snapshotFlow {
-            val info = listState.layoutInfo
-            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: Int.MAX_VALUE
-            lastVisible < info.totalItemsCount - 2
-        }.collect { showJumpToLatest = it }
-    }
-    // 滚到顶懒加载更早一页历史
-    LaunchedEffect(listState) {
-        snapshotFlow {
-            listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
-        }.collect { atTop -> if (atTop) model.loadOlderMessages() }
-    }
-
-    Column(modifier.fillMaxSize().dismissKeyboardOnTap()) {
-        ChatTopBar(model, sessionKey, runActive)
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-        // 发送队列提示（M2.5 outbox：断线排队，重连自动补发）
-        if (model.queuedCount > 0) {
-            Surface(
-                color = MaterialTheme.colorScheme.tertiaryContainer,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(
-                    "⏳ ${model.queuedCount} 条消息待发送，重连后自动补发",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onTertiaryContainer,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                )
-            }
-        }
-
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                if (state?.hasMoreHistory == true && entryCount > 0) {
-                    item(key = "loading-older") {
-                        Text(
-                            "上拉加载更早消息…",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                        )
-                    }
-                }
-                if (entryCount == 0 && !runActive) {
-                    item(key = "empty") {
-                        Text(
-                            "暂无消息，发一条开始对话",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
-                        )
-                    }
-                }
-                items(state?.entries ?: emptyList(), key = { it.id }) { entry ->
-                    when (entry) {
-                        is ToolCallEvent -> ToolCallCard(entry)
-                        is Message -> ChatMessageItem(entry)
-                    }
-                }
-                if (runActive) {
-                    item(key = "typing") { TypingIndicator(state?.thinkingText) }
-                }
-            }
-            if (showJumpToLatest) {
-                Surface(
-                    onClick = {
-                        val last = (state?.entries?.size ?: 0)
-                        if (last > 0) scope.launch { listState.animateScrollToItem(last - 1) }
-                    },
-                    shape = RoundedCornerShape(18.dp),
-                    color = MaterialTheme.colorScheme.secondaryContainer,
-                    shadowElevation = 3.dp,
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(12.dp),
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                    ) {
-                        Icon(
-                            Icons.Filled.KeyboardArrowDown,
-                            contentDescription = "查看最新消息",
-                            modifier = Modifier.size(16.dp),
-                        )
-                        Text("最新", style = MaterialTheme.typography.labelMedium)
-                    }
+                if (session.unread > 0) {
+                    Spacer(Modifier.size(tokens.spaceS.dp))
+                    UnreadBadge(session.unread)
                 }
             }
         }
-
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-        ChatInputBar(model)
-    }
-}
-
-@Composable
-private fun ChatTopBar(model: AppModel, sessionKey: String, runActive: Boolean) {
-    Column(Modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = { model.select(null) }) { Text("←") }
-            Column(Modifier.weight(1f)) {
-                Text(
-                    model.sessions.firstOrNull { it.id == sessionKey }?.title ?: sessionKey,
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    sessionKey,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-        if (runActive) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(start = 16.dp, bottom = 6.dp),
-            ) {
-                CircularProgressIndicator(Modifier.size(10.dp), strokeWidth = 1.5.dp)
-                Spacer(Modifier.size(6.dp))
-                Text("生成中…", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-    }
-}
-
-@Composable
-private fun ChatMessageItem(message: Message) {
-    when (message.role) {
-        Message.Role.USER -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            Surface(
-                color = MaterialTheme.colorScheme.primaryContainer,
-                shape = RoundedCornerShape(16.dp, 4.dp, 16.dp, 16.dp),
-                modifier = Modifier.widthIn(max = 320.dp),
-            ) {
-                Text(
-                    message.content,
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                )
-            }
-        }
-        Message.Role.ASSISTANT -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
-            Surface(
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                shape = RoundedCornerShape(4.dp, 16.dp, 16.dp, 16.dp),
-                // 加宽到 94%：代码块类内容 320dp 气泡太挤
-                modifier = Modifier.fillMaxWidth(0.94f),
-            ) {
-                if (message.content.isBlank()) {
-                    Text(
-                        if (message.streaming) "…" else "",
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    )
-                } else {
-                    MarkdownText(
-                        message.content,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    )
-                }
-            }
-        }
-        // agent 的 commentary（item 流 kind=preamble）：过程说明文本
-        Message.Role.SYSTEM -> Text(
-            message.content,
-            style = MaterialTheme.typography.bodySmall,
-            fontStyle = FontStyle.Italic,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        SessionRowMenu(
+            expanded = menuOpen,
+            onDismiss = { menuOpen = false },
+            pinned = session.pinned,
+            archived = session.archived,
+            onPin = { onPin(it) },
+            onArchive = { onArchive(it) },
         )
     }
 }
 
+/** 头像：kind/标题定色圆底 + 首字符。 */
 @Composable
-private fun TypingIndicator(thinkingText: String?) {
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 4.dp)) {
-        CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 2.dp)
-        Spacer(Modifier.size(8.dp))
-        val lastThinking = thinkingText?.lineSequence()?.lastOrNull { it.isNotBlank() }
-        Text(
-            lastThinking?.let { "思考中：$it" } ?: "生成中…",
-            style = MaterialTheme.typography.bodySmall,
-            fontStyle = FontStyle.Italic,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
-}
-
-@Composable
-private fun ChatInputBar(model: AppModel) {
-    Row(
-        verticalAlignment = Alignment.Bottom,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+private fun SessionAvatar(session: Session) {
+    val tokens = ArTheme.tokens
+    val title = session.title ?: session.id
+    Box(
+        Modifier
+            .size(tokens.avatarSize.dp)
+            .clip(CircleShape)
+            .background(avatarColor(session.kind, title)),
+        contentAlignment = Alignment.Center,
     ) {
-        OutlinedTextField(
-            value = model.draft,
-            onValueChange = { model.draft = it },
-            placeholder = { Text("发送消息…") },
-            modifier = Modifier.weight(1f),
-            maxLines = 4,
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(onSend = { model.send() }),
+        Text(
+            title.trim().firstOrNull()?.uppercase() ?: "?",
+            style = MaterialTheme.typography.titleMedium,
+            color = Color.White,
         )
-        TextButton(
-            onClick = { model.send() },
-            enabled = model.draft.isNotBlank(),
-            modifier = Modifier.padding(start = 4.dp, bottom = 6.dp),
-        ) {
-            Text("发送")
-        }
+    }
+}
+
+@Composable
+private fun UnreadBadge(unread: Int) {
+    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primary) {
+        Text(
+            if (unread > 99) "99+" else unread.toString(),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onPrimary,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+        )
+    }
+}
+
+/** 长按菜单：置顶/取消置顶、归档/取消归档。 */
+@Composable
+private fun SessionRowMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    pinned: Boolean,
+    archived: Boolean,
+    onPin: (Boolean) -> Unit,
+    onArchive: (Boolean) -> Unit,
+) {
+    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        DropdownMenuItem(
+            text = { Text(if (pinned) "取消置顶" else "置顶") },
+            leadingIcon = { Icon(ArIcons.Pin, contentDescription = null, modifier = Modifier.size(18.dp)) },
+            onClick = { onPin(!pinned); onDismiss() },
+        )
+        DropdownMenuItem(
+            text = { Text(if (archived) "取消归档" else "归档") },
+            leadingIcon = {
+                Icon(
+                    if (archived) ArIcons.Unarchive else ArIcons.Archive,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+            },
+            onClick = { onArchive(!archived); onDismiss() },
+        )
     }
 }

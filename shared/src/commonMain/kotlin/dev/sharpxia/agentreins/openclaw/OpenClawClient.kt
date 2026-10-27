@@ -16,6 +16,7 @@ import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.webSocket
 import io.ktor.websocket.Frame
 import io.ktor.websocket.readText
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -139,6 +140,14 @@ class OpenClawClient(
     /** 待补发队列条数（PENDING+SENT 未退休）。 */
     private val _outboxPendingCount = MutableStateFlow(0)
     val outboxPendingCount: StateFlow<Int> = _outboxPendingCount.asStateFlow()
+
+    /**
+     * outbox 变更序号（M2.6）：每次 outbox 落库变化 +1。PENDING→SENT 迁移不改变
+     * 条数，只靠条数 StateFlow 会因等值去重漏发射（「未发出」气泡不消失）——
+     * UI 以此为准刷新待发列表，条数仅作横幅计数。
+     */
+    private val _outboxChanges = MutableStateFlow(0L)
+    val outboxChanges: StateFlow<Long> = _outboxChanges.asStateFlow()
 
     /** 客户端侧未读计数（per-device UI 态，网关值只在冷启动播种）。 */
     private val localUnread = mutableMapOf<String, Int>()
@@ -487,7 +496,9 @@ class OpenClawClient(
         )
     }
 
-    /** 单条补发：成功置 SENT 并乐观回显；结果不明/失败保持 PENDING、重试计数+1。 */
+    /** 单条补发：成功置 SENT 并乐观回显；结果不明/失败保持 PENDING、重试计数+1。
+     *  写回前检查条目仍在队列——in-flight 期间用户「放弃发送」是终态，回写会让
+     *  已删除的消息以 SENT/PENDING 形态复活（P2 修复）。 */
     private suspend fun sendOutboxCommand(cmd: Outbox.Command): Boolean {
         return try {
             val res = rpc(
@@ -501,6 +512,10 @@ class OpenClawClient(
             )
             val runId = res.str("runId") ?: throw GatewayRpcException("PROTOCOL", "sessions.send: no runId")
             mutex.withLock { runsByKey[runId] = cmd.sessionKey }
+            if (!cacheHasCommand(cmd.idempotencyKey)) {
+                refreshOutboxCount()
+                return true // 已被用户删除：不回写、不回显（消息可能已送达，history 回填后可见）
+            }
             cache.upsertOutbox(Outbox.afterSendAttempt(cmd, ok = true, error = null), gatewayId)
             // 乐观回显（M2 语义）：id 带 runId，历史回填时由 mergeHistory 对账去重
             val flow = mutex.withLock { flowForUnlocked(cmd.sessionKey) }
@@ -514,22 +529,42 @@ class OpenClawClient(
             )
             refreshOutboxCount()
             true
+        } catch (e: CancellationException) {
+            throw e // 取消（retryPendingNow 重排/断连收尾）不算发送失败，剩余条目留给下一轮
         } catch (e: Exception) {
-            cache.upsertOutbox(Outbox.afterSendAttempt(cmd, ok = false, error = e.message), gatewayId)
+            if (cacheHasCommand(cmd.idempotencyKey)) {
+                cache.upsertOutbox(Outbox.afterSendAttempt(cmd, ok = false, error = e.message), gatewayId)
+            }
             refreshOutboxCount()
             false
         }
     }
 
-    /** 重连后补发：PENDING 优先于 SENT，FIFO；断连即停（剩余下轮再补）。 */
+    /** 该命令是否仍在队列（未被用户删除）。 */
+    private fun cacheHasCommand(idempotencyKey: String): Boolean =
+        cache.loadOutbox(gatewayId).any { it.idempotencyKey == idempotencyKey }
+
+    /**
+     * 重连后补发：PENDING 优先于 SENT，FIFO；断连即停（剩余下轮再补）。
+     * P3 修复（flush 尾随丢失窗口）：flush 进行中新入队的命令不在第一轮快照里，
+     * 循环结束后只对**本轮未尝试过**的条目补一轮——已失败的条目不原地自旋
+     * （持续失败由下次 send/reconnect 触发新一轮 flush 兜底）。
+     */
     private suspend fun flushOutbox() {
-        val cmds = Outbox.flushOrder(cache.loadOutbox(gatewayId))
-        if (cmds.isEmpty()) return
-        for (cmd in cmds) {
-            if (_status.value !is GatewayStatus.Connected || explicitClose) break
-            sendOutboxCommand(cmd)
+        try {
+            val attempted = mutableSetOf<String>()
+            while (true) {
+                val cmds = Outbox.pendingForRound(cache.loadOutbox(gatewayId), attempted)
+                if (cmds.isEmpty()) return
+                for (cmd in cmds) {
+                    if (_status.value !is GatewayStatus.Connected || explicitClose) return
+                    attempted += cmd.idempotencyKey
+                    sendOutboxCommand(cmd)
+                }
+            }
+        } finally {
+            refreshOutboxCount()
         }
-        refreshOutboxCount()
     }
 
     /**
@@ -548,6 +583,14 @@ class OpenClawClient(
 
     private fun refreshOutboxCount() {
         _outboxPendingCount.value = if (cache.available) cache.loadOutbox(gatewayId).size else 0
+        // PENDING→SENT 等迁移不改条数，变更序号保证 UI 每次落库后都能收到刷新信号
+        _outboxChanges.value += 1
+    }
+
+    /** UI「立即重试」入口：在途的延迟 flush 直接取消改排即刻轮（退避窗口内点重试不该静默 no-op）。 */
+    fun retryPendingNow() {
+        flushJob?.cancel()
+        scheduleFlush(0)
     }
 
     override suspend fun respondApproval(requestId: String, approved: Boolean) {

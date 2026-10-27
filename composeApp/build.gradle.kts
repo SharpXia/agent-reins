@@ -42,6 +42,14 @@ kotlin {
             implementation(libs.compose.material.icons.core)
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kotlinx.serialization.json)
+            // 日分隔需要时区日期运算（kotlin.time.Clock 的 Instant → LocalDate）
+            implementation(libs.kotlinx.datetime)
+        }
+        // desktop 目标的测试源集（ChatRows 日分隔纯函数测试）
+        val desktopTest by getting {
+            dependencies {
+                implementation(kotlin("test"))
+            }
         }
     }
 }

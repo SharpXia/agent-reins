@@ -61,7 +61,9 @@ jobs:
         run: |
           set -o pipefail
           BUILD=$(date +%s)
-          echo "BUILD_NUMBER=$BUILD" >> "$GITHUB_ENV"
+          # marketing version 从 tag 推导（beta-0.2.7 → 0.2.7）：TestFlight 可读的里程碑号
+          MV=$(echo "${GITHUB_REF_NAME}" | sed -E 's/^beta-//')
+          echo "MARKETING_VERSION=$MV" >> "$GITHUB_ENV"
           xcodebuild \
             -project iosApp/iosApp.xcodeproj \
             -scheme iosApp \
@@ -69,6 +71,7 @@ jobs:
             -destination 'generic/platform=iOS' \
             -archivePath build/AgentReins.xcarchive \
             CURRENT_PROJECT_VERSION=$BUILD \
+            MARKETING_VERSION=${MARKETING_VERSION} \
             -allowProvisioningUpdates \
             -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
             -authenticationKeyID "${{ secrets.ASC_API_KEY_ID }}" \
@@ -119,4 +122,4 @@ jobs:
 
       - name: Summary
         run: |
-          echo "✅ 已上传 TestFlight（build ${{ env.BUILD_NUMBER }}）。处理约 10–30 分钟后，TestFlight app 内可见/可更新。" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ 已上传 TestFlight：版本 ${{ env.MARKETING_VERSION }}（build ${{ env.BUILD_NUMBER }}）。处理约 10–30 分钟后，TestFlight app 内可见/可更新。" >> "$GITHUB_STEP_SUMMARY"

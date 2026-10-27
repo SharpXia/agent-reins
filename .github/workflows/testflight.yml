@@ -57,6 +57,41 @@ jobs:
           ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
           ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
 
+      - name: Revoke stale CI development certificates (每轮 runner 各建一张，防上限)
+        run: |
+          python3 - <<'PYEOF'
+          import base64, binascii, json, os, subprocess, tempfile, time, urllib.request
+
+          cfg = json.load(open(os.environ["RUNNER_TEMP"] + "/asc-key.json"))
+          now = int(time.time())
+          header = base64.urlsafe_b64encode(json.dumps({"alg": "ES256", "kid": cfg["key_id"], "typ": "JWT"}).encode()).rstrip(b"=").decode()
+          payload = base64.urlsafe_b64encode(json.dumps({"iss": cfg["issuer_id"], "iat": now, "exp": now + 1200, "aud": "appstoreconnect-v1"}).encode()).rstrip(b"=").decode()
+          si = f"{header}.{payload}".encode()
+          with tempfile.NamedTemporaryFile("w", suffix=".pem") as f:
+              f.write(cfg["key"]); f.flush()
+              der = subprocess.run(["openssl", "dgst", "-sha256", "-sign", f.name], input=si, capture_output=True).stdout
+          i, rl = 2, der[3]
+          r = der[4:4+rl]; ss = der[4+rl+2:]
+          rs = r.lstrip(b"\x00").rjust(32, b"\x00") + ss.lstrip(b"\x00").rjust(32, b"\x00")
+          sig = base64.urlsafe_b64encode(rs).rstrip(b"=").decode()
+          jwt = f"{header}.{payload}.{sig}"
+
+          def req(path, method="GET"):
+              r = urllib.request.Request("https://api.appstoreconnect.apple.com" + path, method=method,
+                                         headers={"Authorization": f"Bearer {jwt}"})
+              return urllib.request.urlopen(r)
+
+          data = json.load(req("/v1/certificates?filter[certificateType]=IOS_DEVELOPMENT&limit=200"))
+          certs = data.get("data", [])
+          print(f"iOS development certs: {len(certs)}")
+          for c in certs:
+              print("revoking", c["id"], c["attributes"].get("displayName"))
+              try:
+                  req(f"/v1/certificates/{c['id']}", "DELETE")
+              except Exception as e:
+                  print("  revoke failed (continuing):", e)
+          PYEOF
+
       - name: Archive (App Store signing, build number = epoch seconds)
         run: |
           set -o pipefail

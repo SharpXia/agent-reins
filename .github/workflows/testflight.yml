@@ -59,6 +59,7 @@ jobs:
 
       - name: Archive (App Store signing, build number = epoch seconds)
         run: |
+          set -o pipefail
           BUILD=$(date +%s)
           echo "BUILD_NUMBER=$BUILD" >> "$GITHUB_ENV"
           xcodebuild \
@@ -72,7 +73,7 @@ jobs:
             -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
             -authenticationKeyID "${{ secrets.ASC_API_KEY_ID }}" \
             -authenticationKeyIssuerID "${{ secrets.ASC_API_ISSUER_ID }}" \
-            archive | tail -30
+            archive 2>&1 | tail -40
 
       - name: Export IPA (TestFlight / app-store-connect)
         run: |
@@ -101,7 +102,7 @@ jobs:
             -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
             -authenticationKeyID "${{ secrets.ASC_API_KEY_ID }}" \
             -authenticationKeyIssuerID "${{ secrets.ASC_API_ISSUER_ID }}" \
-            | tail -20
+            2>&1 | tail -60
 
       - name: Upload to TestFlight
         run: |

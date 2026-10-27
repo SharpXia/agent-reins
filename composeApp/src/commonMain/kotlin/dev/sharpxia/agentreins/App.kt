@@ -1,5 +1,7 @@
 package dev.sharpxia.agentreins
 
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
@@ -16,6 +18,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import dev.sharpxia.agentreins.ui.ConnectionScreen
 import dev.sharpxia.agentreins.ui.SessionsScreen
 import dev.sharpxia.agentreins.ui.theme.AgentReinsTheme
@@ -27,25 +30,30 @@ private enum class AppScreen { SESSIONS, CONNECTION }
 fun App(prebuilt: AppModel? = null) {
     val model = prebuilt ?: remember { AppModel() }
     var current by remember { mutableStateOf(AppScreen.SESSIONS) }
+    // 键盘弹出时隐藏底部导航（iOS 惯例，ChatGPT 同款）：否则导航栏垫在键盘下，
+    // 内容底 padding + imePadding 双重叠加，输入框离键盘一大截
+    val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
 
     // 设计基线（M2.6）：明暗跟随系统，token 见 ui/theme/Theme.kt
     AgentReinsTheme {
         Scaffold(
             containerColor = MaterialTheme.colorScheme.background,
             bottomBar = {
-                NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
-                    NavigationBarItem(
-                        selected = current == AppScreen.SESSIONS,
-                        onClick = { current = AppScreen.SESSIONS },
-                        icon = { Icon(Icons.Filled.Home, contentDescription = null) },
-                        label = { Text("会话") },
-                    )
-                    NavigationBarItem(
-                        selected = current == AppScreen.CONNECTION,
-                        onClick = { current = AppScreen.CONNECTION },
-                        icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
-                        label = { Text("连接") },
-                    )
+                if (!imeVisible) {
+                    NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
+                        NavigationBarItem(
+                            selected = current == AppScreen.SESSIONS,
+                            onClick = { current = AppScreen.SESSIONS },
+                            icon = { Icon(Icons.Filled.Home, contentDescription = null) },
+                            label = { Text("会话") },
+                        )
+                        NavigationBarItem(
+                            selected = current == AppScreen.CONNECTION,
+                            onClick = { current = AppScreen.CONNECTION },
+                            icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
+                            label = { Text("连接") },
+                        )
+                    }
                 }
             },
         ) { padding ->

@@ -160,6 +160,7 @@ class AppModel(
                     val connectedLike = st is GatewayStatus.Connected ||
                         st is GatewayStatus.Connecting || st is GatewayStatus.PairingPending
                     if (!connectedLike && url.isNotBlank() && (deviceToken != null || apiKey.isNotBlank())) {
+                        resetAutoRetry() // 前台事件 = 网络环境可能变化，退避计数清零重新起算
                         connect()
                     }
                 }
@@ -228,6 +229,7 @@ class AppModel(
         lastError = null
         explicitDisconnect = false
         connectedUrl = null
+        autoRetryJob?.cancel() // 手动/重入连接优先，别让在途退避重试插进来
         // 旧客户端先收尾（重连场景）：WS 任务与 HttpClient 不能泄漏
         val old = client
         if (old != null) scope.launch { runCatching { old.disconnect() } }
@@ -295,6 +297,7 @@ class AppModel(
                 val connected = successUrl
                     ?: throw (lastTransportError ?: IllegalStateException("connect failed"))
                 connectedUrl = connected
+                resetAutoRetry() // 连上了，退避重试收队
                 // 扫码/连接成功即记住本次配置与设备凭证（M1 存 Documents，M3 迁 Keychain）
                 // 主地址保持用户输入/QR 主地址（到家优先 LAN），备用列表原样保存
                 deviceToken = c.deviceToken ?: deviceToken
@@ -320,8 +323,39 @@ class AppModel(
                 status = GatewayStatus.Error(e.message)
             } finally {
                 busy = false
+                // 自动连接失败（冷启动时网络/VPN 路由常未就绪）：有界退避重试，
+                // 覆盖「启动后几十秒内链路才通」的时序；成功/前台事件/手动操作会重置
+                if (status is GatewayStatus.Error) scheduleAutoRetry()
             }
         }
+    }
+
+    // ---- 自动连接退避重试（真机反馈：冷启动无法连接，网络/VPN 路由未就绪的时序问题） ----
+    private var autoRetryJob: Job? = null
+    private var autoRetryAttempts = 0
+
+    private fun scheduleAutoRetry() {
+        autoRetryJob?.cancel()
+        if (explicitDisconnect) return
+        if (deviceToken == null && apiKey.isBlank()) return // 没有可用凭据不空转
+        if (autoRetryAttempts >= AUTO_RETRY_MAX_ATTEMPTS) return
+        val delayMs = 2_000L shl autoRetryAttempts.coerceAtMost(4) // 2s→4s→8s→16s→32s
+        autoRetryAttempts++
+        autoRetryJob = scope.launch {
+            delay(delayMs)
+            val st = status
+            val retryable = st is GatewayStatus.Disconnected || st is GatewayStatus.Error
+            if (!explicitDisconnect && retryable) {
+                connect()
+            }
+        }
+    }
+
+    /** 成功/回前台时重置退避计数，取消在途重试。 */
+    private fun resetAutoRetry() {
+        autoRetryAttempts = 0
+        autoRetryJob?.cancel()
+        autoRetryJob = null
     }
 
     /** 扫码结果入口：拿到 setup code 即自动发起配对连接。 */
@@ -468,6 +502,7 @@ class AppModel(
     fun disconnect() {
         explicitDisconnect = true
         connectedUrl = null
+        resetAutoRetry() // 用户主动断开不自动重连
         scope.launch { client?.disconnect() }
         selectedSession = null
         conversation = null
@@ -493,5 +528,8 @@ class AppModel(
     private companion object {
         /** session overlay（pinned/archived 本地状态）的 kv 槽位（M2.6）。 */
         const val OVERLAY_KEY = "sessionOverlay:v1"
+
+        /** 自动连接退避重试上限（2s→4s→8s→16s→32s，约 1 分钟窗口）。 */
+        const val AUTO_RETRY_MAX_ATTEMPTS = 5
     }
 }

@@ -1,15 +1,18 @@
 package dev.sharpxia.agentreins.ui
 
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -20,6 +23,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -60,7 +64,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -68,13 +77,16 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import dev.sharpxia.agentreins.AppModel
 import dev.sharpxia.agentreins.model.Message
 import dev.sharpxia.agentreins.model.ToolCallEvent
 import dev.sharpxia.agentreins.openclaw.Outbox
 import dev.sharpxia.agentreins.ui.theme.ArTheme
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 /**
  * 对话流（M2.6 新基线）：日分隔、ChatGPT 式气泡（用户灰气泡右对齐/助手平文）、
@@ -102,9 +114,10 @@ internal fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier 
         (if (state?.hasMoreHistory == true && contentRowCount > 0) 1 else 0) +
         (if (contentRowCount == 0 && !runActive) 1 else 0) +
         (if (runActive) 1 else 0)
-    // 首次有内容：直接定位到底部；此后仅贴底时跟随新消息
-    LaunchedEffect(totalRows, lastTextLen, runActive) {
-        if (totalRows == 0) return@LaunchedEffect
+    // 入场落地最新消息：**只有真实内容行就绪才执行**——空态提示行也算一行，
+    // 若在它上面完成 initialScrollDone，历史到达后就永远停在顶部（真机反馈实锤）
+    LaunchedEffect(totalRows, contentRowCount, lastTextLen, runActive) {
+        if (contentRowCount == 0) return@LaunchedEffect
         if (!initialScrollDone) {
             listState.scrollToItem(totalRows - 1)
             initialScrollDone = true
@@ -129,13 +142,78 @@ internal fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier 
             listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
         }.collect { atTop -> if (atTop) model.loadOlderMessages() }
     }
+    // 滚动即收起键盘（iOS 惯例，ChatGPT 同款）
+    val keyboard = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }.distinctUntilChanged().collect { scrolling ->
+            if (scrolling) {
+                keyboard?.hide()
+                focusManager.clearFocus()
+            }
+        }
+    }
+    // 状态栏点击 → 回顶（顶部检测顺带触发加载更早一页）
+    StatusBarTapEffect {
+        if (contentRowCount > 0) scope.launch { listState.animateScrollToItem(0) }
+    }
 
-    Column(
-        modifier
-            .fillMaxWidth()
-            .imePadding()
-            .dismissKeyboardOnTap(),
-    ) {
+    // 左缘右滑返回（iOS 交互惯例）：左缘 28dp 起手的横向拖拽平移整页，过阈值返回
+    var backDragPx by remember { mutableStateOf(0f) }
+    var edgeDragArmed by remember { mutableStateOf(false) }
+    var screenWidthPx by remember { mutableStateOf(1f) }
+    val edgeWidthPx = with(LocalDensity.current) { 28.dp.toPx() }
+    val commitFraction = 0.3f
+
+    Box(modifier.fillMaxWidth().imePadding()) {
+        if (backDragPx > 0f) {
+            // 拖拽时露出的返回层
+            Box(
+                Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(
+                        alpha = (backDragPx / (screenWidthPx * commitFraction)).coerceIn(0f, 1f),
+                    ),
+                    modifier = Modifier.padding(start = 28.dp),
+                )
+            }
+        }
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .offset { IntOffset(backDragPx.roundToInt(), 0) }
+                .onSizeChanged { screenWidthPx = it.width.toFloat().coerceAtLeast(1f) }
+                .pointerInput(Unit) {
+                    detectHorizontalDragGestures(
+                        onDragStart = { start -> edgeDragArmed = start.x <= edgeWidthPx },
+                        onDragEnd = {
+                            if (!edgeDragArmed) return@detectHorizontalDragGestures
+                            edgeDragArmed = false
+                            if (backDragPx > screenWidthPx * commitFraction) {
+                                haptics.tap()
+                                model.select(null)
+                                backDragPx = 0f
+                            } else {
+                                val from = backDragPx
+                                scope.launch {
+                                    animate(from, 0f, animationSpec = spring()) { v, _ -> backDragPx = v }
+                                }
+                            }
+                        },
+                        onDragCancel = { edgeDragArmed = false; backDragPx = 0f },
+                    ) { change, dragAmount ->
+                        if (edgeDragArmed) {
+                            backDragPx = (backDragPx + dragAmount).coerceIn(0f, screenWidthPx)
+                            change.consume()
+                        }
+                    }
+                }
+                .dismissKeyboardOnTap(),
+        ) {
         ChatTopBar(model, sessionKey, runActive)
         if (model.queuedCount > 0) {
             QueuedBanner(count = model.queuedCount, onRetry = { haptics.tap(); model.retryQueuedNow() })
@@ -220,6 +298,7 @@ internal fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier 
         }
 
         ChatInputBar(model, haptics)
+        }
     }
 }
 
@@ -335,26 +414,29 @@ private fun ChatMessageItem(message: Message, onCopy: (String) -> Unit, onResend
                 }
             }
         }
-        // 助手消息：ChatGPT 式平文（无气泡），流式中附闪烁光标
+        // 助手消息：ChatGPT 式平文（无气泡），流式中附闪烁光标。
+        // 长按区**贴内容**：全宽 clickable 会吞掉整行右侧空白的点击，
+        // 导致「点空白收起键盘」失效（真机反馈实锤）
         Message.Role.ASSISTANT -> {
             var menuOpen by remember { mutableStateOf(false) }
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .combinedClickable(onClick = {}, onLongClick = { menuOpen = true }),
-            ) {
-                if (message.streaming) {
-                    StreamingText(message.content)
-                } else if (message.content.isNotBlank()) {
-                    MarkdownText(message.content)
+            Row(Modifier.fillMaxWidth()) {
+                Column(
+                    Modifier
+                        .combinedClickable(onClick = {}, onLongClick = { menuOpen = true }),
+                ) {
+                    if (message.streaming) {
+                        StreamingText(message.content)
+                    } else if (message.content.isNotBlank()) {
+                        MarkdownText(message.content)
+                    }
+                    MessageMenu(
+                        expanded = menuOpen,
+                        onDismiss = { menuOpen = false },
+                        showResend = false,
+                        onCopy = { onCopy(message.content) },
+                        onResend = {},
+                    )
                 }
-                MessageMenu(
-                    expanded = menuOpen,
-                    onDismiss = { menuOpen = false },
-                    showResend = false,
-                    onCopy = { onCopy(message.content) },
-                    onResend = {},
-                )
             }
         }
         // agent 的 commentary（item 流 kind=preamble）：过程说明文本

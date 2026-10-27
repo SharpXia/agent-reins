@@ -81,9 +81,11 @@ jobs:
                                          headers={"Authorization": f"Bearer {jwt}"})
               return urllib.request.urlopen(r)
 
-          data = json.load(req("/v1/certificates?filter[certificateType]=IOS_DEVELOPMENT&limit=200"))
-          certs = data.get("data", [])
-          print(f"iOS development certs: {len(certs)}")
+          data = json.load(req("/v1/certificates?limit=200"))
+          certs = [c for c in data.get("data", [])
+                   if "DEVELOPMENT" in c["attributes"].get("certificateType", "")
+                   and "DISTRIBUTION" not in c["attributes"].get("certificateType", "")]
+          print(f"development certs: {len(certs)} (types: {[c['attributes'].get('certificateType') for c in data.get('data', [])]})")
           for c in certs:
               print("revoking", c["id"], c["attributes"].get("displayName"))
               try:

@@ -1,5 +1,6 @@
 package dev.sharpxia.agentreins.ui
 
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -8,6 +9,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -17,17 +19,17 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.foundation.layout.union
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -40,7 +42,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -64,34 +65,45 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import dev.sharpxia.agentreins.AppModel
 import dev.sharpxia.agentreins.model.Message
 import dev.sharpxia.agentreins.model.ToolCallEvent
+import dev.sharpxia.agentreins.model.sessionKeyAgentId
 import dev.sharpxia.agentreins.openclaw.Outbox
-import dev.sharpxia.agentreins.ui.theme.ArTheme
+import dev.sharpxia.agentreins.ui.components.InkMarkdown
+import dev.sharpxia.agentreins.ui.theme.AgentTintName
+import dev.sharpxia.agentreins.ui.theme.AgentTintScope
+import dev.sharpxia.agentreins.ui.theme.InkTheme
+import dev.sharpxia.agentreins.ui.theme.LocalAgentTint
+import dev.sharpxia.agentreins.ui.theme.agentTintFor
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
 /**
- * 对话流（M2.6 新基线）：日分隔、ChatGPT 式气泡（用户灰气泡右对齐/助手平文）、
- * 消息长按菜单（复制/重发）、outbox 待发气泡（重试/删除）、流式光标动画。
- * 数据源不变：model.conversation（ConversationState）。
+ * 对话流（M3.3 墨水风重绘）：日分隔、助手墨水平文（Markdown v2 表格/嵌套/高亮）、
+ * 用户 tint 气泡、流式 shimmer、消息入场/高度过渡、长按菜单、outbox 待发气泡。
+ * 滚动定位/分页/键盘逻辑沿用 M2.6（真机打磨过的行为不动）。
  */
 @Composable
-internal fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier = Modifier) {
+internal fun ChatScreen(
+    model: AppModel,
+    sessionKey: String,
+    modifier: Modifier = Modifier,
+    onBack: () -> Unit = {},
+) {
     val state = model.conversation
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -105,14 +117,10 @@ internal fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier 
     val contentRowCount = rows.size + pending.size
     val lastTextLen = (state?.entries?.lastOrNull() as? Message)?.content?.length ?: 0
     val runActive = state?.activeRunId != null
-    // 列表实际会发出的总行数：内容行 + 「加载更早」头 + 空态 + 生成中行（按数据算，
-    // 不读 layoutInfo——组合帧它可能还是上一帧的值，差一项目标偏短）
     val totalRows = contentRowCount +
         (if (state?.hasMoreHistory == true && contentRowCount > 0) 1 else 0) +
         (if (contentRowCount == 0 && !runActive) 1 else 0) +
         (if (runActive) 1 else 0)
-    // 入场落地最新消息：**只有真实内容行就绪才执行**——空态提示行也算一行，
-    // 若在它上面完成 initialScrollDone，历史到达后就永远停在顶部（真机反馈实锤）
     LaunchedEffect(totalRows, contentRowCount, lastTextLen, runActive) {
         if (contentRowCount == 0) return@LaunchedEffect
         if (!initialScrollDone) {
@@ -125,7 +133,6 @@ internal fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier 
             listState.animateScrollToItem(totalRows - 1)
         }
     }
-    // 贴底检测：离开底部即亮出「查看最新」
     LaunchedEffect(listState) {
         snapshotFlow {
             val info = listState.layoutInfo
@@ -133,13 +140,11 @@ internal fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier 
             lastVisible < info.totalItemsCount - 2
         }.collect { showJumpToLatest = it }
     }
-    // 滚到顶懒加载更早一页历史
     LaunchedEffect(listState) {
         snapshotFlow {
             listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
         }.collect { atTop -> if (atTop) model.loadOlderMessages() }
     }
-    // 滚动即收起键盘（iOS 惯例，ChatGPT 同款）
     val keyboard = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     LaunchedEffect(listState) {
@@ -150,20 +155,17 @@ internal fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier 
             }
         }
     }
-    // 状态栏点击 → 回顶（顶部检测顺带触发加载更早一页）
     StatusBarTapEffect {
         if (contentRowCount > 0) scope.launch { listState.animateScrollToItem(0) }
     }
 
-    // 边缘返回手势在 SessionsScreen 的包裹层（需露出底层真实列表），本组件保持纯布局；
-    // 不透明背景——对齐完成后底层列表从本页背后消失才穿帮
     Column(
         modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
+            .background(InkTheme.colors.paper)
             .dismissKeyboardOnTap(),
     ) {
-        ChatTopBar(model, sessionKey, runActive)
+        ChatTopBar(model, sessionKey, runActive, onBack)
         if (model.queuedCount > 0) {
             QueuedBanner(count = model.queuedCount, onRetry = { haptics.tap(); model.retryQueuedNow() })
         }
@@ -172,8 +174,6 @@ internal fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier 
             Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                // 入场定位完成前不显示内容：历史到达首帧列表在顶部，
-                // scrollToItem 是组合后动作——先闪一下再跳底（真机反馈实锤）
                 .alpha(if (contentRowCount > 0 && !initialScrollDone) 0f else 1f),
         ) {
             LazyColumn(
@@ -186,8 +186,8 @@ internal fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier 
                     item(key = "loading-older") {
                         Text(
                             "上拉加载更早消息…",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = InkTheme.type.textXs,
+                            color = InkTheme.colors.textTertiary,
                             modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                         )
                     }
@@ -196,8 +196,8 @@ internal fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier 
                     item(key = "empty") {
                         Text(
                             "暂无消息，发一条开始对话",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = InkTheme.type.textSm,
+                            color = InkTheme.colors.textTertiary,
                             modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
                         )
                     }
@@ -208,11 +208,15 @@ internal fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier 
                         is ChatRow.Entry -> row.entry.id
                     }
                 }) { row ->
+                    // 新消息入场：淡入 + 轻微上移（M3.3；animateItem 处理重排/新行）
+                    @OptIn(ExperimentalFoundationApi::class)
+                    (Modifier.animateItem())
                     when (row) {
                         is ChatRow.DayHeader -> DayHeaderRow(row.atMs)
                         is ChatRow.Entry -> when (val entry = row.entry) {
                             is ToolCallEvent -> ToolCallCard(entry)
                             is Message -> ChatMessageItem(
+                                model = model,
                                 message = entry,
                                 onCopy = { text -> clipboard.setText(AnnotatedString(text)) },
                                 onResend = { text -> haptics.tap(); model.resendText(text) },
@@ -238,7 +242,8 @@ internal fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier 
                         if (totalRows > 0) scope.launch { listState.animateScrollToItem(totalRows - 1) }
                     },
                     shape = CircleShape,
-                    color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                    color = InkTheme.colors.elevated,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, InkTheme.colors.borderPrimary),
                     shadowElevation = 2.dp,
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
@@ -247,14 +252,13 @@ internal fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier 
                     Icon(
                         Icons.Filled.KeyboardArrowDown,
                         contentDescription = "查看最新消息",
+                        tint = InkTheme.colors.ink,
                         modifier = Modifier.padding(8.dp).size(20.dp),
                     )
                 }
             }
         }
 
-        // 消息页无底部导航（App 壳隐藏），输入栏自己消费 键盘∪导航栏 insets 取最大值，
-        // 避免键盘弹出时两者叠加多出一条导航栏高度
         ChatInputBar(
             model = model,
             haptics = haptics,
@@ -264,25 +268,33 @@ internal fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier 
 }
 
 @Composable
-private fun ChatTopBar(model: AppModel, sessionKey: String, runActive: Boolean) {
-    Surface(color = MaterialTheme.colorScheme.surface) {
+private fun ChatTopBar(model: AppModel, sessionKey: String, runActive: Boolean, onBack: () -> Unit) {
+    Surface(color = InkTheme.colors.paper) {
         Column(Modifier.fillMaxWidth()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = { model.select(null) }) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                IconButton(onClick = {
+                    model.select(null)
+                    onBack()
+                }) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "返回",
+                        tint = InkTheme.colors.ink,
+                    )
                 }
                 Column(Modifier.weight(1f)) {
                     val session = model.sessions.firstOrNull { it.id == sessionKey }
                     Text(
                         session?.title ?: sessionKey,
-                        style = MaterialTheme.typography.titleMedium,
+                        style = InkTheme.type.headingSm,
+                        color = InkTheme.colors.ink,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
                         session?.kind?.takeIf { it.isNotBlank() } ?: sessionKey,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = InkTheme.type.textXs,
+                        color = InkTheme.colors.textTertiary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -297,8 +309,8 @@ private fun ChatTopBar(model: AppModel, sessionKey: String, runActive: Boolean) 
                     Spacer(Modifier.size(8.dp))
                     Text(
                         "生成中…",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = InkTheme.type.textXs,
+                        color = InkTheme.colors.textTertiary,
                     )
                 }
             }
@@ -308,19 +320,20 @@ private fun ChatTopBar(model: AppModel, sessionKey: String, runActive: Boolean) 
 
 @Composable
 private fun QueuedBanner(count: Int, onRetry: () -> Unit) {
-    Surface(color = MaterialTheme.colorScheme.tertiaryContainer, modifier = Modifier.fillMaxWidth()) {
+    val c = InkTheme.colors
+    Surface(color = c.warning.subtle, modifier = Modifier.fillMaxWidth()) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.padding(start = 16.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
         ) {
             Text(
-                "⏳ $count 条消息待发送，重连后自动补发",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                "$count 条消息待发送，重连后自动补发",
+                style = InkTheme.type.textSm,
+                color = c.warning.text,
                 modifier = Modifier.weight(1f),
             )
             TextButton(onClick = onRetry) {
-                Text("立即重试", style = MaterialTheme.typography.labelMedium)
+                Text("立即重试", style = InkTheme.type.textSm, color = c.warning.text)
             }
         }
     }
@@ -331,8 +344,8 @@ private fun DayHeaderRow(atMs: Long) {
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Text(
             dayHeaderLabel(atMs),
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = InkTheme.type.textXs,
+            color = InkTheme.colors.textTertiary,
             modifier = Modifier.padding(vertical = 6.dp),
         )
     }
@@ -340,74 +353,89 @@ private fun DayHeaderRow(atMs: Long) {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ChatMessageItem(message: Message, onCopy: (String) -> Unit, onResend: (String) -> Unit) {
-    val tokens = ArTheme.tokens
-    when (message.role) {
-        Message.Role.USER -> {
-            var menuOpen by remember { mutableStateOf(false) }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                BoxWithConstraints {
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                        shape = RoundedCornerShape(
-                            tokens.bubbleRadius.dp,
-                            5.dp,
-                            tokens.bubbleRadius.dp,
-                            tokens.bubbleRadius.dp,
-                        ),
+private fun ChatMessageItem(
+    model: AppModel,
+    message: Message,
+    onCopy: (String) -> Unit,
+    onResend: (String) -> Unit,
+) {
+    // agent 身份色作用域：会话的 agent tint 派生用户气泡与强调（BotTintScope 等价）
+    val session = model.sessions.firstOrNull { it.id == message.sessionId }
+    val agentId = session?.agentId ?: sessionKeyAgentId(message.sessionId)
+    val tintName = model.agentProfiles[agentId]?.tint
+        ?: agentId?.let { agentTintFor(it) }
+        ?: AgentTintName.GRAY
+    AgentTintScope(tintName) {
+        when (message.role) {
+            Message.Role.USER -> UserBubble(message, onCopy, onResend)
+            // 助手消息：墨水平文无气泡；流式中 shimmer，定型后 Markdown v2。
+            // 长按区贴内容（全宽 clickable 吞点击的坑，真机实锤）
+            Message.Role.ASSISTANT -> {
+                var menuOpen by remember { mutableStateOf(false) }
+                Row(Modifier.fillMaxWidth()) {
+                    Column(
+                        Modifier
+                            .combinedClickable(onClick = {}, onLongClick = { menuOpen = true })
+                            .animateContentSize(),
                     ) {
-                        Text(
-                            message.content,
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier
-                                .widthIn(max = maxWidth * tokens.bubbleMaxWidthFraction)
-                                .combinedClickable(onClick = {}, onLongClick = { menuOpen = true })
-                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                        if (message.streaming) {
+                            ShimmerStreamingText(message.content)
+                        } else if (message.content.isNotBlank()) {
+                            InkMarkdown(message.content)
+                        }
+                        MessageMenu(
+                            expanded = menuOpen,
+                            onDismiss = { menuOpen = false },
+                            showResend = false,
+                            onCopy = { onCopy(message.content) },
+                            onResend = {},
                         )
                     }
-                    MessageMenu(
-                        expanded = menuOpen,
-                        onDismiss = { menuOpen = false },
-                        showResend = true,
-                        onCopy = { onCopy(message.content) },
-                        onResend = { onResend(message.content) },
-                    )
                 }
             }
+            // agent 的 commentary（item 流 kind=preamble）：过程说明行内注
+            Message.Role.SYSTEM -> Text(
+                message.content,
+                style = InkTheme.type.textSm,
+                fontStyle = FontStyle.Italic,
+                color = InkTheme.colors.textTertiary,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+            )
         }
-        // 助手消息：ChatGPT 式平文（无气泡），流式中附闪烁光标。
-        // 长按区**贴内容**：全宽 clickable 会吞掉整行右侧空白的点击，
-        // 导致「点空白收起键盘」失效（真机反馈实锤）
-        Message.Role.ASSISTANT -> {
-            var menuOpen by remember { mutableStateOf(false) }
-            Row(Modifier.fillMaxWidth()) {
-                Column(
-                    Modifier
-                        .combinedClickable(onClick = {}, onLongClick = { menuOpen = true }),
-                ) {
-                    if (message.streaming) {
-                        StreamingText(message.content)
-                    } else if (message.content.isNotBlank()) {
-                        MarkdownText(message.content)
-                    }
-                    MessageMenu(
-                        expanded = menuOpen,
-                        onDismiss = { menuOpen = false },
-                        showResend = false,
-                        onCopy = { onCopy(message.content) },
-                        onResend = {},
-                    )
-                }
+    }
+}
+
+/** 用户 tint 气泡：bubble 底 + 墨水文本 + 右上小圆角（Grok bubbleUser 形态）。 */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun UserBubble(message: Message, onCopy: (String) -> Unit, onResend: (String) -> Unit) {
+    var menuOpen by remember { mutableStateOf(false) }
+    val tint = LocalAgentTint.current
+    val c = InkTheme.colors
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+        BoxWithConstraints {
+            Surface(
+                color = tint.bubble,
+                shape = RoundedCornerShape(InkTheme.shapes.lg.dp, 5.dp, InkTheme.shapes.lg.dp, InkTheme.shapes.lg.dp),
+            ) {
+                Text(
+                    message.content,
+                    style = InkTheme.type.textLg,
+                    color = c.ink,
+                    modifier = Modifier
+                        .widthIn(max = maxWidth * 0.82f)
+                        .combinedClickable(onClick = {}, onLongClick = { menuOpen = true })
+                        .padding(horizontal = 13.dp, vertical = 9.dp),
+                )
             }
+            MessageMenu(
+                expanded = menuOpen,
+                onDismiss = { menuOpen = false },
+                showResend = true,
+                onCopy = { onCopy(message.content) },
+                onResend = { onResend(message.content) },
+            )
         }
-        // agent 的 commentary（item 流 kind=preamble）：过程说明文本
-        Message.Role.SYSTEM -> Text(
-            message.content,
-            style = MaterialTheme.typography.bodySmall,
-            fontStyle = FontStyle.Italic,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-        )
     }
 }
 
@@ -422,13 +450,13 @@ private fun MessageMenu(
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
         DropdownMenuItem(
-            text = { Text("复制") },
+            text = { Text("复制", style = InkTheme.type.textMd) },
             leadingIcon = { Icon(ArIcons.Copy, contentDescription = null, modifier = Modifier.size(18.dp)) },
             onClick = { onCopy(); onDismiss() },
         )
         if (showResend) {
             DropdownMenuItem(
-                text = { Text("重发") },
+                text = { Text("重发", style = InkTheme.type.textMd) },
                 leadingIcon = { Icon(ArIcons.Retry, contentDescription = null, modifier = Modifier.size(18.dp)) },
                 onClick = { onResend(); onDismiss() },
             )
@@ -436,92 +464,80 @@ private fun MessageMenu(
     }
 }
 
-/** outbox 待发气泡：灰阶弱化文本 + 「未发出」标记 + 重试/删除。 */
+/** outbox 待发气泡：灰阶弱化 + 「未发出」标记 + 重试/删除。 */
 @Composable
 private fun PendingOutboxItem(cmd: Outbox.Command, onRetry: () -> Unit, onDelete: () -> Unit) {
-    val tokens = ArTheme.tokens
+    val tint = LocalAgentTint.current
+    val c = InkTheme.colors
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
         Column(horizontalAlignment = Alignment.End) {
             Surface(
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                shape = RoundedCornerShape(
-                    tokens.bubbleRadius.dp,
-                    5.dp,
-                    tokens.bubbleRadius.dp,
-                    tokens.bubbleRadius.dp,
-                ),
+                color = tint.bubble.copy(alpha = tint.bubble.alpha * 0.55f),
+                shape = RoundedCornerShape(InkTheme.shapes.lg.dp, 5.dp, InkTheme.shapes.lg.dp, InkTheme.shapes.lg.dp),
             ) {
                 Text(
                     cmd.text,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.widthIn(max = 320.dp).padding(horizontal = 12.dp, vertical = 8.dp),
+                    style = InkTheme.type.textLg,
+                    color = c.textTertiary,
+                    modifier = Modifier.widthIn(max = 320.dp).padding(horizontal = 13.dp, vertical = 9.dp),
                 )
             }
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 2.dp)) {
                 Text(
                     "未发出",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error,
+                    style = InkTheme.type.textXs,
+                    color = c.danger.text,
                 )
                 IconButton(onClick = onRetry, modifier = Modifier.size(28.dp)) {
-                    Icon(
-                        ArIcons.Retry,
-                        contentDescription = "重试发送",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp),
-                    )
+                    Icon(ArIcons.Retry, contentDescription = "重试发送", tint = c.textTertiary, modifier = Modifier.size(16.dp))
                 }
                 IconButton(onClick = onDelete, modifier = Modifier.size(28.dp)) {
-                    Icon(
-                        Icons.Filled.Delete,
-                        contentDescription = "放弃发送",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp),
-                    )
+                    Icon(Icons.Filled.Delete, contentDescription = "放弃发送", tint = c.textTertiary, modifier = Modifier.size(16.dp))
                 }
             }
         }
     }
 }
 
-/** 流式中的消息：纯文本 + 尾部闪烁光标（定型后走 Markdown 渲染）。 */
+/**
+ * 流式中文本 shimmer（textShimmerBase → textTertiary 微光扫过）；
+ * 定型后走 Markdown。横向渐变窗口按动画进度平移，无需实测文本宽度。
+ */
 @Composable
-private fun StreamingText(content: String) {
-    val caretAlpha by rememberCaretAlpha()
-    val caretColor = MaterialTheme.colorScheme.primary
-    val annotated = remember(content, caretAlpha, caretColor) {
-        buildAnnotatedString {
-            append(content)
-            withStyle(SpanStyle(color = caretColor.copy(alpha = caretAlpha))) { append("▍") }
-        }
-    }
+private fun ShimmerStreamingText(content: String) {
+    val c = InkTheme.colors
+    val shift by rememberInfiniteTransition(label = "shimmer").animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1500, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "shimmerShift",
+    )
+    val window = 420f
+    val start = window * (shift * 2.4f - 1.2f)
+    val brush = Brush.linearGradient(
+        colors = listOf(c.shimmerBase, c.textTertiary, c.shimmerBase),
+        start = Offset(start, 0f),
+        end = Offset(start + window, 0f),
+    )
     Text(
-        annotated,
-        style = MaterialTheme.typography.bodyMedium,
+        content,
+        style = TextStyle(
+            fontSize = InkTheme.type.textLg.fontSize,
+            lineHeight = InkTheme.type.textLg.lineHeight,
+            brush = brush,
+        ),
         modifier = Modifier.fillMaxWidth(),
     )
 }
 
-@Composable
-private fun rememberCaretAlpha(): State<Float> {
-    val transition = rememberInfiniteTransition(label = "caret")
-    return transition.animateFloat(
-        initialValue = 1f,
-        targetValue = 0.15f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 500, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "caretAlpha",
-    )
-}
-
-/** 生成中三点跳动（ChatGPT 式）。 */
+/** 生成中三点跳动。 */
 @Composable
 internal fun TypingDots() {
     val transition = rememberInfiniteTransition(label = "dots")
-    val color = MaterialTheme.colorScheme.onSurfaceVariant
+    val color = InkTheme.colors.textTertiary
     Row {
         for (i in 0 until 3) {
             val phase by transition.animateFloat(
@@ -556,9 +572,9 @@ private fun TypingIndicator(thinkingText: String?) {
         val lastThinking = thinkingText?.lineSequence()?.lastOrNull { it.isNotBlank() }
         Text(
             lastThinking?.let { "思考中：$it" } ?: "生成中…",
-            style = MaterialTheme.typography.bodySmall,
+            style = InkTheme.type.textSm,
             fontStyle = FontStyle.Italic,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = InkTheme.colors.textTertiary,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
@@ -567,27 +583,30 @@ private fun TypingIndicator(thinkingText: String?) {
 
 @Composable
 private fun ChatInputBar(model: AppModel, haptics: HapticPlayer, modifier: Modifier = Modifier) {
-    val tokens = ArTheme.tokens
+    val c = InkTheme.colors
     Row(
         verticalAlignment = Alignment.Bottom,
         modifier = modifier
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface)
+            .background(c.paper)
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
         TextField(
             value = model.draft,
             onValueChange = { model.draft = it },
             placeholder = {
-                Text("发送消息…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("发送消息…", color = c.textTertiary, style = InkTheme.type.textMd)
             },
+            textStyle = InkTheme.type.textMd,
             modifier = Modifier.weight(1f),
-            shape = RoundedCornerShape(tokens.sendButtonSize.dp),
+            shape = RoundedCornerShape(22.dp),
             maxLines = 4,
             colors = TextFieldDefaults.colors(
-                focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                focusedContainerColor = c.surfaceTertiary,
+                unfocusedContainerColor = c.surfaceTertiary,
+                disabledContainerColor = c.surfaceTertiary,
+                focusedTextColor = c.ink,
+                unfocusedTextColor = c.ink,
                 focusedIndicatorColor = Color.Transparent,
                 unfocusedIndicatorColor = Color.Transparent,
                 disabledIndicatorColor = Color.Transparent,
@@ -600,12 +619,9 @@ private fun ChatInputBar(model: AppModel, haptics: HapticPlayer, modifier: Modif
         Box(
             Modifier
                 .padding(bottom = 6.dp)
-                .size(tokens.sendButtonSize.dp)
+                .size(34.dp)
                 .clip(CircleShape)
-                .background(
-                    if (enabled) MaterialTheme.colorScheme.onSurface
-                    else MaterialTheme.colorScheme.surfaceContainerHighest,
-                )
+                .background(if (enabled) c.inverse else c.surfaceTertiary)
                 .clickable(enabled = enabled) {
                     haptics.tap()
                     model.send()
@@ -615,7 +631,7 @@ private fun ChatInputBar(model: AppModel, haptics: HapticPlayer, modifier: Modif
             Icon(
                 Icons.AutoMirrored.Filled.Send,
                 contentDescription = "发送",
-                tint = if (enabled) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.onSurfaceVariant,
+                tint = if (enabled) c.paper else c.textDisabled,
                 modifier = Modifier.size(17.dp),
             )
         }

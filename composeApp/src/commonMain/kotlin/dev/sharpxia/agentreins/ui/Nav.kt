@@ -312,7 +312,7 @@ private fun ChatRoute(model: AppModel, sessionKey: String, onBack: () -> Unit) {
                     }
                 },
         ) {
-            ChatScreen(model, sessionKey, Modifier.fillMaxSize())
+            ChatScreen(model, sessionKey, Modifier.fillMaxSize(), onBack = onBack)
         }
     }
 }

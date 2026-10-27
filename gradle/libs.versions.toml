@@ -18,6 +18,8 @@ sqldelight = "2.4.1"
 navigationCompose = "2.9.2"
 # 玻璃拟态（Sheet 顶条/底栏毛玻璃）；1.7.x 稳定线，2.0 beta 不用
 haze = "1.7.3"
+# Markdown v2 渲染（M3.3）：CMP 全平台；+code 模块做代码高亮。iOS lazy-list issue #512 落地首验
+markdownRenderer = "0.40.1"
 
 [libraries]
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidx-activityCompose" }
@@ -38,6 +40,9 @@ ktor-client-websockets = { module = "io.ktor:ktor-client-websockets", version.re
 navigation-compose = { module = "org.jetbrains.androidx.navigation:navigation-compose", version.ref = "navigationCompose" }
 haze = { module = "dev.chrisbanes.haze:haze", version.ref = "haze" }
 haze-materials = { module = "dev.chrisbanes.haze:haze-materials", version.ref = "haze" }
+markdown-renderer = { module = "com.mikepenz:multiplatform-markdown-renderer", version.ref = "markdownRenderer" }
+markdown-renderer-m3 = { module = "com.mikepenz:multiplatform-markdown-renderer-m3", version.ref = "markdownRenderer" }
+markdown-renderer-code = { module = "com.mikepenz:multiplatform-markdown-renderer-code", version.ref = "markdownRenderer" }
 sqldelight-android-driver = { module = "app.cash.sqldelight:android-driver", version.ref = "sqldelight" }
 sqldelight-native-driver = { module = "app.cash.sqldelight:native-driver", version.ref = "sqldelight" }
 sqldelight-sqlite-driver = { module = "app.cash.sqldelight:sqlite-driver", version.ref = "sqldelight" }

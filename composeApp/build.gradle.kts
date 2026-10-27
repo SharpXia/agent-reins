@@ -49,6 +49,10 @@ kotlin {
             // M3.1：Sheet 基座玻璃顶条（M3.6 底栏毛玻璃同源）
             implementation(libs.haze)
             implementation(libs.haze.materials)
+            // M3.3：Markdown v2（表格/嵌套/代码高亮；iOS lazy-list 兼容性落地首验）
+            implementation(libs.markdown.renderer)
+            implementation(libs.markdown.renderer.m3)
+            implementation(libs.markdown.renderer.code)
         }
         // desktop 目标的测试源集（ChatRows 日分隔纯函数测试）
         val desktopTest by getting {

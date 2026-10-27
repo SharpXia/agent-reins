@@ -23,4 +23,12 @@ data class Session(
     val archived: Boolean = false,
     /** 会话类型（main/telegram/…渠道 surface），列表可按渠道渲染标识。 */
     val kind: String? = null,
+    /** 归属 agentId（M3：Agent 域分组/身份色）。网关行字段，缺失时按 key 形态解析。 */
+    val agentId: String? = null,
 )
+
+/** 会话 key `agent:<agentId>:<surface>` → agentId（telegram/cron 等嵌套 surface 取第二段）。 */
+fun sessionKeyAgentId(key: String): String? {
+    if (!key.startsWith("agent:")) return null
+    return key.removePrefix("agent:").substringBefore(':').takeIf { it.isNotBlank() }
+}

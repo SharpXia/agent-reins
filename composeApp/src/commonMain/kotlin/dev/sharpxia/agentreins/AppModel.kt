@@ -15,6 +15,8 @@ import dev.sharpxia.agentreins.openclaw.OpenClawClient
 import dev.sharpxia.agentreins.openclaw.Outbox
 import dev.sharpxia.agentreins.openclaw.SessionOverlay
 import dev.sharpxia.agentreins.openclaw.StoredConnection
+import dev.sharpxia.agentreins.ui.theme.AgentTintName
+import dev.sharpxia.agentreins.ui.theme.ThemeMode
 import dev.sharpxia.agentreins.crypto.secureRandomBytes
 import dev.sharpxia.agentreins.openclaw.epochMs
 import dev.sharpxia.agentreins.openclaw.parsePairingSetupCode
@@ -73,6 +75,14 @@ class AppModel(
     var hasPairedCredential by mutableStateOf(false)
         private set
 
+    // ---- M3.1：Agent 本地注册表（名称/身份色，kv 持久化；协议无 agent 写入面） ----
+    var agentProfiles by mutableStateOf<Map<String, AgentProfile>>(emptyMap())
+        private set
+
+    // ---- M3.1：外观偏好（跟随系统/亮/暗，kv 持久化） ----
+    var themeMode by mutableStateOf(ThemeMode.SYSTEM)
+        private set
+
     /** 草稿（per-session 持久化到 kv，500ms 去抖）。 */
     private val draftState = mutableStateOf("")
     var draft: String
@@ -125,6 +135,25 @@ class AppModel(
         publishSessions()
     }
 
+    /** Agent 显示名（空串回落 agentId）。 */
+    fun setAgentName(agentId: String, name: String) =
+        upsertAgent(agentId) { it.copy(name = name.trim().ifBlank { agentId }) }
+
+    /** Agent 身份色。 */
+    fun setAgentTint(agentId: String, tint: AgentTintName) =
+        upsertAgent(agentId) { it.copy(tint = tint) }
+
+    fun applyThemeMode(mode: ThemeMode) {
+        themeMode = mode
+        runCatching { cache.kvPut(gatewayId, THEME_KEY, mode.name) }
+    }
+
+    private fun upsertAgent(agentId: String, transform: (AgentProfile) -> AgentProfile) {
+        val current = agentProfiles[agentId] ?: AgentProfile.default(agentId)
+        agentProfiles = agentProfiles + (agentId to transform(current))
+        runCatching { cache.kvPut(gatewayId, AgentRegistry.KV_KEY, AgentRegistry.serialize(agentProfiles)) }
+    }
+
     /** overlay 持久化：300ms 去抖（滑动连做合并写；单 job 串行天然防乱序）。 */
     private var overlayPersistJob: Job? = null
 
@@ -153,6 +182,9 @@ class AppModel(
         // overlay（pinned/archived 本地状态）随后叠加并发布
         sessionOverlay = SessionOverlay.parse(runCatching { cache.kvGet(gatewayId, OVERLAY_KEY) }.getOrNull())
         publishSessions()
+        agentProfiles = AgentRegistry.parse(runCatching { cache.kvGet(gatewayId, AgentRegistry.KV_KEY) }.getOrNull())
+        themeMode = runCatching { cache.kvGet(gatewayId, THEME_KEY) }.getOrNull()
+            ?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() } ?: ThemeMode.SYSTEM
         // iOS 进后台 WS 必死：回前台自动用已存配置重连（显式断开除外）
         scope.launch {
             appForegroundEvents.collect {
@@ -545,6 +577,9 @@ class AppModel(
     private companion object {
         /** session overlay（pinned/archived 本地状态）的 kv 槽位（M2.6）。 */
         const val OVERLAY_KEY = "sessionOverlay:v1"
+
+        /** 外观偏好 kv 槽位（M3.1）。 */
+        const val THEME_KEY = "appearance:v1"
 
         /** 自动连接退避重试上限（2s→4s→8s→16s→32s，约 1 分钟窗口）。 */
         const val AUTO_RETRY_MAX_ATTEMPTS = 5

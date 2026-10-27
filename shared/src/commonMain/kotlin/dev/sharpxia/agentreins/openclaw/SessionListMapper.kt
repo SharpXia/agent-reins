@@ -53,6 +53,7 @@ object SessionListMapper {
             pinned = row.bool("pinned") ?: false,
             archived = row.bool("archived") ?: false,
             kind = row.str("kind") ?: row.str("channel"),
+            agentId = row.str("agentId") ?: dev.sharpxia.agentreins.model.sessionKeyAgentId(key),
         )
     }
 

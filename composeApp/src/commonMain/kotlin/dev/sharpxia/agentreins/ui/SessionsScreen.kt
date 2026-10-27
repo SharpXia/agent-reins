@@ -58,155 +58,42 @@ import dev.sharpxia.agentreins.model.GatewayStatus
 import dev.sharpxia.agentreins.model.Session
 import dev.sharpxia.agentreins.openclaw.SessionListMapper
 import kotlin.math.abs
+import dev.sharpxia.agentreins.ui.components.ConnectionEmptyState
+import dev.sharpxia.agentreins.ui.components.UnreadBadge
 import dev.sharpxia.agentreins.ui.theme.ArTheme
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 
 /**
- * 会话列表（M2.6 新基线）：头像 + 标题 + 预览 + 时间/未读，滑动操作（右滑置顶、
- * 左滑归档）与长按菜单；归档默认过滤、断网可见缓存列表（M2.5 语义不变）。
- * pinned/archived 走本地 overlay（AppModel），网关同步留 M3+（探针：需 operator.admin）。
+ * 会话列表（M3.1 起：纯列表页，导航由 NavHost 承担）。
+ * 头像 + 标题 + 预览 + 时间/未读，滑动操作（右滑置顶、左滑归档）与长按菜单；
+ * 归档默认过滤、断网可见缓存列表（M2.5 语义不变）。
+ * pinned/archived 走本地 overlay（AppModel），网关同步留 scope 升级流程。
+ * M3.2 重绘行视觉（tint 点/统一 avatar/搜索），本里程碑只动导航层。
  */
 @Composable
-fun SessionsScreen(model: AppModel, modifier: Modifier = Modifier) {
-    val selected = model.selectedSession
-    when {
-        // 断网冷启动仍可见缓存列表（M2.5：缓存是加速层，离线可读）
-        selected == null && model.sessions.isNotEmpty() ->
-            SessionList(model, modifier, offline = model.status !is GatewayStatus.Connected)
-        selected == null -> EmptyState(model, modifier)
-        else -> ChatWithBackGesture(model, selected, modifier)
-    }
-}
-
-/**
- * 对话页 + iOS 边缘返回：底层铺**真实**会话列表，左缘起手横向拖拽时对话页平移、
- * 列表以 0.3 倍速视差露出（真机反馈「应该可以露出底部页面」）。
- */
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun ChatWithBackGesture(model: AppModel, sessionKey: String, modifier: Modifier = Modifier) {
-    var backDragPx by remember { mutableStateOf(0f) }
-    var edgeDragArmed by remember { mutableStateOf(false) }
-    var screenWidthPx by remember { mutableStateOf(1f) }
-    val scope = rememberCoroutineScope()
-    val haptics = rememberHapticPlayer()
-    val edgeWidthPx = with(LocalDensity.current) { 28.dp.toPx() }
-    val commitFraction = 0.3f
-
-    Box(modifier.fillMaxSize()) {
-        // 底层：真实列表（平时被对话页完全盖住；拖拽时视差平移并压暗）
-        Box(
-            Modifier
-                .fillMaxSize()
-                .graphicsLayer {
-                    translationX = backDragPx * 0.3f
-                    val progress = if (screenWidthPx > 1f) backDragPx / (screenWidthPx * commitFraction) else 0f
-                    alpha = if (backDragPx > 0f) (0.55f + 0.45f * (1f - progress.coerceIn(0f, 1f))) else 1f
-                },
-        ) {
-            if (model.sessions.isNotEmpty()) {
-                SessionList(model, Modifier.fillMaxSize(), offline = model.status !is GatewayStatus.Connected)
-            } else {
-                EmptyState(model, Modifier.fillMaxSize())
-            }
-        }
-        // 顶层：对话页 + 左缘手势
-        Box(
-            Modifier
-                .fillMaxSize()
-                .shadow(if (backDragPx > 0f) 12.dp else 0.dp)
-                .offset { IntOffset(backDragPx.roundToInt(), 0) }
-                .onSizeChanged { screenWidthPx = it.width.toFloat().coerceAtLeast(1f) }
-                .pointerInput(Unit) {
-                    detectHorizontalDragGestures(
-                        onDragStart = { start -> edgeDragArmed = start.x <= edgeWidthPx },
-                        onDragEnd = {
-                            if (!edgeDragArmed) return@detectHorizontalDragGestures
-                            edgeDragArmed = false
-                            if (backDragPx > screenWidthPx * commitFraction) {
-                                haptics.tap()
-                                model.select(null)
-                                backDragPx = 0f
-                            } else {
-                                val from = backDragPx
-                                scope.launch {
-                                    animate(from, 0f, animationSpec = spring()) { v, _ -> backDragPx = v }
-                                }
-                            }
-                        },
-                        onDragCancel = { edgeDragArmed = false; backDragPx = 0f },
-                    ) { change, dragAmount ->
-                        if (edgeDragArmed) {
-                            backDragPx = (backDragPx + dragAmount).coerceIn(0f, screenWidthPx)
-                            change.consume()
-                        }
-                    }
-                },
-        ) {
-            ChatScreen(model, sessionKey, Modifier.fillMaxSize())
-        }
+fun SessionsScreen(
+    model: AppModel,
+    onOpenSession: (String) -> Unit,
+    onOpenArchived: () -> Unit = {},
+) {
+    if (model.sessions.isEmpty()) {
+        ConnectionEmptyState(model)
+    } else {
+        SessionList(
+            model = model,
+            offline = model.status !is GatewayStatus.Connected,
+            onOpenSession = onOpenSession,
+        )
     }
 }
 
 @Composable
-private fun EmptyState(model: AppModel, modifier: Modifier = Modifier) {
-    Column(
-        modifier = modifier.fillMaxSize().padding(24.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        when (val st = model.status) {
-            is GatewayStatus.Connecting -> {
-                CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.5.dp, color = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.size(12.dp))
-                Text("连接中…", style = MaterialTheme.typography.titleMedium)
-            }
-            is GatewayStatus.PairingPending -> {
-                CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.5.dp, color = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.size(12.dp))
-                Text("等待 owner 批准设备…", style = MaterialTheme.typography.titleMedium)
-                st.requestId?.let {
-                    Spacer(Modifier.size(4.dp))
-                    Text(
-                        "requestId: $it",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            else -> {
-                if (st is GatewayStatus.Error) {
-                    Text("自动连接失败", style = MaterialTheme.typography.titleMedium)
-                    Spacer(Modifier.size(4.dp))
-                    Text(
-                        st.message ?: "未知错误",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                        textAlign = TextAlign.Center,
-                    )
-                    Spacer(Modifier.size(4.dp))
-                    Text(
-                        "回前台或到「连接」页重试",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                } else {
-                    Text("未连接网关", style = MaterialTheme.typography.titleMedium)
-                    Spacer(Modifier.size(4.dp))
-                    Text(
-                        "到「连接」页扫码配对或填入地址与 API Key",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SessionList(model: AppModel, modifier: Modifier = Modifier, offline: Boolean = false) {
+private fun SessionList(
+    model: AppModel,
+    offline: Boolean = false,
+    onOpenSession: (String) -> Unit = {},
+) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val haptics = rememberHapticPlayer()
@@ -221,7 +108,7 @@ private fun SessionList(model: AppModel, modifier: Modifier = Modifier, offline:
             scope.launch { listState.animateScrollToItem(0) }
         }
     }
-    Column(modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize()) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.padding(start = 16.dp, end = 8.dp, top = 16.dp, bottom = 8.dp),
@@ -250,7 +137,10 @@ private fun SessionList(model: AppModel, modifier: Modifier = Modifier, offline:
             items(visible, key = { it.id }) { s ->
                 SwipeableSessionRow(
                     session = s,
-                    onClick = { model.select(s) },
+                    onClick = {
+                        model.select(s)
+                        onOpenSession(s.id)
+                    },
                     onPin = { pinned ->
                         if (pinned) haptics.success() else haptics.tap()
                         model.setSessionPinned(s, pinned)
@@ -445,18 +335,6 @@ private fun SessionAvatar(session: Session) {
             title.trim().firstOrNull()?.uppercase() ?: "?",
             style = MaterialTheme.typography.titleMedium,
             color = Color.White,
-        )
-    }
-}
-
-@Composable
-private fun UnreadBadge(unread: Int) {
-    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primary) {
-        Text(
-            if (unread > 99) "99+" else unread.toString(),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onPrimary,
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
         )
     }
 }

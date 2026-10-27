@@ -44,6 +44,11 @@ kotlin {
             implementation(libs.kotlinx.serialization.json)
             // 日分隔需要时区日期运算（kotlin.time.Clock 的 Instant → LocalDate）
             implementation(libs.kotlinx.datetime)
+            // M3.1：4-tab IA + push 转场（CMP 官方移植）
+            implementation(libs.navigation.compose)
+            // M3.1：Sheet 基座玻璃顶条（M3.6 底栏毛玻璃同源）
+            implementation(libs.haze)
+            implementation(libs.haze.materials)
         }
         // desktop 目标的测试源集（ChatRows 日分隔纯函数测试）
         val desktopTest by getting {

@@ -10,6 +10,9 @@ import androidx.compose.runtime.staticCompositionLocalOf
  * 尺寸/密度 token（与颜色无关），M3.2/M3.3 重绘对应组件后逐步回收。
  */
 
+/** M3.1 外观偏好：跟随系统 / 亮 / 暗（设置页持久化）。 */
+enum class ThemeMode { SYSTEM, LIGHT, DARK }
+
 /** 主题外的固定尺寸/密度 token（主题无关， CompositionLocal 下发）。 */
 @Immutable
 data class ArTokens(

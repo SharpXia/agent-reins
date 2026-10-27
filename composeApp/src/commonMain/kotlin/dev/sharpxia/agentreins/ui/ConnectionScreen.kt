@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -27,9 +29,9 @@ import androidx.compose.ui.unit.dp
 import dev.sharpxia.agentreins.AppModel
 import dev.sharpxia.agentreins.model.GatewayStatus
 
-/** 连接配置页（M2.6 换肤）：状态点 + 分区表单，逻辑与 M1 保持一致。 */
+/** 连接配置页（M2.6 换肤）：状态点 + 分区表单，逻辑与 M1 保持一致。M3.1 起从设置域 push 进入。 */
 @Composable
-fun ConnectionScreen(model: AppModel, modifier: Modifier = Modifier) {
+fun ConnectionScreen(model: AppModel, modifier: Modifier = Modifier, onBack: (() -> Unit)? = null) {
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -38,7 +40,20 @@ fun ConnectionScreen(model: AppModel, modifier: Modifier = Modifier) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("连接 OpenClaw 网关", style = MaterialTheme.typography.titleLarge)
+        if (onBack != null) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                androidx.compose.material3.IconButton(onClick = onBack) {
+                    androidx.compose.material3.Icon(
+                        Icons.Filled.ArrowBack,
+                        contentDescription = "返回",
+                        tint = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+                Text("连接 OpenClaw 网关", style = MaterialTheme.typography.titleLarge)
+            }
+        } else {
+            Text("连接 OpenClaw 网关", style = MaterialTheme.typography.titleLarge)
+        }
 
         StatusChip(model.status)
 

@@ -14,6 +14,10 @@ kotlinx-serialization-json = "1.11.0"
 ktor = "3.6.0"
 # SQLDelight 2.4.x：KMP 三端 SQLite（ADR #5）；Room 是 Android-only 不可用
 sqldelight = "2.4.1"
+# JetBrains CMP 移植的 AndroidX Navigation（版本跟随 androidx.navigation 号，非 CMP 号）
+navigationCompose = "2.9.2"
+# 玻璃拟态（Sheet 顶条/底栏毛玻璃）；1.7.x 稳定线，2.0 beta 不用
+haze = "1.7.3"
 
 [libraries]
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidx-activityCompose" }
@@ -31,6 +35,9 @@ ktor-client-core = { module = "io.ktor:ktor-client-core", version.ref = "ktor" }
 ktor-client-darwin = { module = "io.ktor:ktor-client-darwin", version.ref = "ktor" }
 ktor-client-okhttp = { module = "io.ktor:ktor-client-okhttp", version.ref = "ktor" }
 ktor-client-websockets = { module = "io.ktor:ktor-client-websockets", version.ref = "ktor" }
+navigation-compose = { module = "org.jetbrains.androidx.navigation:navigation-compose", version.ref = "navigationCompose" }
+haze = { module = "dev.chrisbanes.haze:haze", version.ref = "haze" }
+haze-materials = { module = "dev.chrisbanes.haze:haze-materials", version.ref = "haze" }
 sqldelight-android-driver = { module = "app.cash.sqldelight:android-driver", version.ref = "sqldelight" }
 sqldelight-native-driver = { module = "app.cash.sqldelight:native-driver", version.ref = "sqldelight" }
 sqldelight-sqlite-driver = { module = "app.cash.sqldelight:sqlite-driver", version.ref = "sqldelight" }

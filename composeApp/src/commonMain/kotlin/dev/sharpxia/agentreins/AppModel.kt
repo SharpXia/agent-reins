@@ -166,6 +166,20 @@ class AppModel(
                 }
             }
         }
+        // 响应式重连（真机反馈：应「条件满足再连」而非定时盲试）：网络路径恢复即连。
+        // StateFlow 回放当前值——冷启动即做一次判定；此后 Wi-Fi/VPN 路径每次变化再触发。
+        scope.launch {
+            networkAvailable.collect { available ->
+                if (!available || explicitDisconnect || busy) return@collect
+                val st = status
+                val connectedLike = st is GatewayStatus.Connected ||
+                    st is GatewayStatus.Connecting || st is GatewayStatus.PairingPending
+                if (!connectedLike && url.isNotBlank() && (deviceToken != null || apiKey.isNotBlank())) {
+                    resetAutoRetry()
+                    connect()
+                }
+            }
+        }
         // 已有可用配置（deviceToken 免扫码 / 共享 Key）则启动即连——不再要求每次手动点连接
         if (url.isNotBlank() && (deviceToken != null || apiKey.isNotBlank())) connect()
         if (devAutoConnect) connect() // dev 通道重复调用被 busy 守卫挡掉

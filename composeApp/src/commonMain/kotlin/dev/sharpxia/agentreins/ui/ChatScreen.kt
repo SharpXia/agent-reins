@@ -1,18 +1,15 @@
 package dev.sharpxia.agentreins.ui
 
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -22,8 +19,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -61,13 +62,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.AnnotatedString
@@ -77,7 +76,6 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import dev.sharpxia.agentreins.AppModel
 import dev.sharpxia.agentreins.model.Message
@@ -86,7 +84,6 @@ import dev.sharpxia.agentreins.openclaw.Outbox
 import dev.sharpxia.agentreins.ui.theme.ArTheme
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
-import kotlin.math.roundToInt
 
 /**
  * 对话流（M2.6 新基线）：日分隔、ChatGPT 式气泡（用户灰气泡右对齐/助手平文）、
@@ -158,68 +155,25 @@ internal fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier 
         if (contentRowCount > 0) scope.launch { listState.animateScrollToItem(0) }
     }
 
-    // 左缘右滑返回（iOS 交互惯例）：左缘 28dp 起手的横向拖拽平移整页，过阈值返回
-    var backDragPx by remember { mutableStateOf(0f) }
-    var edgeDragArmed by remember { mutableStateOf(false) }
-    var screenWidthPx by remember { mutableStateOf(1f) }
-    val edgeWidthPx = with(LocalDensity.current) { 28.dp.toPx() }
-    val commitFraction = 0.3f
-
-    Box(modifier.fillMaxWidth().imePadding()) {
-        if (backDragPx > 0f) {
-            // 拖拽时露出的返回层
-            Box(
-                Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
-                contentAlignment = Alignment.CenterStart,
-            ) {
-                Icon(
-                    Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(
-                        alpha = (backDragPx / (screenWidthPx * commitFraction)).coerceIn(0f, 1f),
-                    ),
-                    modifier = Modifier.padding(start = 28.dp),
-                )
-            }
-        }
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .offset { IntOffset(backDragPx.roundToInt(), 0) }
-                .onSizeChanged { screenWidthPx = it.width.toFloat().coerceAtLeast(1f) }
-                .pointerInput(Unit) {
-                    detectHorizontalDragGestures(
-                        onDragStart = { start -> edgeDragArmed = start.x <= edgeWidthPx },
-                        onDragEnd = {
-                            if (!edgeDragArmed) return@detectHorizontalDragGestures
-                            edgeDragArmed = false
-                            if (backDragPx > screenWidthPx * commitFraction) {
-                                haptics.tap()
-                                model.select(null)
-                                backDragPx = 0f
-                            } else {
-                                val from = backDragPx
-                                scope.launch {
-                                    animate(from, 0f, animationSpec = spring()) { v, _ -> backDragPx = v }
-                                }
-                            }
-                        },
-                        onDragCancel = { edgeDragArmed = false; backDragPx = 0f },
-                    ) { change, dragAmount ->
-                        if (edgeDragArmed) {
-                            backDragPx = (backDragPx + dragAmount).coerceIn(0f, screenWidthPx)
-                            change.consume()
-                        }
-                    }
-                }
-                .dismissKeyboardOnTap(),
-        ) {
+    // 边缘返回手势在 SessionsScreen 的包裹层（需露出底层真实列表），本组件保持纯布局
+    Column(
+        modifier
+            .fillMaxWidth()
+            .dismissKeyboardOnTap(),
+    ) {
         ChatTopBar(model, sessionKey, runActive)
         if (model.queuedCount > 0) {
             QueuedBanner(count = model.queuedCount, onRetry = { haptics.tap(); model.retryQueuedNow() })
         }
 
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+        Box(
+            Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                // 入场定位完成前不显示内容：历史到达首帧列表在顶部，
+                // scrollToItem 是组合后动作——先闪一下再跳底（真机反馈实锤）
+                .alpha(if (contentRowCount > 0 && !initialScrollDone) 0f else 1f),
+        ) {
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
@@ -297,8 +251,13 @@ internal fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier 
             }
         }
 
-        ChatInputBar(model, haptics)
-        }
+        // 消息页无底部导航（App 壳隐藏），输入栏自己消费 键盘∪导航栏 insets 取最大值，
+        // 避免键盘弹出时两者叠加多出一条导航栏高度
+        ChatInputBar(
+            model = model,
+            haptics = haptics,
+            modifier = Modifier.windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
+        )
     }
 }
 
@@ -605,11 +564,11 @@ private fun TypingIndicator(thinkingText: String?) {
 }
 
 @Composable
-private fun ChatInputBar(model: AppModel, haptics: HapticPlayer) {
+private fun ChatInputBar(model: AppModel, haptics: HapticPlayer, modifier: Modifier = Modifier) {
     val tokens = ArTheme.tokens
     Row(
         verticalAlignment = Alignment.Bottom,
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surface)
             .padding(horizontal = 12.dp, vertical = 8.dp),

@@ -1,7 +1,10 @@
 package dev.sharpxia.agentreins.ui
 
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -9,6 +12,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -37,13 +41,17 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import dev.sharpxia.agentreins.AppModel
 import dev.sharpxia.agentreins.model.GatewayStatus
@@ -51,6 +59,7 @@ import dev.sharpxia.agentreins.model.Session
 import dev.sharpxia.agentreins.openclaw.SessionListMapper
 import kotlin.math.abs
 import dev.sharpxia.agentreins.ui.theme.ArTheme
+import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 
 /**
@@ -66,7 +75,77 @@ fun SessionsScreen(model: AppModel, modifier: Modifier = Modifier) {
         selected == null && model.sessions.isNotEmpty() ->
             SessionList(model, modifier, offline = model.status !is GatewayStatus.Connected)
         selected == null -> EmptyState(model, modifier)
-        else -> ChatScreen(model, selected, modifier)
+        else -> ChatWithBackGesture(model, selected, modifier)
+    }
+}
+
+/**
+ * 对话页 + iOS 边缘返回：底层铺**真实**会话列表，左缘起手横向拖拽时对话页平移、
+ * 列表以 0.3 倍速视差露出（真机反馈「应该可以露出底部页面」）。
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ChatWithBackGesture(model: AppModel, sessionKey: String, modifier: Modifier = Modifier) {
+    var backDragPx by remember { mutableStateOf(0f) }
+    var edgeDragArmed by remember { mutableStateOf(false) }
+    var screenWidthPx by remember { mutableStateOf(1f) }
+    val scope = rememberCoroutineScope()
+    val haptics = rememberHapticPlayer()
+    val edgeWidthPx = with(LocalDensity.current) { 28.dp.toPx() }
+    val commitFraction = 0.3f
+
+    Box(modifier.fillMaxSize()) {
+        // 底层：真实列表（平时被对话页完全盖住；拖拽时视差平移并压暗）
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    translationX = backDragPx * 0.3f
+                    val progress = if (screenWidthPx > 1f) backDragPx / (screenWidthPx * commitFraction) else 0f
+                    alpha = if (backDragPx > 0f) (0.55f + 0.45f * (1f - progress.coerceIn(0f, 1f))) else 1f
+                },
+        ) {
+            if (model.sessions.isNotEmpty()) {
+                SessionList(model, Modifier.fillMaxSize(), offline = model.status !is GatewayStatus.Connected)
+            } else {
+                EmptyState(model, Modifier.fillMaxSize())
+            }
+        }
+        // 顶层：对话页 + 左缘手势
+        Box(
+            Modifier
+                .fillMaxSize()
+                .shadow(if (backDragPx > 0f) 12.dp else 0.dp)
+                .offset { IntOffset(backDragPx.roundToInt(), 0) }
+                .onSizeChanged { screenWidthPx = it.width.toFloat().coerceAtLeast(1f) }
+                .pointerInput(Unit) {
+                    detectHorizontalDragGestures(
+                        onDragStart = { start -> edgeDragArmed = start.x <= edgeWidthPx },
+                        onDragEnd = {
+                            if (!edgeDragArmed) return@detectHorizontalDragGestures
+                            edgeDragArmed = false
+                            if (backDragPx > screenWidthPx * commitFraction) {
+                                haptics.tap()
+                                model.select(null)
+                                backDragPx = 0f
+                            } else {
+                                val from = backDragPx
+                                scope.launch {
+                                    animate(from, 0f, animationSpec = spring()) { v, _ -> backDragPx = v }
+                                }
+                            }
+                        },
+                        onDragCancel = { edgeDragArmed = false; backDragPx = 0f },
+                    ) { change, dragAmount ->
+                        if (edgeDragArmed) {
+                            backDragPx = (backDragPx + dragAmount).coerceIn(0f, screenWidthPx)
+                            change.consume()
+                        }
+                    }
+                },
+        ) {
+            ChatScreen(model, sessionKey, Modifier.fillMaxSize())
+        }
     }
 }
 
@@ -132,9 +211,10 @@ private fun SessionList(model: AppModel, modifier: Modifier = Modifier, offline:
     val scope = rememberCoroutineScope()
     val haptics = rememberHapticPlayer()
     var showArchived by remember { mutableStateOf(false) }
-    // 归档默认过滤；置顶排序由 SessionListMapper/SessionOverlay 保证
+    // 归档是独立视图：只列归档会话（真机反馈）；主列表默认过滤归档
     val visible = remember(model.sessions, showArchived) {
-        SessionListMapper.visibleForList(model.sessions, showArchived)
+        if (showArchived) model.sessions.filter { it.archived }
+        else SessionListMapper.visibleForList(model.sessions)
     }
     StatusBarTapEffect {
         if (visible.isNotEmpty()) {
@@ -147,9 +227,10 @@ private fun SessionList(model: AppModel, modifier: Modifier = Modifier, offline:
             modifier = Modifier.padding(start = 16.dp, end = 8.dp, top = 16.dp, bottom = 8.dp),
         ) {
             Column(Modifier.weight(1f)) {
-                Text("会话", style = MaterialTheme.typography.titleLarge)
+                Text(if (showArchived) "归档" else "会话", style = MaterialTheme.typography.titleLarge)
                 Text(
                     when {
+                        showArchived -> "${visible.size} 个归档会话"
                         offline -> "离线中 · 显示缓存列表"
                         else -> "${visible.size} 个会话"
                     },
@@ -157,11 +238,11 @@ private fun SessionList(model: AppModel, modifier: Modifier = Modifier, offline:
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            // 归档过滤开关（有归档会话才亮）
+            // 归档视图开关（有归档会话才亮）
             val archivedCount = model.sessions.count { it.archived }
             if (archivedCount > 0) {
                 TextButton(onClick = { showArchived = !showArchived }) {
-                    Text(if (showArchived) "隐藏归档" else "归档($archivedCount)")
+                    Text(if (showArchived) "返回" else "归档($archivedCount)")
                 }
             }
         }

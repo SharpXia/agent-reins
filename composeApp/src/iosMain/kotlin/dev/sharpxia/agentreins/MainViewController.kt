@@ -5,6 +5,7 @@ import dev.sharpxia.agentreins.ui.StatusBarTapBus
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.ObjCAction
 import platform.CoreGraphics.CGRectMake
+import platform.Foundation.NSProcessInfo
 import platform.darwin.NSObject
 import platform.UIKit.NSLayoutConstraint
 import platform.UIKit.UIColor
@@ -16,9 +17,24 @@ import platform.objc.sel_registerName
 /** iOS 入口：iosApp 壳工程（SwiftUI）经此桥接 Compose UI。 */
 fun MainViewController(): UIViewController {
     installAppForegroundObserver() // 回前台自动重连（AppModel 经 appForegroundEvents 消费）
-    val controller = ComposeUIViewController { App() }
+    installNetworkMonitor() // 网络路径监听（AppModel 经 networkAvailable 响应式重连）
+    val controller = ComposeUIViewController { App(prebuilt = devPrebuilt()) }
     attachStatusBarTapDetector(controller)
     return controller
+}
+
+/**
+ * 桌面壳同款 dev 直连入口（desktopApp/main.kt 镜像）：AGENTREINS_DEV_URL（必）+
+ * AGENTREINS_DEV_KEY / AGENTREINS_DEV_SESSION（可选）。模拟器/自动化验证用：
+ * `SIMCTL_CHILD_AGENTREINS_DEV_URL=… xcrun simctl launch …` 注入，不出任何 UI 面。
+ */
+private fun devPrebuilt(): AppModel? {
+    val env = NSProcessInfo.processInfo.environment
+    val devUrl = env["AGENTREINS_DEV_URL"] as? String ?: return null
+    return AppModel(url = devUrl, apiKey = env["AGENTREINS_DEV_KEY"] as? String ?: "").apply {
+        devAutoConnect = true
+        devAutoSelectKey = env["AGENTREINS_DEV_SESSION"] as? String
+    }
 }
 
 /**

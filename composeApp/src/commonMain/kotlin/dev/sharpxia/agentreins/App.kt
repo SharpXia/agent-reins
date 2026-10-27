@@ -30,16 +30,17 @@ private enum class AppScreen { SESSIONS, CONNECTION }
 fun App(prebuilt: AppModel? = null) {
     val model = prebuilt ?: remember { AppModel() }
     var current by remember { mutableStateOf(AppScreen.SESSIONS) }
-    // 键盘弹出时隐藏底部导航（iOS 惯例，ChatGPT 同款）：否则导航栏垫在键盘下，
-    // 内容底 padding + imePadding 双重叠加，输入框离键盘一大截
+    // 键盘弹出或进入对话页时隐藏底部导航（iOS 惯例，ChatGPT 同款）：
+    // 导航栏垫在键盘/输入栏下会造成双重 padding、消息页也不再需要一级导航
     val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    val chatMode = model.selectedSession != null
 
     // 设计基线（M2.6）：明暗跟随系统，token 见 ui/theme/Theme.kt
     AgentReinsTheme {
         Scaffold(
             containerColor = MaterialTheme.colorScheme.background,
             bottomBar = {
-                if (!imeVisible) {
+                if (!imeVisible && !chatMode) {
                     NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
                         NavigationBarItem(
                             selected = current == AppScreen.SESSIONS,

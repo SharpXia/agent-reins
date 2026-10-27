@@ -8,6 +8,7 @@ import dev.sharpxia.agentreins.db.SqlCacheStore
 import dev.sharpxia.agentreins.db.createAppDriver
 import dev.sharpxia.agentreins.model.ConversationState
 import dev.sharpxia.agentreins.model.GatewayStatus
+import dev.sharpxia.agentreins.model.Message
 import dev.sharpxia.agentreins.model.Session
 import dev.sharpxia.agentreins.openclaw.ConnectionStore
 import dev.sharpxia.agentreins.openclaw.GatewayRpcException
@@ -487,8 +488,18 @@ class AppModel(
         val key = selectedSession ?: return
         val text = draft.trim()
         if (text.isEmpty()) return
+        val quoted = quotedText
         draft = ""
-        sendText(key, text)
+        clearQuote()
+        // 引用以 Markdown blockquote 头部拼接（M3.4 QuoteBar；截前三行防引用淹没正文）
+        val composed = if (quoted != null) {
+            val lines = quoted.lines().filter { it.isNotBlank() }.take(3)
+            val ellipsis = if (quoted.lines().count { it.isNotBlank() } > 3) "\n> …" else ""
+            (lines.joinToString("\n> ").let { "> $it" } + ellipsis + "\n\n" + text)
+        } else {
+            text
+        }
+        sendText(key, composed)
     }
 
     /** 消息长按「重发」：把一段文本再次走发送管线（不经草稿，M2.6）。 */
@@ -554,6 +565,77 @@ class AppModel(
     /** idempotencyKey 随机后缀（hexString 是 shared internal，这里本地实现同语义）。 */
     private fun randomSuffix(): String = secureRandomBytes(4)
         .joinToString("") { (it.toInt() and 0xFF).toString(16).padStart(2, '0') }
+
+    // ---- M3.4：停止 / 分支 / 从头开始 / 引用 ----
+
+    /** Composer 停止态：中止当前 run（sessions.abort）。 */
+    fun stopRun() {
+        val key = selectedSession ?: return
+        scope.launch { client?.abort(key) }
+    }
+
+    /** 引用消息（MessageActionsSheet「引用」）：Composer 上方 QuoteBar 展示，随下一条消息发出。 */
+    var quotedText by mutableStateOf<String?>(null)
+        private set
+
+    fun quoteMessage(text: String) {
+        quotedText = text
+    }
+
+    fun clearQuote() {
+        quotedText = null
+    }
+
+    /**
+     * 从某条消息分支出新会话（sessions.fork，M3.0 探针证实普通 scope 可用）。
+     * 成功后刷新列表并切进新会话；失败透传 lastError。
+     */
+    fun forkFrom(message: Message) {
+        val c = client ?: run { lastError = "未连接网关，无法分支"; return }
+        val source = selectedSession ?: return
+        val anchorId = message.entryId
+            ?: message.id.takeIf { !it.startsWith("user-") }
+            ?: run { lastError = "该消息不支持分支（缺 transcript 锚点）"; return }
+        scope.launch {
+            try {
+                val newKey = c.fork(source, anchorId)
+                clearQuote()
+                c.refreshSessions()
+                sessions.firstOrNull { it.id == newKey }?.let { select(it) }
+                    ?: run { // 列表未及时含新键：直接选（conversation 按键惰性建流）
+                        selectedSession = newKey
+                        openConversation(c, newKey)
+                    }
+            } catch (e: Exception) {
+                lastError = "分支失败：${e.message}"
+            }
+        }
+    }
+
+    /**
+     * 从头开始（重置语义，Grok Bot 对齐）：会话历史留在原会话，同一 agent 开一条全新
+     * surface 键（sessions.create）。agent 状态（指令/记忆在网关侧）保留。
+     */
+    fun startFresh() {
+        val c = client ?: run { lastError = "未连接网关"; return }
+        val key = selectedSession ?: return
+        val agentId = key.removePrefix("agent:").substringBefore(':')
+        val newKey = "agent:$agentId:ar-${epochMs().toString(36)}"
+        scope.launch {
+            try {
+                c.createSession(newKey, label = "新会话")
+                clearQuote()
+                c.refreshSessions()
+                sessions.firstOrNull { it.id == newKey }?.let { select(it) }
+                    ?: run {
+                        selectedSession = newKey
+                        openConversation(c, newKey)
+                    }
+            } catch (e: Exception) {
+                lastError = "新建会话失败：${e.message}"
+            }
+        }
+    }
 
     fun disconnect() {
         explicitDisconnect = true

@@ -257,6 +257,9 @@ object AgentEventParser {
                             role = Message.Role.USER,
                             content = text,
                             timestampMs = m.long("timestamp"),
+                            // fork 锚点必须是 user entry（网关实测：锚 assistant 报
+                            // "entry is not a user message"）——保留原始 entryId
+                            entryId = (m["__openclaw"] as? JsonObject)?.str("id"),
                         )
                     }
                 }

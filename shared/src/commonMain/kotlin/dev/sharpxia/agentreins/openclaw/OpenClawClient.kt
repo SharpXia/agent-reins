@@ -598,6 +598,49 @@ class OpenClawClient(
         throw GatewayRpcException("UNSUPPORTED", "approval 流 M3 实现")
     }
 
+    // ---- M3.4：分支 / 停止 / 从头开始（探针 §7.3 实测的普通 scope 能力） ----
+
+    /** 中止当前 run（sessions.abort {sessionKey}）。空闲会话返回语义错误，由调用方容忍。 */
+    suspend fun abort(sessionKey: String) {
+        runCatching {
+            rpc(
+                "sessions.abort",
+                buildJsonObject { put("sessionKey", sessionKey) },
+            )
+        }
+    }
+
+    /**
+     * 从某条消息分支出新会话（sessions.fork {sessionKey, entryId}）。
+     * entryId = chat.history 消息的 `__openclaw.id`（即 Message.id；branches.list 的
+     * leafEntryId 同域）。返回新会话 key；解析不到时抛 PROTOCOL。
+     */
+    suspend fun fork(sessionKey: String, entryId: String): String {
+        val res = rpc(
+            "sessions.fork",
+            buildJsonObject {
+                put("sessionKey", sessionKey); put("entryId", entryId)
+            },
+        )
+        val newKey = res.str("key")
+            ?: res.str("sessionKey")
+            ?: (res["entry"] as? JsonObject)?.str("key")
+            ?: throw GatewayRpcException("PROTOCOL", "sessions.fork: no key in response: ${res.toString().take(200)}")
+        return newKey
+    }
+
+    /** 新建会话（sessions.create {key, label?}）——「从头开始」：同 agent 新 surface 键。 */
+    suspend fun createSession(key: String, label: String? = null): String {
+        val res = rpc(
+            "sessions.create",
+            buildJsonObject {
+                put("key", key)
+                if (label != null) put("label", label)
+            },
+        )
+        return res.str("key") ?: key
+    }
+
     /** 仅供已持有 [mutex] 的调用方使用——kotlinx Mutex 不可重入，嵌套 withLock 自死锁。
      *  首建时播种本地缓存（重启秒开；缓存非真相源，随后的 history 拉取权威覆盖）。 */
     private fun flowForUnlocked(sessionKey: String): MutableStateFlow<ConversationState> =

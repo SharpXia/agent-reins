@@ -191,8 +191,7 @@ object ArIcons {
     }
 
     /** 隐藏（visibility_off，隐私分区）。 */
-    val EyeOff: ImageVector by lazy {
-        builder("ArEyeOff").fill {
+    val EyeOff: ImageVector by lazy {        builder("ArEyeOff").fill {
             moveTo(12f, 7f)
             curveToRelative(2.76f, 0f, 5f, 2.24f, 5f, 5f)
             curveToRelative(0f, 0.65f, -0.13f, 1.26f, -0.36f, 1.83f)
@@ -228,6 +227,62 @@ object ArIcons {
             curveToRelative(0f, -0.79f, 0.2f, -1.53f, 0.53f, -2.2f)
             lineTo(7.53f, 9.8f)
             lineTo(7.53f, 9.8f)
+            close()
+        }.build()
+    }
+
+    /** 引用（reply，QuoteBar/消息操作）。 */
+    val Reply: ImageVector by lazy {
+        builder("ArReply").fill {
+            moveTo(10f, 9f)
+            verticalLineTo(5f)
+            lineToRelative(-7f, 7f)
+            lineToRelative(7f, 7f)
+            lineToRelative(0f, -4.1f)
+            curveToRelative(5f, 0f, 8.5f, 1.6f, 11f, 5.1f)
+            curveToRelative(-1f, -5f, -4f, -10f, -11f, -11f)
+            lineTo(10f, 9f)
+            lineTo(10f, 9f)
+            close()
+        }.build()
+    }
+
+    /** 分支（call_split / git-branch，消息分支/会话分叉）。 */
+    val Branch: ImageVector by lazy {
+        builder("ArBranch").fill {
+            moveTo(17f, 2f)
+            verticalLineToRelative(6f)
+            curveToRelative(0f, 1.1f, -0.9f, 2f, -2f, 2f)
+            horizontalLineToRelative(-4f)
+            curveToRelative(-0.55f, 0f, -1f, 0.45f, -1f, 1f)
+            verticalLineToRelative(2f)
+            curveToRelative(0f, 0.55f, 0.45f, 1f, 1f, 1f)
+            horizontalLineToRelative(4f)
+            curveToRelative(1.1f, 0f, 2f, 0.9f, 2f, 2f)
+            lineToRelative(0f, 2f)
+            curveToRelative(0f, 1.1f, -0.9f, 2f, -2f, 2f)
+            horizontalLineToRelative(-4f)
+            curveToRelative(-0.55f, 0f, -1f, -0.45f, -1f, -1f)
+            verticalLineTo(9f)
+            curveToRelative(0f, -0.55f, 0.45f, -1f, 1f, -1f)
+            horizontalLineToRelative(4f)
+            curveToRelative(1.1f, 0f, 2f, -0.9f, 2f, -2f)
+            verticalLineTo(2f)
+            horizontalLineToRelative(-2f)
+            close()
+            moveTo(7f, 2f)
+            horizontalLineToRelative(2f)
+            verticalLineToRelative(6f)
+            horizontalLineToRelative(-2f)
+            lineTo(7f, 2f)
+            lineTo(7f, 2f)
+            close()
+            moveTo(7f, 16f)
+            horizontalLineToRelative(2f)
+            verticalLineToRelative(6f)
+            horizontalLineToRelative(-2f)
+            lineTo(7f, 16f)
+            lineTo(7f, 16f)
             close()
         }.build()
     }

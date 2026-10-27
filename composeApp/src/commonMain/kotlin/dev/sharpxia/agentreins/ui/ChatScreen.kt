@@ -42,6 +42,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -84,6 +85,8 @@ import dev.sharpxia.agentreins.model.ToolCallEvent
 import dev.sharpxia.agentreins.model.sessionKeyAgentId
 import dev.sharpxia.agentreins.openclaw.Outbox
 import dev.sharpxia.agentreins.ui.components.InkMarkdown
+import dev.sharpxia.agentreins.ui.components.SandSheet
+import dev.sharpxia.agentreins.ui.components.SandSheetAction
 import dev.sharpxia.agentreins.ui.theme.AgentTintName
 import dev.sharpxia.agentreins.ui.theme.AgentTintScope
 import dev.sharpxia.agentreins.ui.theme.InkTheme
@@ -165,7 +168,17 @@ internal fun ChatScreen(
             .background(InkTheme.colors.paper)
             .dismissKeyboardOnTap(),
     ) {
-        ChatTopBar(model, sessionKey, runActive, onBack)
+        var showStartFresh by remember { mutableStateOf(false) }
+        ChatTopBar(model, sessionKey, runActive, onBack, onShowStartFresh = { showStartFresh = true })
+        if (showStartFresh) {
+            StartFreshDialog(
+                onConfirm = {
+                    showStartFresh = false
+                    model.startFresh()
+                },
+                onDismiss = { showStartFresh = false },
+            )
+        }
         if (model.queuedCount > 0) {
             QueuedBanner(count = model.queuedCount, onRetry = { haptics.tap(); model.retryQueuedNow() })
         }
@@ -268,7 +281,14 @@ internal fun ChatScreen(
 }
 
 @Composable
-private fun ChatTopBar(model: AppModel, sessionKey: String, runActive: Boolean, onBack: () -> Unit) {
+private fun ChatTopBar(
+    model: AppModel,
+    sessionKey: String,
+    runActive: Boolean,
+    onBack: () -> Unit,
+    onShowStartFresh: () -> Unit,
+) {
+    var menuOpen by remember { mutableStateOf(false) }
     Surface(color = InkTheme.colors.paper) {
         Column(Modifier.fillMaxWidth()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -298,6 +318,24 @@ private fun ChatTopBar(model: AppModel, sessionKey: String, runActive: Boolean, 
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                }
+                Box {
+                    IconButton(onClick = { menuOpen = true }) {
+                        Icon(
+                            Icons.Filled.MoreVert,
+                            contentDescription = "会话菜单",
+                            tint = InkTheme.colors.textSecondary,
+                        )
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("从头开始", style = InkTheme.type.textMd) },
+                            leadingIcon = {
+                                Icon(ArIcons.Retry, contentDescription = null, modifier = Modifier.size(18.dp))
+                            },
+                            onClick = { menuOpen = false; onShowStartFresh() },
+                        )
+                    }
                 }
             }
             if (runActive) {
@@ -367,7 +405,7 @@ private fun ChatMessageItem(
         ?: AgentTintName.GRAY
     AgentTintScope(tintName) {
         when (message.role) {
-            Message.Role.USER -> UserBubble(message, onCopy, onResend)
+            Message.Role.USER -> UserBubble(model, message, onCopy, onResend)
             // 助手消息：墨水平文无气泡；流式中 shimmer，定型后 Markdown v2。
             // 长按区贴内容（全宽 clickable 吞点击的坑，真机实锤）
             Message.Role.ASSISTANT -> {
@@ -383,13 +421,16 @@ private fun ChatMessageItem(
                         } else if (message.content.isNotBlank()) {
                             InkMarkdown(message.content)
                         }
-                        MessageMenu(
-                            expanded = menuOpen,
-                            onDismiss = { menuOpen = false },
-                            showResend = false,
-                            onCopy = { onCopy(message.content) },
-                            onResend = {},
-                        )
+                        if (menuOpen) {
+                            MessageActionsSheet(
+                                message = message,
+                                onDismiss = { menuOpen = false },
+                                onCopy = onCopy,
+                                onResend = onResend,
+                                onQuote = { model.quoteMessage(it) },
+                                onFork = { model.forkFrom(it) },
+                            )
+                        }
                     }
                 }
             }
@@ -408,7 +449,12 @@ private fun ChatMessageItem(
 /** 用户 tint 气泡：bubble 底 + 墨水文本 + 右上小圆角（Grok bubbleUser 形态）。 */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun UserBubble(message: Message, onCopy: (String) -> Unit, onResend: (String) -> Unit) {
+private fun UserBubble(
+    model: AppModel,
+    message: Message,
+    onCopy: (String) -> Unit,
+    onResend: (String) -> Unit,
+) {
     var menuOpen by remember { mutableStateOf(false) }
     val tint = LocalAgentTint.current
     val c = InkTheme.colors
@@ -428,40 +474,84 @@ private fun UserBubble(message: Message, onCopy: (String) -> Unit, onResend: (St
                         .padding(horizontal = 13.dp, vertical = 9.dp),
                 )
             }
-            MessageMenu(
-                expanded = menuOpen,
-                onDismiss = { menuOpen = false },
-                showResend = true,
-                onCopy = { onCopy(message.content) },
-                onResend = { onResend(message.content) },
+            if (menuOpen) {
+                MessageActionsSheet(
+                    message = message,
+                    onDismiss = { menuOpen = false },
+                    onCopy = onCopy,
+                    onResend = onResend,
+                    onQuote = { model.quoteMessage(it) },
+                    onFork = { model.forkFrom(it) },
+                )
+            }
+        }
+    }
+}
+
+/** 长按 MessageActionsSheet（M3.4）：复制 / 引用 / 重发(用户) / 分支(助手)——Sheet 承载二级操作。 */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun MessageActionsSheet(
+    message: Message,
+    onDismiss: () -> Unit,
+    onCopy: (String) -> Unit,
+    onResend: (String) -> Unit,
+    onQuote: (String) -> Unit,
+    onFork: (Message) -> Unit,
+) {
+    SandSheet(
+        onDismiss = onDismiss,
+        title = "消息操作",
+    ) {
+        SandSheetAction("复制", icon = ArIcons.Copy, onClick = { onCopy(message.content); onDismiss() })
+        SandSheetAction("引用", icon = ArIcons.Reply, onClick = { onQuote(message.content); onDismiss() })
+        if (message.role == Message.Role.USER) {
+            SandSheetAction("重发", icon = ArIcons.Retry, onClick = { onResend(message.content); onDismiss() })
+            // fork 锚点必须是 user entry（网关实测）；分支挂在提问消息上
+            SandSheetAction(
+                "分支（从这条重新开话）",
+                icon = ArIcons.Branch,
+                onClick = { onFork(message); onDismiss() },
             )
         }
     }
 }
 
-/** 长按菜单：复制（两角色）/ 重发（仅用户消息）。 */
+/** 重置语义确认弹窗：对齐「丢什么/留什么」结构（自写文案，不抄原文）。 */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-private fun MessageMenu(
-    expanded: Boolean,
-    onDismiss: () -> Unit,
-    showResend: Boolean,
-    onCopy: () -> Unit,
-    onResend: () -> Unit,
-) {
-    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
-        DropdownMenuItem(
-            text = { Text("复制", style = InkTheme.type.textMd) },
-            leadingIcon = { Icon(ArIcons.Copy, contentDescription = null, modifier = Modifier.size(18.dp)) },
-            onClick = { onCopy(); onDismiss() },
-        )
-        if (showResend) {
-            DropdownMenuItem(
-                text = { Text("重发", style = InkTheme.type.textMd) },
-                leadingIcon = { Icon(ArIcons.Retry, contentDescription = null, modifier = Modifier.size(18.dp)) },
-                onClick = { onResend(); onDismiss() },
-            )
-        }
-    }
+private fun StartFreshDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    val c = InkTheme.colors
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("从头开始？", style = InkTheme.type.headingSm, color = c.ink) },
+        text = {
+            Column {
+                Text(
+                    "这个会话的聊天记录将不再出现在新会话里。",
+                    style = InkTheme.type.textMd,
+                    color = c.textSecondary,
+                )
+                Spacer(Modifier.size(8.dp))
+                Text(
+                    "✓ 会保留：Agent 的指令、记忆与技能配置\n✗ 会留在旧会话：本次对话的全部消息",
+                    style = InkTheme.type.textSm,
+                    color = c.textTertiary,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("开新会话", color = c.ink)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消", color = c.textTertiary)
+            }
+        },
+        containerColor = c.elevated,
+    )
 }
 
 /** outbox 待发气泡：灰阶弱化 + 「未发出」标记 + 重试/删除。 */
@@ -581,59 +671,127 @@ private fun TypingIndicator(thinkingText: String?) {
     }
 }
 
+/**
+ * ComposerShell（M3.4）：引用条 QuoteBar（被引用消息随下一条发出）+ 圆角输入壳 +
+ * 发送/停止态切换（run 进行中 = danger 停止键）。
+ */
 @Composable
 private fun ChatInputBar(model: AppModel, haptics: HapticPlayer, modifier: Modifier = Modifier) {
     val c = InkTheme.colors
-    Row(
-        verticalAlignment = Alignment.Bottom,
-        modifier = modifier
-            .fillMaxWidth()
-            .background(c.paper)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-    ) {
-        TextField(
-            value = model.draft,
-            onValueChange = { model.draft = it },
-            placeholder = {
-                Text("发送消息…", color = c.textTertiary, style = InkTheme.type.textMd)
+    val runActive = model.conversation?.activeRunId != null
+    Column(modifier.fillMaxWidth().background(c.paper)) {
+        // QuoteBar：引用条（M3.4）
+        model.quotedText?.let { quoted ->
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(InkTheme.shapes.md.dp))
+                    .background(c.surfaceTertiary)
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+            ) {
+                Box(
+                    Modifier
+                        .size(width = 3.dp, height = 28.dp)
+                        .background(c.inverse, RoundedCornerShape(2.dp)),
+                )
+                Spacer(Modifier.size(8.dp))
+                Text(
+                    quoted.lines().filter { it.isNotBlank() }.firstOrNull() ?: "",
+                    style = InkTheme.type.textSm,
+                    color = c.textTertiary,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    "取消引用",
+                    style = InkTheme.type.textXs,
+                    color = c.info.text,
+                    modifier = Modifier
+                        .clickable { model.clearQuote() }
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                )
+            }
+        }
+        Row(
+            verticalAlignment = Alignment.Bottom,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+            TextField(
+                value = model.draft,
+                onValueChange = { model.draft = it },
+                placeholder = {
+                    Text("发送消息…", color = c.textTertiary, style = InkTheme.type.textMd)
+                },
+                textStyle = InkTheme.type.textMd,
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(22.dp),
+                maxLines = 4,
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = c.surfaceTertiary,
+                    unfocusedContainerColor = c.surfaceTertiary,
+                    disabledContainerColor = c.surfaceTertiary,
+                    focusedTextColor = c.ink,
+                    unfocusedTextColor = c.ink,
+                    focusedIndicatorColor = Color.Transparent,
+                    unfocusedIndicatorColor = Color.Transparent,
+                    disabledIndicatorColor = Color.Transparent,
+                ),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                keyboardActions = KeyboardActions(onSend = { haptics.tap(); model.send() }),
+            )
+            Spacer(Modifier.size(6.dp))
+            // 发送/停止态切换：run 进行中优先停止
+            if (runActive) {
+                StopButton(haptics = haptics, onStop = { model.stopRun() })
+            } else {
+                val enabled = model.draft.isNotBlank()
+                Box(
+                    Modifier
+                        .padding(bottom = 6.dp)
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(if (enabled) c.inverse else c.surfaceTertiary)
+                        .clickable(enabled = enabled) {
+                            haptics.tap()
+                            model.send()
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Send,
+                        contentDescription = "发送",
+                        tint = if (enabled) c.paper else c.textDisabled,
+                        modifier = Modifier.size(17.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** 停止键：danger 底方块（Grok ComposerPrimaryButton 停止态）。 */
+@Composable
+private fun StopButton(haptics: HapticPlayer, onStop: () -> Unit) {
+    val c = InkTheme.colors
+    Box(
+        Modifier
+            .padding(bottom = 6.dp)
+            .size(34.dp)
+            .clip(CircleShape)
+            .background(c.danger.text)
+            .clickable {
+                haptics.tap()
+                onStop()
             },
-            textStyle = InkTheme.type.textMd,
-            modifier = Modifier.weight(1f),
-            shape = RoundedCornerShape(22.dp),
-            maxLines = 4,
-            colors = TextFieldDefaults.colors(
-                focusedContainerColor = c.surfaceTertiary,
-                unfocusedContainerColor = c.surfaceTertiary,
-                disabledContainerColor = c.surfaceTertiary,
-                focusedTextColor = c.ink,
-                unfocusedTextColor = c.ink,
-                focusedIndicatorColor = Color.Transparent,
-                unfocusedIndicatorColor = Color.Transparent,
-                disabledIndicatorColor = Color.Transparent,
-            ),
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(onSend = { haptics.tap(); model.send() }),
-        )
-        Spacer(Modifier.size(6.dp))
-        val enabled = model.draft.isNotBlank()
+        contentAlignment = Alignment.Center,
+    ) {
         Box(
             Modifier
-                .padding(bottom = 6.dp)
-                .size(34.dp)
-                .clip(CircleShape)
-                .background(if (enabled) c.inverse else c.surfaceTertiary)
-                .clickable(enabled = enabled) {
-                    haptics.tap()
-                    model.send()
-                },
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                Icons.AutoMirrored.Filled.Send,
-                contentDescription = "发送",
-                tint = if (enabled) c.paper else c.textDisabled,
-                modifier = Modifier.size(17.dp),
-            )
-        }
+                .size(12.dp)
+                .background(c.paper, RoundedCornerShape(2.dp)),
+        )
     }
 }

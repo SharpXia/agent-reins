@@ -108,7 +108,7 @@ jobs:
             -destination 'generic/platform=iOS' \
             -archivePath build/AgentReins.xcarchive \
             CURRENT_PROJECT_VERSION=$BUILD \
-            MARKETING_VERSION=${MARKETING_VERSION} \
+            MARKETING_VERSION=$MV \
             -allowProvisioningUpdates \
             -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
             -authenticationKeyID "${{ secrets.ASC_API_KEY_ID }}" \

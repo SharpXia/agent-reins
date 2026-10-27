@@ -22,6 +22,8 @@ object SessionOverlay {
     data class Entry(
         val pinned: Boolean? = null,
         val archived: Boolean? = null,
+        /** 本地隐藏（M3.2 隐私分区；网关无此概念，纯本地意图）。 */
+        val hidden: Boolean? = null,
     )
 
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = false }
@@ -44,13 +46,14 @@ object SessionOverlay {
             s.copy(
                 pinned = e.pinned ?: s.pinned,
                 archived = e.archived ?: s.archived,
+                hidden = e.hidden ?: s.hidden,
             )
         }
         return SessionListMapper.sort(adjusted)
     }
 
     /**
-     * 纯更新：把 [sessionKey] 的 [pinned]/[archived] 写入覆盖层（非 null 才写）。
+     * 纯更新：把 [sessionKey] 的 [pinned]/[archived]/[hidden] 写入覆盖层（非 null 才写）。
      * null = 不动该字段（它没有「恢复跟网关」语义——本地意图一旦写下就一直生效）。
      */
     fun toggled(
@@ -58,12 +61,16 @@ object SessionOverlay {
         sessionKey: String,
         pinned: Boolean? = null,
         archived: Boolean? = null,
+        hidden: Boolean? = null,
     ): Map<String, Entry> {
-        require(pinned != null || archived != null) { "toggled: at least one field must be non-null" }
+        require(pinned != null || archived != null || hidden != null) {
+            "toggled: at least one field must be non-null"
+        }
         val current = overlay[sessionKey] ?: Entry()
         val next = current.copy(
             pinned = pinned ?: current.pinned,
             archived = archived ?: current.archived,
+            hidden = hidden ?: current.hidden,
         )
         return overlay + (sessionKey to next)
     }

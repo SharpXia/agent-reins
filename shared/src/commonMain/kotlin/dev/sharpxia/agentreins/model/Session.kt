@@ -25,6 +25,8 @@ data class Session(
     val kind: String? = null,
     /** 归属 agentId（M3：Agent 域分组/身份色）。网关行字段，缺失时按 key 形态解析。 */
     val agentId: String? = null,
+    /** 本地隐藏（M3.2：隐私分区，纯本地 overlay 值，网关无此概念）。 */
+    val hidden: Boolean = false,
 )
 
 /** 会话 key `agent:<agentId>:<surface>` → agentId（telegram/cron 等嵌套 surface 取第二段）。 */

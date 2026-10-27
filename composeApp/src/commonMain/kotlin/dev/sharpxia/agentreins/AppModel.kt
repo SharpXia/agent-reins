@@ -135,6 +135,13 @@ class AppModel(
         publishSessions()
     }
 
+    /** 隐藏/取消隐藏（M3.2 隐私分区；纯本地，归档视图可恢复）。 */
+    fun setSessionHidden(session: Session, hidden: Boolean) {
+        sessionOverlay = SessionOverlay.toggled(sessionOverlay, session.id, hidden = hidden)
+        scheduleOverlayPersist()
+        publishSessions()
+    }
+
     /** Agent 显示名（空串回落 agentId）。 */
     fun setAgentName(agentId: String, name: String) =
         upsertAgent(agentId) { it.copy(name = name.trim().ifBlank { agentId }) }

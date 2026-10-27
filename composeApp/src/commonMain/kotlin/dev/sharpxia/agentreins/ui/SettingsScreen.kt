@@ -91,6 +91,33 @@ fun SettingsScreen(
                 if (index < ThemeMode.entries.lastIndex) SandDivider(indent = 24)
             }
         }
+        SectionHeader("审批")
+        SandCard(Modifier.padding(horizontal = 16.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { model.toggleApprovals(!model.approvalsEnabled) }
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("审批面板", style = InkTheme.type.textLg, color = InkTheme.colors.ink)
+                    Text(
+                        "开启后连接会申请 approvals 权限（网关 owner 需重新批准一次设备）",
+                        style = InkTheme.type.textXs,
+                        color = InkTheme.colors.textTertiary,
+                    )
+                }
+                androidx.compose.material3.Switch(
+                    checked = model.approvalsEnabled,
+                    onCheckedChange = { model.toggleApprovals(it) },
+                    colors = androidx.compose.material3.SwitchDefaults.colors(
+                        checkedTrackColor = InkTheme.colors.ink,
+                        checkedThumbColor = InkTheme.colors.paper,
+                    ),
+                )
+            }
+        }
         SectionHeader("调试")
         SandCard(Modifier.padding(horizontal = 16.dp)) {
             SandRow(

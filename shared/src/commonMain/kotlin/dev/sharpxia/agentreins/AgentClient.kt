@@ -18,6 +18,8 @@ data class GatewayConfig(
     val bootstrapToken: String? = null,
     /** hello-ok 下发的设备凭证；配对成功后可免共享 token 直连。 */
     val deviceToken: String? = null,
+    /** 额外申请的 scope（M3.5：审批面板开启时带 operator.approvals；scope 升级需 owner 重批准）。 */
+    val extraScopes: List<String> = emptyList(),
 ) {
     override fun toString(): String = "GatewayConfig(baseUrl=$baseUrl, credentials=***masked***)"
 }

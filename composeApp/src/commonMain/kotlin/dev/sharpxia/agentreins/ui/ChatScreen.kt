@@ -168,6 +168,10 @@ internal fun ChatScreen(
             .background(InkTheme.colors.paper)
             .dismissKeyboardOnTap(),
     ) {
+        // M3.5 审批 Sheet：approvals 通道事件驱动（网关启用审批 + 面板开关开启才有事件）
+        model.pendingApproval?.let { req ->
+            ApprovalSheet(request = req, onDecide = { model.respondApproval(it) })
+        }
         var showStartFresh by remember { mutableStateOf(false) }
         ChatTopBar(model, sessionKey, runActive, onBack, onShowStartFresh = { showStartFresh = true })
         if (showStartFresh) {
@@ -513,6 +517,39 @@ private fun MessageActionsSheet(
                 icon = ArIcons.Branch,
                 onClick = { onFork(message); onDismiss() },
             )
+        }
+    }
+}
+
+/** 审批卡 Sheet（M3.5）：摘要 + 详情 + 批准/拒绝（danger）。 */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun ApprovalSheet(
+    request: dev.sharpxia.agentreins.model.ApprovalRequest,
+    onDecide: (Boolean) -> Unit,
+) {
+    val c = InkTheme.colors
+    SandSheet(onDismiss = { onDecide(false) }, title = "需要你的批准") {
+        Text(
+            request.summary,
+            style = InkTheme.type.textLg,
+            color = c.ink,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
+        )
+        request.detailJson?.let {
+            Text(
+                it.take(600),
+                style = InkTheme.type.mono.copy(fontSize = InkTheme.type.textXs.fontSize),
+                color = c.textTertiary,
+                modifier = Modifier
+                    .padding(horizontal = 20.dp, vertical = 6.dp)
+                    .background(c.surfaceTertiary, RoundedCornerShape(InkTheme.shapes.sm.dp))
+                    .padding(8.dp),
+            )
+        }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), horizontalArrangement = Arrangement.End) {
+            TextButton(onClick = { onDecide(false) }) { Text("拒绝", color = c.danger.text) }
+            TextButton(onClick = { onDecide(true) }) { Text("批准", color = c.ink) }
         }
     }
 }

@@ -303,12 +303,12 @@ class OpenClawClient(
                         bootstrapConnect(client, config, identity, hello, config.bootstrapToken)
                     config.deviceToken != null -> openSession(
                         client, config.baseUrl, identity, hello,
-                        role = "operator", clientMode = "ui", scopes = REQUIRED_SCOPES,
+                        role = "operator", clientMode = "ui", scopes = REQUIRED_SCOPES + config.extraScopes,
                         auth = ConnectAuth.Device(config.deviceToken), holdOpen = true,
                     )
                     else -> openSession(
                         client, config.baseUrl, identity, hello,
-                        role = "operator", clientMode = "ui", scopes = REQUIRED_SCOPES,
+                        role = "operator", clientMode = "ui", scopes = REQUIRED_SCOPES + config.extraScopes,
                         auth = ConnectAuth.SharedToken(config.apiKey), holdOpen = true,
                     )
                 }
@@ -629,6 +629,21 @@ class OpenClawClient(
         return newKey
     }
 
+    /**
+     * 审批应答（approval.resolve）。⚠️ 参数形态是骨架假设——网关未启用审批时无从实测
+     * （exec.approval.* 全族要 operator.approvals scope，M3.0 探针 §7.3）；开启审批
+     * 面板后按真实报文校准。
+     */
+    suspend fun resolveApproval(requestId: String, approved: Boolean) {
+        rpc(
+            "approval.resolve",
+            buildJsonObject {
+                put("requestId", requestId)
+                put("decision", if (approved) "approve" else "deny")
+            },
+        )
+    }
+
     /** 新建会话（sessions.create {key, label?}）——「从头开始」：同 agent 新 surface 键。 */
     suspend fun createSession(key: String, label: String? = null): String {
         val res = rpc(
@@ -780,7 +795,21 @@ class OpenClawClient(
                 // 网关维护/重启：暂停自动重连（上层 connect() 或回前台可恢复）
                 pauseReconnect = payload.bool("pauseReconnect") ?: true
             }
-            else -> Unit // M3 扩展 session.approval
+            "session.approval" -> {
+                // M3.5 审批事件（includeApprovals 订阅/广播）：id+摘要透传 UI，detail 全量存 JSON
+                val req = ApprovalRequest(
+                    id = payload.str("requestId") ?: payload.str("id") ?: return@handleEvent,
+                    sessionId = payload.str("sessionKey") ?: payload.str("session"),
+                    summary = payload.str("summary")
+                        ?: payload.str("toolName")
+                        ?: payload.str("command")
+                        ?: "请求审批",
+                    detailJson = payload.toString(),
+                    requestedAtMs = payload.long("ts") ?: payload.long("timestamp"),
+                )
+                _approvals.tryEmit(req)
+            }
+            else -> Unit
         }
     }
 

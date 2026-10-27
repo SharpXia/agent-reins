@@ -6,6 +6,7 @@ import androidx.compose.runtime.setValue
 import dev.sharpxia.agentreins.db.CacheStore
 import dev.sharpxia.agentreins.db.SqlCacheStore
 import dev.sharpxia.agentreins.db.createAppDriver
+import dev.sharpxia.agentreins.model.ApprovalRequest
 import dev.sharpxia.agentreins.model.ConversationState
 import dev.sharpxia.agentreins.model.GatewayStatus
 import dev.sharpxia.agentreins.model.Message
@@ -84,6 +85,14 @@ class AppModel(
     var themeMode by mutableStateOf(ThemeMode.SYSTEM)
         private set
 
+    // ---- M3.5：审批面板（可选 scope：开启后连接带 operator.approvals，需 owner 重批准一次） ----
+    var approvalsEnabled by mutableStateOf(false)
+        private set
+
+    /** 待审批请求（审批 Sheet 的数据源；一次一个，超窗的由网关 approval.history 兜回）。 */
+    var pendingApproval by mutableStateOf<ApprovalRequest?>(null)
+        private set
+
     /** 草稿（per-session 持久化到 kv，500ms 去抖）。 */
     private val draftState = mutableStateOf("")
     var draft: String
@@ -104,6 +113,7 @@ class AppModel(
     private var sessionsJob: Job? = null
     private var activityJob: Job? = null
     private var outboxJob: Job? = null
+    private var approvalsJob: Job? = null
     private var conversationJob: Job? = null
     private var draftPersistJob: Job? = null
     /** 用户主动断开时置位，回前台不自动重连；connect() 成功路径清零。 */
@@ -151,6 +161,22 @@ class AppModel(
     fun setAgentTint(agentId: String, tint: AgentTintName) =
         upsertAgent(agentId) { it.copy(tint = tint) }
 
+    /** 审批面板开关：重启连接生效（scope 升级会触发一次 owner 批准，属预期）。 */
+    fun toggleApprovals(enabled: Boolean) {
+        approvalsEnabled = enabled
+        runCatching { cache.kvPut(gatewayId, APPROVALS_KEY, if (enabled) "1" else "0") }
+    }
+
+    /** 审批应答（approval.resolve；参数形态待网关启用审批后实测校准）。 */
+    fun respondApproval(approved: Boolean) {
+        val req = pendingApproval ?: return
+        pendingApproval = null
+        scope.launch {
+            runCatching { client?.resolveApproval(req.id, approved) }
+                .onFailure { lastError = "审批应答失败：${it.message}" }
+        }
+    }
+
     fun applyThemeMode(mode: ThemeMode) {
         themeMode = mode
         runCatching { cache.kvPut(gatewayId, THEME_KEY, mode.name) }
@@ -193,6 +219,7 @@ class AppModel(
         agentProfiles = AgentRegistry.parse(runCatching { cache.kvGet(gatewayId, AgentRegistry.KV_KEY) }.getOrNull())
         themeMode = runCatching { cache.kvGet(gatewayId, THEME_KEY) }.getOrNull()
             ?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() } ?: ThemeMode.SYSTEM
+        approvalsEnabled = runCatching { cache.kvGet(gatewayId, APPROVALS_KEY) }.getOrNull() == "1"
         // iOS 进后台 WS 必死：回前台自动用已存配置重连（显式断开除外）
         scope.launch {
             appForegroundEvents.collect {
@@ -298,6 +325,10 @@ class AppModel(
         activityJob?.cancel()
         outboxJob?.cancel()
         statusJob = scope.launch { c.status.collect { status = it } }
+        approvalsJob?.cancel()
+        approvalsJob = scope.launch {
+            c.approvals.collect { if (approvalsEnabled) pendingApproval = it }
+        }
         sessionsJob = scope.launch {
             c.sessions.collect { list ->
                 rawSessions = list
@@ -336,6 +367,7 @@ class AppModel(
                         apiKey = apiKeyForConfig,
                         bootstrapToken = bootstrapToken,
                         deviceToken = if (bootstrapToken == null) deviceToken else null,
+                        extraScopes = if (approvalsEnabled) listOf("operator.approvals") else emptyList(),
                     )
                     try {
                         // connect() 入口自清理，同一 client 逐候选重试安全
@@ -669,6 +701,9 @@ class AppModel(
 
         /** 外观偏好 kv 槽位（M3.1）。 */
         const val THEME_KEY = "appearance:v1"
+
+        /** 审批面板开关 kv 槽位（M3.5）。 */
+        const val APPROVALS_KEY = "approvalsPanel:v1"
 
         /** 自动连接退避重试上限（2s→4s→8s→16s→32s，约 1 分钟窗口）。 */
         const val AUTO_RETRY_MAX_ATTEMPTS = 5

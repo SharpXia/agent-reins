@@ -28,7 +28,10 @@ private enum class AppScreen { SESSIONS, CONNECTION }
 
 @Composable
 fun App(prebuilt: AppModel? = null) {
-    val model = prebuilt ?: remember { AppModel() }
+    // prebuilt 由调用方 lambda 每次重组重新求值——必须 remember 固定单实例
+    // （否则 dev 入口每次重组新建 AppModel：重复 connect + 状态源分裂）
+    val prebuiltModel = remember { prebuilt }
+    val model = prebuiltModel ?: remember { AppModel() }
     var current by remember { mutableStateOf(AppScreen.SESSIONS) }
     // 键盘弹出或进入对话页时隐藏底部导航（iOS 惯例，ChatGPT 同款）：
     // 导航栏垫在键盘/输入栏下会造成双重 padding、消息页也不再需要一级导航

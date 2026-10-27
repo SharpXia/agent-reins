@@ -32,12 +32,14 @@ import kotlinx.coroutines.launch
  *       发送走 outbox 队列（离线排队、重连自动补发）。
  */
 class AppModel(
-    /** Dev 直连预填（desktop 壳的 AGENTREINS_DEV_* 入口）；普通构造留空，走连接页。 */
-    url: String = "",
-    apiKey: String = "",
+    /** Dev 直连预填（desktop 壳的 AGENTREINS_DEV_* 入口）；普通构造留空，走连接页。
+     *  命名注意：不能叫 url/apiKey——无 val/var 的构造参数会在 init 块与属性初始化器
+     *  作用域内遮蔽同名属性，init 的自动连接判据将永远读到空串（冷启动失联的根因）。 */
+    initialUrl: String = "",
+    initialApiKey: String = "",
 ) {
-    var url by mutableStateOf(url)
-    var apiKey by mutableStateOf(apiKey)
+    var url by mutableStateOf(initialUrl)
+    var apiKey by mutableStateOf(initialApiKey)
     /** Dev 模式：构造后立即连接（desktop 壳）。 */
     var devAutoConnect = false
     /** Dev 模式：会话列表就绪后自动打开该会话。 */
@@ -137,12 +139,12 @@ class AppModel(
 
     init {
         // 记住上次连接：预填地址与 Key；deviceToken 是扫码配对成功后的免 token 凭证
-        runCatching { ConnectionStore.load() }.getOrNull()?.let { stored ->
-            if (this.url.isBlank()) this.url = stored.url
-            if (this.apiKey.isBlank()) this.apiKey = stored.apiKey
-            alternateUrls = stored.urls
-            deviceToken = stored.deviceToken
-            hasPairedCredential = stored.deviceToken != null
+        runCatching { ConnectionStore.load() }.getOrNull()?.let {
+            if (this.url.isBlank()) this.url = it.url
+            if (this.apiKey.isBlank()) this.apiKey = it.apiKey
+            alternateUrls = it.urls
+            deviceToken = it.deviceToken
+            hasPairedCredential = it.deviceToken != null
         }
         // 冷启动先读缓存（M2.5 验收项：断网冷启动可见上次列表；连接成功后被网关权威覆盖）
         runCatching { cache.loadSessions(gatewayId) }.getOrNull()
@@ -180,6 +182,7 @@ class AppModel(
                 }
             }
         }
+        // 已有可用配置（deviceToken 免扫码 / 共享 Key）则启动即连——不再要求每次手动点连接
         // 已有可用配置（deviceToken 免扫码 / 共享 Key）则启动即连——不再要求每次手动点连接
         if (url.isNotBlank() && (deviceToken != null || apiKey.isNotBlank())) connect()
         if (devAutoConnect) connect() // dev 通道重复调用被 busy 守卫挡掉

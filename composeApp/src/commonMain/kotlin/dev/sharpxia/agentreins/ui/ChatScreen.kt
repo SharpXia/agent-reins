@@ -155,10 +155,12 @@ internal fun ChatScreen(model: AppModel, sessionKey: String, modifier: Modifier 
         if (contentRowCount > 0) scope.launch { listState.animateScrollToItem(0) }
     }
 
-    // 边缘返回手势在 SessionsScreen 的包裹层（需露出底层真实列表），本组件保持纯布局
+    // 边缘返回手势在 SessionsScreen 的包裹层（需露出底层真实列表），本组件保持纯布局；
+    // 不透明背景——对齐完成后底层列表从本页背后消失才穿帮
     Column(
         modifier
-            .fillMaxWidth()
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
             .dismissKeyboardOnTap(),
     ) {
         ChatTopBar(model, sessionKey, runActive)

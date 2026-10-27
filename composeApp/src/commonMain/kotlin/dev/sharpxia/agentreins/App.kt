@@ -21,13 +21,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import dev.sharpxia.agentreins.ui.ConnectionScreen
 import dev.sharpxia.agentreins.ui.SessionsScreen
-import dev.sharpxia.agentreins.ui.theme.AgentReinsTheme
+import dev.sharpxia.agentreins.ui.components.ThemeDemoScreen
+import dev.sharpxia.agentreins.ui.theme.InkTheme
+
+/** M3.0 令牌验收开关：真机亮暗双主题目验用；验后置 false，M3.1 挪进设置域。 */
+private const val SHOW_THEME_DEMO = true
 
 /** 单 Activity/Application 双页；导航升级（Compose Navigation）随 M3 引入。 */
 private enum class AppScreen { SESSIONS, CONNECTION }
 
 @Composable
 fun App(prebuilt: AppModel? = null) {
+    if (SHOW_THEME_DEMO) {
+        ThemeDemoScreen()
+        return
+    }
     // prebuilt 由调用方 lambda 每次重组重新求值——必须 remember 固定单实例
     // （否则 dev 入口每次重组新建 AppModel：重复 connect + 状态源分裂）
     val prebuiltModel = remember { prebuilt }
@@ -38,8 +46,8 @@ fun App(prebuilt: AppModel? = null) {
     val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     val chatMode = model.selectedSession != null
 
-    // 设计基线（M2.6）：明暗跟随系统，token 见 ui/theme/Theme.kt
-    AgentReinsTheme {
+    // 设计基线（M3 墨水系）：明暗跟随系统，令牌见 ui/theme/InkColors.kt
+    InkTheme {
         Scaffold(
             containerColor = MaterialTheme.colorScheme.background,
             bottomBar = {

@@ -113,6 +113,7 @@ private fun attachStatusBarTapDetector(controller: UIViewController) {
 private class TapForwarder : NSObject() {
     @ObjCAction
     fun onTap(sender: UITapGestureRecognizer) {
+        platform.Foundation.NSLog("AgentReins: status-bar tap detected -> bus")
         StatusBarTapBus.taps.tryEmit(Unit)
     }
 }

@@ -24,6 +24,8 @@ object SessionOverlay {
         val archived: Boolean? = null,
         /** 本地隐藏（M3.2 隐私分区；网关无此概念，纯本地意图）。 */
         val hidden: Boolean? = null,
+        /** 本地已读标记（M3.6 一键已读）：该时刻前的活动不再计未读；此后新活动恢复。 */
+        val readMarkMs: Long? = null,
     )
 
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = false }
@@ -43,10 +45,12 @@ object SessionOverlay {
         if (overlay.isEmpty()) return base
         val adjusted = base.map { s ->
             val e = overlay[s.id] ?: return@map s
+            val readBefore = e.readMarkMs != null && (s.lastActiveAtMs ?: 0L) <= e.readMarkMs
             s.copy(
                 pinned = e.pinned ?: s.pinned,
                 archived = e.archived ?: s.archived,
                 hidden = e.hidden ?: s.hidden,
+                unread = if (readBefore) 0 else s.unread,
             )
         }
         return SessionListMapper.sort(adjusted)
@@ -62,8 +66,9 @@ object SessionOverlay {
         pinned: Boolean? = null,
         archived: Boolean? = null,
         hidden: Boolean? = null,
+        readMarkMs: Long? = null,
     ): Map<String, Entry> {
-        require(pinned != null || archived != null || hidden != null) {
+        require(pinned != null || archived != null || hidden != null || readMarkMs != null) {
             "toggled: at least one field must be non-null"
         }
         val current = overlay[sessionKey] ?: Entry()
@@ -71,6 +76,7 @@ object SessionOverlay {
             pinned = pinned ?: current.pinned,
             archived = archived ?: current.archived,
             hidden = hidden ?: current.hidden,
+            readMarkMs = readMarkMs ?: current.readMarkMs,
         )
         return overlay + (sessionKey to next)
     }

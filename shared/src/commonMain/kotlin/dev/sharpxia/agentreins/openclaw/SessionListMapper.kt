@@ -48,7 +48,9 @@ object SessionListMapper {
             id = key,
             title = row.str("label") ?: row.str("displayName") ?: key.substringAfterLast(':'),
             preview = row.str("preview"),
-            lastActiveAtMs = row.long("updatedAt") ?: row.long("lastActivityAt"),
+            // 排序时间源：lastActivityAt（消息活动时间）优先——updatedAt 会被网关侧
+            // 元数据触碰（标题/状态/cron）刷新，把老会话顶到列表前排（真机反馈「冒出旧会话」）
+            lastActiveAtMs = row.long("lastActivityAt") ?: row.long("updatedAt"),
             unread = row.unreadCount(),
             pinned = row.bool("pinned") ?: false,
             archived = row.bool("archived") ?: false,

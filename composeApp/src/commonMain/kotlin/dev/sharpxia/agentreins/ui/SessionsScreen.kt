@@ -2,6 +2,7 @@ package dev.sharpxia.agentreins.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -47,6 +48,7 @@ import dev.sharpxia.agentreins.openclaw.SessionListMapper
 import kotlin.math.abs
 import dev.sharpxia.agentreins.ui.components.ConnectionEmptyState
 import dev.sharpxia.agentreins.ui.components.SectionHeader
+import dev.sharpxia.agentreins.ui.components.SandSheet
 import dev.sharpxia.agentreins.ui.components.UnreadBadge
 import dev.sharpxia.agentreins.ui.theme.AgentTintName
 import dev.sharpxia.agentreins.ui.theme.AgentTintScope
@@ -79,6 +81,61 @@ fun SessionsScreen(
     }
 }
 
+/** 新建会话：选 agent（M3.6 反馈①）——干净会话从选定 agent 开始。 */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun NewSessionSheet(
+    model: AppModel,
+    onOpenSession: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val summaries = remember(model.sessions, model.agentProfiles) {
+        dev.sharpxia.agentreins.AgentRegistry.summarize(model.sessions, model.agentProfiles)
+    }
+    SandSheet(onDismiss = onDismiss, title = "新建会话") {
+        Text(
+            "选择一个 Agent 开始干净对话（Agent 的配置与记忆保留）",
+            style = InkTheme.type.textSm,
+            color = InkTheme.colors.textTertiary,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp),
+        )
+        if (summaries.isEmpty()) {
+            Text(
+                "尚无 agent（连接网关后出现）",
+                style = InkTheme.type.textMd,
+                color = InkTheme.colors.textTertiary,
+                modifier = Modifier.padding(20.dp),
+            )
+        }
+        summaries.forEach { s ->
+            AgentTintScope(s.profile.tint) {
+                val tint = LocalAgentTint.current
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            onDismiss()
+                            model.createNewSession(s.profile.agentId) { key -> onOpenSession(key) }
+                        }
+                        .padding(horizontal = 20.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    AgentAvatar(tint, s.profile.name, size = 36)
+                    Column(Modifier.weight(1f)) {
+                        Text(s.profile.name, style = InkTheme.type.textLg, color = InkTheme.colors.ink)
+                        Text(
+                            "${s.sessionCount} 个会话",
+                            style = InkTheme.type.textXs,
+                            color = InkTheme.colors.textTertiary,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun SessionList(
     model: AppModel,
@@ -89,6 +146,8 @@ private fun SessionList(
     val scope = rememberCoroutineScope()
     val haptics = rememberHapticPlayer()
     var showStash by remember { mutableStateOf(false) } // 收纳视图：归档 + 已隐藏
+    var showNewSheet by remember { mutableStateOf(false) }
+    val totalUnread = model.sessions.sumOf { it.unread }
     val mainSessions = remember(model.sessions) {
         SessionListMapper.visibleForList(model.sessions.filter { !it.hidden })
     }
@@ -118,6 +177,25 @@ private fun SessionList(
                     color = InkTheme.colors.textTertiary,
                 )
             }
+            // 一键已读（M3.6 反馈③）：全部未读打本地已读标记（overlay 持久化）
+            if (totalUnread > 0 && !showStash) {
+                Text(
+                    "全部已读",
+                    style = InkTheme.type.textSm,
+                    color = InkTheme.colors.info.text,
+                    modifier = Modifier
+                        .clickable { haptics.tap(); model.markAllRead() }
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                )
+            }
+            Text(
+                "＋",
+                style = InkTheme.type.headingSm,
+                color = InkTheme.colors.ink,
+                modifier = Modifier
+                    .clickable { haptics.tap(); showNewSheet = true }
+                    .padding(horizontal = 10.dp, vertical = 4.dp),
+            )
             TextButton(onClick = { showStash = !showStash }) {
                 Text(
                     if (showStash) "返回" else "收纳(${archived.size + hidden.size})",
@@ -125,6 +203,9 @@ private fun SessionList(
                     color = if (archived.isEmpty() && hidden.isEmpty()) InkTheme.colors.textDisabled else InkTheme.colors.ink,
                 )
             }
+        }
+        if (showNewSheet) {
+            NewSessionSheet(model = model, onOpenSession = onOpenSession, onDismiss = { showNewSheet = false })
         }
         LazyColumn(state = listState) {
             if (showStash) {

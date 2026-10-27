@@ -369,8 +369,25 @@ object AgentEventParser {
                 }
             }
         }
+        // leftovers 按时间归位而非尾部 append：向上翻页加载的旧页不在本次 history
+        // 骨架窗口内，append 会把一两天前的消息顶到列表最下（真机反馈实锤）。
+        // 无时间锚（流式未定型/进行中工具卡）的保持尾部——它们本就属于活跃区。
+        fun anchorMs(e: ChatEntry): Long? = when (e) {
+            is Message -> e.timestampMs
+            is ToolCallEvent -> e.startedAtMs
+            else -> null
+        }
+        val anchored = leftovers.filter { anchorMs(it) != null }.sortedBy { anchorMs(it) }
+        val floating = leftovers.filter { anchorMs(it) == null }
+        var withAnchored = merged
+        for (item in anchored) {
+            val ts = anchorMs(item)!!
+            val idx = withAnchored.indexOfFirst { (anchorMs(it) ?: Long.MAX_VALUE) > ts }
+            withAnchored = if (idx < 0) withAnchored + item
+            else withAnchored.subList(0, idx) + item + withAnchored.subList(idx, withAnchored.size)
+        }
         return live.copy(
-            entries = merged + leftovers,
+            entries = withAnchored + floating,
             thinkingText = live.thinkingText,
             activeRunId = live.activeRunId,
             hasMoreHistory = history.hasMoreHistory,

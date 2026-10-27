@@ -645,13 +645,11 @@ class AppModel(
     }
 
     /**
-     * 从头开始（重置语义，Grok Bot 对齐）：会话历史留在原会话，同一 agent 开一条全新
-     * surface 键（sessions.create）。agent 状态（指令/记忆在网关侧）保留。
+     * 新建干净会话（M3.6 反馈①：列表入口，可选 agent）：sessions.create 开全新
+     * surface 键（agent 状态在网关侧保留，会话从零开始）。[onCreated] 带新键供导航。
      */
-    fun startFresh() {
-        val c = client ?: run { lastError = "未连接网关"; return }
-        val key = selectedSession ?: return
-        val agentId = key.removePrefix("agent:").substringBefore(':')
+    fun createNewSession(agentId: String, onCreated: (String) -> Unit = {}) {
+        val c = client ?: run { lastError = "未连接网关，无法新建会话"; return }
         val newKey = "agent:$agentId:ar-${epochMs().toString(36)}"
         scope.launch {
             try {
@@ -663,10 +661,33 @@ class AppModel(
                         selectedSession = newKey
                         openConversation(c, newKey)
                     }
+                onCreated(newKey)
             } catch (e: Exception) {
                 lastError = "新建会话失败：${e.message}"
             }
         }
+    }
+
+    /**
+     * 从头开始（重置语义，Grok Bot 对齐）：会话历史留在原会话，同一 agent 开一条全新
+     * surface 键。agent 状态（指令/记忆在网关侧）保留。
+     */
+    fun startFresh() {
+        val key = selectedSession ?: return
+        val agentId = key.removePrefix("agent:").substringBefore(':')
+        createNewSession(agentId)
+    }
+
+    /** 一键已读（M3.6 反馈③）：全部未读会话打本地已读标记（overlay 持久化，跨重启）。 */
+    fun markAllRead() {
+        val targets = sessions.filter { it.unread > 0 }
+        if (targets.isEmpty()) return
+        val now = epochMs()
+        targets.forEach {
+            sessionOverlay = SessionOverlay.toggled(sessionOverlay, it.id, readMarkMs = now)
+        }
+        scheduleOverlayPersist()
+        publishSessions()
     }
 
     fun disconnect() {

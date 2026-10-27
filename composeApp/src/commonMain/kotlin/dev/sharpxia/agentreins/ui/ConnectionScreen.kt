@@ -68,6 +68,18 @@ fun ConnectionScreen(model: AppModel, modifier: Modifier = Modifier, onBack: (()
         )
 
         OutlinedTextField(
+            value = model.alternateUrls.joinToString(", "),
+            onValueChange = { raw ->
+                model.alternateUrls = raw.split(",", "，").map { it.trim() }.filter { it.isNotBlank() }
+            },
+            label = { Text("Fallback 地址（逗号分隔，主地址失败时按序切换）") },
+            placeholder = { Text("wss://gw.example.com:443") },
+            singleLine = true,
+            shape = MaterialTheme.shapes.medium,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        OutlinedTextField(
             value = model.apiKey,
             onValueChange = { model.apiKey = it },
             label = { Text("API Key") },

@@ -233,6 +233,54 @@ class AgentEventParserTest {
         val mergedTwice = AgentEventParser.mergeHistoryOlder(merged, AgentEventParser.mapHistory(mySession, olderPage))
         assertEquals(merged.entries.size, mergedTwice.entries.size, "同页重复应用幂等")
     }
+
+    // ---- 合成消息 id（真机崩溃回归：同秒多条无 id 消息曾致 LazyColumn key 重复崩溃） ----
+
+    @Test
+    fun synthesizedIdsUniqueForSameTimestampDifferentContent() {
+        val history = buildJsonObject {
+            put("hasMore", false)
+            put("messages", buildJsonArray {
+                add(buildJsonObject {
+                    put("role", "assistant")
+                    put("timestamp", 1_000L)
+                    put("content", buildJsonArray {
+                        add(buildJsonObject { put("type", "text"); put("text", "第一条") })
+                    })
+                })
+                add(buildJsonObject {
+                    put("role", "assistant")
+                    put("timestamp", 1_000L)
+                    put("content", buildJsonArray {
+                        add(buildJsonObject { put("type", "text"); put("text", "第二条") })
+                    })
+                })
+            })
+        }
+        val state = AgentEventParser.mapHistory("agent:main:main", history)
+        assertEquals(2, state.entries.size)
+        assertTrue(state.entries[0].id != state.entries[1].id, "同秒不同内容不得撞 id")
+    }
+
+    @Test
+    fun synthesizedIdStableForSameMessageAcrossPages() {
+        // 同一条消息出现在两页（相同时间戳+内容）→ id 稳定，供 mergeHistoryOlder 对账去重
+        fun page() = buildJsonObject {
+            put("hasMore", false)
+            put("messages", buildJsonArray {
+                add(buildJsonObject {
+                    put("role", "assistant")
+                    put("timestamp", 1_000L)
+                    put("content", buildJsonArray {
+                        add(buildJsonObject { put("type", "text"); put("text", "同一条") })
+                    })
+                })
+            })
+        }
+        val a = AgentEventParser.mapHistory("agent:main:main", page()).entries.single().id
+        val b = AgentEventParser.mapHistory("agent:main:main", page()).entries.single().id
+        assertEquals(a, b)
+    }
 }
 
 // —— 测试内小工具（与 AgentEventParser 私有实现解耦） ——

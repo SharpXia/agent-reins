@@ -234,11 +234,17 @@ object AgentEventParser {
         val entries = mutableListOf<ChatEntry>()
         messages.forEachIndexed { idx, el ->
             val m = el as? JsonObject ?: return@forEachIndexed
-            // 消息 id：顶层 id（探针/测试形）或 __openclaw.id（真实网关报文）——跨页去重需要
-            // 全局稳定 id，页内索引会撞号
+            // 消息 id：顶层 id（探针/测试形）或 __openclaw.id（真实网关报文）。都缺时合成：
+            // 时间戳 + 内容哈希——跨页必须稳定（mergeHistoryOlder 按 id 对账去重，纯页内索引
+            // 会在页边界撞/漏），页内必须唯一（纯时间戳在同秒多条消息上撞号，曾致
+            // LazyColumn key 重复崩溃，真机实锤）
             val messageId = m.str("id")
                 ?: (m["__openclaw"] as? JsonObject)?.str("id")
-                ?: "msg-${m.long("timestamp") ?: idx}"
+                ?: run {
+                    val ts = m.long("timestamp")
+                    val hash = (m.str("role").orEmpty() + "\u0000" + contentText(m["content"])).hashCode()
+                    if (ts != null) "msg-$ts-$hash" else "msg-i$idx-$hash"
+                }
             when (m.str("role")) {
                 "user" -> {
                     val text = contentText(m["content"])

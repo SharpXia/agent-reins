@@ -3,6 +3,7 @@ package dev.sharpxia.agentreins.ui
 import androidx.compose.ui.graphics.Color
 import dev.sharpxia.agentreins.model.ChatEntry
 import dev.sharpxia.agentreins.model.Message
+import dev.sharpxia.agentreins.model.ToolCallEvent
 import kotlin.time.Clock
 import kotlinx.datetime.DateTimeUnit
 import kotlinx.datetime.Instant
@@ -35,6 +36,7 @@ fun buildChatRows(
 ): List<ChatRow> {
     val rows = mutableListOf<ChatRow>()
     var lastDate: LocalDate? = null
+    val usedIds = mutableSetOf<String>()
     for (entry in entries) {
         val ts = (entry as? Message)?.timestampMs
         if (ts != null) {
@@ -44,7 +46,20 @@ fun buildChatRows(
                 lastDate = date
             }
         }
-        rows += ChatRow.Entry(entry)
+        // id 撞号防御：LazyColumn key 必须唯一，重复 id 会在布局期抛异常直接崩溃
+        // （真机实锤）。正常已被上游保证，这里对残余冲突改写 id 兜底。
+        var id = entry.id
+        var n = 2
+        while (!usedIds.add(id)) {
+            id = "${entry.id}#${n}"
+            n++
+        }
+        val safe = if (id == entry.id) entry else when (entry) {
+            is Message -> entry.copy(id = id)
+            is ToolCallEvent -> entry.copy(id = id)
+            else -> entry
+        }
+        rows += ChatRow.Entry(safe)
     }
     return rows
 }

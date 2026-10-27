@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -115,7 +116,22 @@ internal fun ChatScreen(
     var initialScrollDone by remember { mutableStateOf(false) }
     var showJumpToLatest by remember { mutableStateOf(false) }
 
-    val rows = remember(state?.entries) { buildChatRows(state?.entries ?: emptyList()) }
+    // rows 重建用内容签名判定（size/首尾 id/尾部长度/工具卡状态），而非 entries 引用：
+    // 后台 seq 缺口回填与 run 终局刷新会整体替换 entries——内容无变化时避免全列表重组
+    // （mikepenz Markdown 重组成本高，滑动中表现为重绘/割裂，真机反馈实锤）
+    val currentEntries = state?.entries ?: emptyList()
+    val rowsSignature = remember(currentEntries) {
+        buildString {
+            append(currentEntries.size)
+            append(':'); append(currentEntries.firstOrNull()?.id)
+            append(':'); append(currentEntries.lastOrNull()?.id)
+            append(':'); append((currentEntries.lastOrNull() as? Message)?.content?.length ?: 0)
+            currentEntries.filterIsInstance<ToolCallEvent>().forEach {
+                append(':'); append(it.id); append('='); append(it.state.name)
+            }
+        }
+    }
+    val rows = remember(rowsSignature) { buildChatRows(currentEntries) }
     val pending = model.pendingOutbox
     val contentRowCount = rows.size + pending.size
     val lastTextLen = (state?.entries?.lastOrNull() as? Message)?.content?.length ?: 0
@@ -219,25 +235,39 @@ internal fun ChatScreen(
                         )
                     }
                 }
-                items(rows, key = { row ->
+                itemsIndexed(rows, key = { _, row ->
                     when (row) {
                         is ChatRow.DayHeader -> "day-${row.atMs}"
                         is ChatRow.Entry -> row.entry.id
                     }
-                }) { row ->
-                    // 新消息入场：淡入 + 轻微上移（M3.3；animateItem 处理重排/新行）
-                    @OptIn(ExperimentalFoundationApi::class)
-                    (Modifier.animateItem())
-                    when (row) {
-                        is ChatRow.DayHeader -> DayHeaderRow(row.atMs)
-                        is ChatRow.Entry -> when (val entry = row.entry) {
-                            is ToolCallEvent -> ToolCallCard(entry)
-                            is Message -> ChatMessageItem(
-                                model = model,
-                                message = entry,
-                                onCopy = { text -> clipboard.setText(AnnotatedString(text)) },
-                                onResend = { text -> haptics.tap(); model.resendText(text) },
-                            )
+                }) { index, row ->
+                    // 入场动画只给「最新一条 + 活跃 run/流式中」：分页前插与已加载内容零动画
+                    // （placementSpec=null 禁位置过渡——历史回填时全列表漂移/滑不动的元凶）
+                    val tail = row as? ChatRow.Entry
+                    val isLiveTail = index == rows.lastIndex && tail?.entry is Message &&
+                        ((tail.entry as Message).streaming || runActive)
+                    val itemModifier = if (isLiveTail) {
+                        @OptIn(ExperimentalFoundationApi::class)
+                        Modifier.animateItem(
+                            fadeInSpec = tween(220),
+                            placementSpec = null,
+                            fadeOutSpec = null,
+                        )
+                    } else {
+                        Modifier
+                    }
+                    Box(itemModifier) {
+                        when (row) {
+                            is ChatRow.DayHeader -> DayHeaderRow(row.atMs)
+                            is ChatRow.Entry -> when (val entry = row.entry) {
+                                is ToolCallEvent -> ToolCallCard(entry)
+                                is Message -> ChatMessageItem(
+                                    model = model,
+                                    message = entry,
+                                    onCopy = { text -> clipboard.setText(AnnotatedString(text)) },
+                                    onResend = { text -> haptics.tap(); model.resendText(text) },
+                                )
+                            }
                         }
                     }
                 }
@@ -418,7 +448,7 @@ private fun ChatMessageItem(
                     Column(
                         Modifier
                             .combinedClickable(onClick = {}, onLongClick = { menuOpen = true })
-                            .animateContentSize(),
+                            .then(if (message.streaming) Modifier.animateContentSize() else Modifier),
                     ) {
                         if (message.streaming) {
                             ShimmerStreamingText(message.content)

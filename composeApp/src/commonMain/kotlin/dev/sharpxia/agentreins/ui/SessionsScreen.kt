@@ -4,7 +4,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -34,12 +35,10 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
-import androidx.compose.material3.SwipeToDismissBox
-import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -109,6 +108,11 @@ private fun SessionList(
     val haptics = rememberHapticPlayer()
     var showStash by remember { mutableStateOf(false) } // 收纳视图：归档 + 已隐藏
     val totalUnread = model.sessions.sumOf { it.unread }
+    // 展开菜单的行（真机反馈⑦-3）：同一时刻至多一行展开；滚动/他处触摸即收起
+    var revealedRowId by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (listState.isScrollInProgress) revealedRowId = null
+    }
     // Agent 过滤（真机反馈⑤-5）：null = All；选中后会话页只显示该 agent 的会话。
     // rememberSaveable：进会话再返回（destination 离开组合）不能把筛选静默丢回 All
     var agentFilter by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
@@ -263,17 +267,77 @@ private fun SessionList(
                         .padding(horizontal = 10.dp, vertical = 8.dp),
                 )
             }
-            Text(
-                "＋",
-                style = InkTheme.type.headingSm,
-                color = InkTheme.colors.ink,
-                modifier = Modifier
-                    .clickable {
-                        haptics.tap()
-                        scope.launch { drawerState.open() } // 新建走抽屉内联（⑥-1）
+            // 新建会话（真机反馈⑦-5）：＋ 弹 agent 选择列表——首项为当前过滤的 agent，
+            // 点击即创建并直达；DropdownMenu 为真机已验证的弹层（消息长按菜单同款）
+            Box {
+                var pickerOpen by remember { mutableStateOf(false) }
+                Text(
+                    "＋",
+                    style = InkTheme.type.headingSm,
+                    color = InkTheme.colors.ink,
+                    modifier = Modifier
+                        .clickable { haptics.tap(); pickerOpen = true }
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                )
+                androidx.compose.material3.DropdownMenu(
+                    expanded = pickerOpen,
+                    onDismissRequest = { pickerOpen = false },
+                    containerColor = InkTheme.colors.elevated,
+                ) {
+                    val options = buildList {
+                        agentFilter?.let { cur ->
+                            // 过滤 agent 可能不在 summaries（可见会话全归档）：合成首项保证
+                            // 「在当前 agent 新建」始终可得
+                            val summary = summaries.firstOrNull { it.profile.agentId == cur }
+                                ?: dev.sharpxia.agentreins.AgentSummary(
+                                    profile = model.agentProfiles[cur]
+                                        ?: dev.sharpxia.agentreins.AgentProfile.default(cur),
+                                    sessionCount = 0,
+                                    unreadTotal = 0,
+                                    lastActiveAtMs = null,
+                                    mainSessionKey = null,
+                                )
+                            add(summary to true)
+                        }
+                        summaries.forEach { s ->
+                            if (agentFilter == null || s.profile.agentId != agentFilter) add(s to false)
+                        }
                     }
-                    .padding(horizontal = 10.dp, vertical = 4.dp),
-            )
+                    if (options.isEmpty()) {
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("尚无 agent", style = InkTheme.type.textMd, color = InkTheme.colors.textTertiary) },
+                            onClick = {},
+                        )
+                    }
+                    options.forEach { (s, first) ->
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text(
+                                        if (first) "在「" + s.profile.name + "」新建会话" else s.profile.name,
+                                        style = InkTheme.type.textLg,
+                                        color = InkTheme.colors.ink,
+                                    )
+                                    Text(
+                                        "${s.sessionCount} 个会话",
+                                        style = InkTheme.type.textXs,
+                                        color = InkTheme.colors.textTertiary,
+                                    )
+                                }
+                            },
+                            leadingIcon = {
+                                AgentTintScope(s.profile.tint) {
+                                    AgentAvatar(LocalAgentTint.current, s.profile.name, size = 30)
+                                }
+                            },
+                            onClick = {
+                                pickerOpen = false
+                                model.createNewSession(s.profile.agentId)
+                            },
+                        )
+                    }
+                }
+            }
             TextButton(onClick = { showStash = !showStash }) {
                 Text(
                     if (showStash) "返回" else "收纳(${archived.size + hidden.size})",
@@ -305,13 +369,13 @@ private fun SessionList(
                 if (archived.isNotEmpty()) {
                     item(key = "hdr-archived") { SectionHeader("归档") }
                     items(archived, key = { "a-${it.id}" }) { s ->
-                        SwipeRevealRow(model, s, onOpenSession, haptics)
+                        SwipeRevealRow(model, s, onOpenSession, haptics, revealed = revealedRowId == s.id, onRevealedChange = { r -> revealedRowId = if (r) s.id else null })
                     }
                 }
                 if (hidden.isNotEmpty()) {
                     item(key = "hdr-hidden") { SectionHeader("已隐藏") }
                     items(hidden, key = { "h-${it.id}" }) { s ->
-                        SwipeRevealRow(model, s, onOpenSession, haptics)
+                        SwipeRevealRow(model, s, onOpenSession, haptics, revealed = revealedRowId == s.id, onRevealedChange = { r -> revealedRowId = if (r) s.id else null })
                     }
                 }
                 if (archived.isEmpty() && hidden.isEmpty()) {
@@ -326,7 +390,7 @@ private fun SessionList(
                 }
             } else {
                 items(mainSessions, key = { it.id }) { s ->
-                    SwipeRevealRow(model, s, onOpenSession, haptics)
+                    SwipeRevealRow(model, s, onOpenSession, haptics, revealed = revealedRowId == s.id, onRevealedChange = { r -> revealedRowId = if (r) s.id else null })
                 }
             }
         }
@@ -335,9 +399,10 @@ private fun SessionList(
 }
 
 /**
- * 会话行滑动操作（真机反馈⑥-3 重做）：仅支持「从右向左」滑动展开操作菜单
- * （置顶/归档 或 恢复/隐藏），松手按过半吸附；操作必须二次点击才执行——
- * 不再按滑动距离直接执行。左缘起手的右滑留给抽屉边缘手势。
+ * 会话行滑动操作（真机反馈⑦-3 定稿）：仅「从右向左」滑展开操作菜单（置顶/归档 或
+ * 恢复/隐藏），过半吸附，二次点击执行；**右向手势（含左缘起点）不消费——让位抽屉
+ * 边缘手势**（方向感知自绘裁决，不用 detectHorizontalDragGestures——它吃掉双向
+ * slop 导致抽屉左滑被屏蔽）；展开后任意非按钮触摸/滚动即收起（revealedRowId 钩子）。
  */
 @Composable
 private fun SwipeRevealRow(
@@ -345,15 +410,41 @@ private fun SwipeRevealRow(
     session: Session,
     onOpenSession: (String) -> Unit,
     haptics: HapticPlayer,
+    revealed: Boolean,
+    onRevealedChange: (Boolean) -> Unit,
 ) {
     val density = androidx.compose.ui.platform.LocalDensity.current
     val revealPx = with(density) { 128.dp.toPx() }
     val stash = session.archived || session.hidden
-    var offsetX by remember(session.id) { mutableStateOf(0f) }
     val scope = rememberCoroutineScope()
     val currentSession by rememberUpdatedState(session)
+    var offsetX by remember(session.id) { mutableStateOf(0f) }
+
+    // 收起态同步：外部（滚动/他行展开/抽屉）判定收起时回弹归零
+    LaunchedEffect(revealed) {
+        if (!revealed && offsetX != 0f) {
+            val from = offsetX
+            androidx.compose.animation.core.animate(
+                initialValue = from,
+                targetValue = 0f,
+                animationSpec = androidx.compose.animation.core.tween(160),
+            ) { v, _ -> offsetX = v }
+        }
+    }
+    fun settle() {
+        val open = offsetX < -revealPx / 2
+        onRevealedChange(open)
+        val target = if (open) -revealPx else 0f
+        val from = offsetX
+        scope.launch {
+            androidx.compose.animation.core.animate(
+                initialValue = from,
+                targetValue = target,
+                animationSpec = androidx.compose.animation.core.tween(180),
+            ) { v, _ -> offsetX = v }
+        }
+    }
     Box(Modifier.fillMaxSize()) {
-        // 背景操作菜单：End 对齐，两颗按钮，二次点击执行
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.End,
@@ -361,34 +452,36 @@ private fun SwipeRevealRow(
         ) {
             SwipeActionButton(
                 label = when {
-                    !stash && session.pinned -> "取消置顶"
+                    !stash && currentSession.pinned -> "取消置顶"
                     !stash -> "置顶"
                     else -> "恢复"
                 },
-                icon = if (!stash && session.pinned) ArIcons.Pin else if (stash) ArIcons.Unarchive else ArIcons.Pin,
+                icon = if (!stash && currentSession.pinned) ArIcons.Pin else if (stash) ArIcons.Unarchive else ArIcons.Pin,
                 tint = InkTheme.colors.success,
                 onClick = {
                     haptics.success()
                     when {
-                        !stash -> model.setSessionPinned(session, !session.pinned)
-                        session.archived -> model.setSessionArchived(session, false)
-                        else -> model.setSessionHidden(session, false)
+                        !stash -> model.setSessionPinned(currentSession, !currentSession.pinned)
+                        currentSession.archived -> model.setSessionArchived(currentSession, false)
+                        else -> model.setSessionHidden(currentSession, false)
                     }
+                    onRevealedChange(false)
                 },
             )
             SwipeActionButton(
                 label = when {
-                    stash -> if (session.hidden) "取消隐藏" else "隐藏"
+                    stash -> if (currentSession.hidden) "取消隐藏" else "隐藏"
                     else -> "归档"
                 },
                 icon = if (stash) ArIcons.EyeOff else ArIcons.Archive,
-                tint = if (stash && session.hidden) InkTheme.colors.success else InkTheme.colors.warning,
+                tint = if (stash && currentSession.hidden) InkTheme.colors.success else InkTheme.colors.warning,
                 onClick = {
                     haptics.tap()
                     when {
-                        stash -> model.setSessionHidden(session, !session.hidden)
-                        else -> model.setSessionArchived(session, true)
+                        stash -> model.setSessionHidden(currentSession, !currentSession.hidden)
+                        else -> model.setSessionArchived(currentSession, true)
                     }
+                    onRevealedChange(false)
                 },
             )
         }
@@ -398,24 +491,34 @@ private fun SwipeRevealRow(
                 .fillMaxSize()
                 .graphicsLayer { translationX = offsetX }
                 .pointerInput(session.id, revealPx) {
-                    detectHorizontalDragGestures(
-                        onDragEnd = {
-                            val target = if (offsetX < -revealPx / 2) -revealPx else 0f
-                            val from = offsetX
-                            scope.launch {
-                                androidx.compose.animation.core.animate(
-                                    initialValue = from,
-                                    targetValue = target,
-                                    animationSpec = androidx.compose.animation.core.tween(180),
-                                ) { v, _ -> offsetX = v }
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = true)
+                        var total = 0f
+                        var engaged = false
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            if (event.changes.any { it.isConsumed }) return@awaitEachGesture // 他手势赢了
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: return@awaitEachGesture
+                            if (!change.pressed) return@awaitEachGesture
+                            total += change.position.x - change.previousPosition.x
+                            if (kotlin.math.abs(total) > viewConfiguration.touchSlop) {
+                                if (total > 0f) return@awaitEachGesture // 右向：不消费，让位抽屉
+                                engaged = true
+                                change.consume()
+                                break
                             }
-                        },
-                        onDragCancel = { offsetX = 0f },
-                    ) { change, dragAmount ->
-                        if (dragAmount < 0 || offsetX < 0) { // 仅左向拖动（含回拉）
-                            offsetX = (offsetX + dragAmount).coerceIn(-revealPx, 0f)
-                            if (offsetX != 0f) change.consume()
                         }
+                        while (engaged) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!change.pressed) break
+                            val dx = change.position.x - change.previousPosition.x
+                            if (dx != 0f) {
+                                offsetX = (offsetX + dx).coerceIn(-revealPx, 0f)
+                                change.consume()
+                            }
+                        }
+                        settle()
                     }
                 },
         ) {
@@ -423,7 +526,10 @@ private fun SwipeRevealRow(
                 model = model,
                 session = currentSession,
                 stash = stash,
-                onClick = { if (offsetX == 0f) onOpenSession(session.id) },
+                onClick = {
+                    if (revealed) onRevealedChange(false) // 展开时点行=先收起，不进会话
+                    else onOpenSession(session.id)
+                },
             )
         }
     }
@@ -565,7 +671,9 @@ private fun SessionRowContent(
                 )
                 .padding(horizontal = 16.dp, vertical = 10.dp),
         ) {
-            AgentAvatar(tint, session.title ?: session.id)
+            // 头像用 agent 身份（真机反馈⑦-1）：名称取 agent 注册名，非会话标题首字
+            val agentName = model.agentProfiles[agentId]?.name ?: agentId ?: session.title ?: session.id
+            AgentAvatar(tint, agentName)
             Spacer(Modifier.size(12.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {

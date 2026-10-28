@@ -31,6 +31,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
 import kotlin.concurrent.Volatile
 
@@ -488,11 +489,31 @@ class AppModel(
                     )
                     try {
                         // connect() 入口自清理，同一 client 逐候选重试安全
-                        c.connect(config)
+                        // 快速失败（真机反馈⑦-4）：不可达候选（如家里的 LAN 地址在户外）
+                        // 3.5s 内判死即轮换。预算分级（R 轮 P0/P1/P2）：
+                        //   bootstrap 配对 = 170s（网关侧等人工批准 150s，硬超时=首连必死）
+                        //   末位/唯一候选 = 15s（远程中继慢握手不误判）
+                        //   其余候选 = 3.5s 快速轮换
+                        val budget = when {
+                            bootstrapToken != null -> PAIRING_CANDIDATE_TIMEOUT_MS
+                            index == candidates.lastIndex -> SLOW_CANDIDATE_TIMEOUT_MS
+                            else -> FAST_CANDIDATE_TIMEOUT_MS
+                        }
+                        kotlinx.coroutines.withTimeout(budget) {
+                            c.connect(config)
+                        }
                         successUrl = candidate
                         break
                     } catch (e: GatewayRpcException) {
                         throw e // 配对/鉴权等协议拒绝：地址已可达，换地址无意义
+                    } catch (e: TimeoutCancellationException) {
+                        lastTransportError = e
+                        runCatching { c.disconnect() } // 掐灭超时后残留的 ghost wsJob（R 轮 P1）
+                        lastError = if (index < candidates.lastIndex) {
+                            "地址 ${candidate} 不可达，尝试备用地址…"
+                        } else {
+                            "地址 ${candidate} 连接超时"
+                        }
                     } catch (e: Exception) {
                         lastTransportError = e
                         if (index < candidates.lastIndex) {
@@ -503,6 +524,7 @@ class AppModel(
                 val connected = successUrl
                     ?: throw (lastTransportError ?: IllegalStateException("connect failed"))
                 connectedUrl = connected
+                lastError = null // failover 过程中的候选失败提示在成功后清掉
                 resetAutoRetry() // 连上了，退避重试收队
                 if (!connectChimed) {
                     playSound(AppSound.BLIP) // 连接成功提示音（固定音；弱网自动重连不连响）
@@ -958,5 +980,14 @@ class AppModel(
 
         /** 非当前会话通知音防抖窗口（review R1-P1-3）。 */
         const val SOUND_DEBOUNCE_MS = 3_000L
+
+        /** failover 单候选快速失败超时（真机反馈⑦-4）：不可达地址 3.5s 判死轮换。 */
+        const val FAST_CANDIDATE_TIMEOUT_MS = 3_500L
+
+        /** failover 末位候选预算（远程中继慢握手不误判，对齐 RPC 15s 量级）。 */
+        const val SLOW_CANDIDATE_TIMEOUT_MS = 15_000L
+
+        /** bootstrap 配对候选预算：网关侧等人工批准 150s + 余量（R 轮 P0 豁免）。 */
+        const val PAIRING_CANDIDATE_TIMEOUT_MS = 170_000L
     }
 }

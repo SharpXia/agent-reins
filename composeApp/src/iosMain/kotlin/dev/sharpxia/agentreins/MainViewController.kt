@@ -93,7 +93,8 @@ private fun readDevJson(): String? {
  * ① 系统 scrollsToTop 通道（主通道）——系统状态栏层会吞掉原始触摸，自绘 overlay
  *    永远收不到点按；系统改为对「窗口内唯一 scrollsToTop 的 UIScrollView」执行
  *    scroll-to-top。铺一个 1pt 高的隐藏 UIScrollView（初始 offset=1），系统回顶时
- *    offset 动画 1→0 触发 delegate → 总线。userInteractionEnabled=false 不挡任何触摸。
+ *    offset 动画 1→0 触发 delegate → 总线。userInteractionEnabled=true（0.2.15 复验：
+ *    false 时系统不选中探针；1pt 高条带零遮挡）。
  * ② 自绘 overlay + 手势（历史通道，模拟器/系统不消费区域的环境兜底）。
  */
 @OptIn(ExperimentalForeignApi::class)
@@ -108,7 +109,7 @@ private fun attachStatusBarTapDetector(controller: UIViewController) {
         scrollsToTop = true
         showsVerticalScrollIndicator = false
         showsHorizontalScrollIndicator = false
-        userInteractionEnabled = false
+        userInteractionEnabled = true
         backgroundColor = UIColor.clearColor
         setContentSize(CGSizeMake(0.0, 2.0))
         setContentOffset(CGPointMake(0.0, 1.0))

@@ -626,12 +626,15 @@ class AppModel(
         openConversation(c, sessionKey)
     }
 
-    /** 当前会话 PENDING 待发命令快照（聊天页「未发出」气泡的数据源）。 */
+    /** 当前会话 PENDING 待发命令快照（聊天页「未发出」气泡的数据源）。在途条目排除
+     *  （真机反馈⑥-5）：RPC 已发出、回执未达的命令由发送按钮反馈，不冒「未发出」气泡。 */
     private fun refreshPendingOutbox() {
         val key = selectedSession ?: run { pendingOutbox = emptyList(); return }
+        val sending = client
         pendingOutbox = runCatching {
             cache.loadOutbox(gatewayId).filter {
-                it.sessionKey == key && it.status == Outbox.Command.Status.PENDING
+                it.sessionKey == key && it.status == Outbox.Command.Status.PENDING &&
+                    sending?.isSending(it.idempotencyKey) != true
             }
         }.getOrDefault(emptyList())
     }
@@ -797,10 +800,16 @@ class AppModel(
      * 新建干净会话（M3.6 反馈①：列表入口，可选 agent）：sessions.create 开全新
      * surface 键（agent 状态在网关侧保留，会话从零开始）。完成后经 [navigationEvents]
      * 通知 Nav 直达新会话页（真机反馈⑤-1：不再留在入口页）。
+     * [creatingSession] 供抽屉行显示在途态并防双击（真机反馈⑥-1：静默失败不可见）。
      */
+    var creatingSession by mutableStateOf(false)
+        private set
+
     fun createNewSession(agentId: String) {
+        if (creatingSession) return
         val c = client ?: run { lastError = "未连接网关，无法新建会话"; return }
         val newKey = "agent:$agentId:ar-${epochMs().toString(36)}"
+        creatingSession = true
         scope.launch {
             try {
                 c.createSession(newKey, label = "新会话")
@@ -812,9 +821,13 @@ class AppModel(
                         openConversation(c, newKey)
                     }
                 // 导航经事件流（主线程消费），不再从 Default 协程直调 navigate（毁导航栈）
-                navigationEvents.tryEmit(newKey)
+                if (!navigationEvents.tryEmit(newKey)) {
+                    lastError = "会话已创建，但跳转失败——请从列表进入"
+                }
             } catch (e: Exception) {
                 lastError = "新建会话失败：${e.message}"
+            } finally {
+                creatingSession = false
             }
         }
     }

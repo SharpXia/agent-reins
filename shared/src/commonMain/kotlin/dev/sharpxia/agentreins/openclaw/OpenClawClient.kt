@@ -17,6 +17,7 @@ import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.webSocket
 import io.ktor.websocket.Frame
 import io.ktor.websocket.readText
+import kotlin.concurrent.Volatile
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -519,6 +520,22 @@ class OpenClawClient(
      *  写回前检查条目仍在队列——in-flight 期间用户「放弃发送」是终态，回写会让
      *  已删除的消息以 SENT/PENDING 形态复活（P2 修复）。 */
     private suspend fun sendOutboxCommand(cmd: Outbox.Command): Boolean {
+        mutex.withLock {
+            sendingKeys += cmd.idempotencyKey
+            sendingSnapshot = sendingKeys.toSet()
+        }
+        try {
+            return sendOutboxCommandInner(cmd)
+        } finally {
+            mutex.withLock {
+                sendingKeys -= cmd.idempotencyKey
+                sendingSnapshot = sendingKeys.toSet()
+            }
+            refreshOutboxCount() // 在途态迁移即时驱动 UI 气泡刷新
+        }
+    }
+
+    private suspend fun sendOutboxCommandInner(cmd: Outbox.Command): Boolean {
         return try {
             val res = rpc(
                 "sessions.send",
@@ -575,6 +592,20 @@ class OpenClawClient(
     /** 该命令是否仍在队列（未被用户删除）。 */
     private fun cacheHasCommand(idempotencyKey: String): Boolean =
         cache.loadOutbox(gatewayId).any { it.idempotencyKey == idempotencyKey }
+
+    /**
+     * 在途（RPC 已发出、回执未达）命令集合（真机反馈⑥-5）：UI 的「未发出」气泡只
+     * 该给真正排队/失败的条目——在途条目发送按钮已有反馈，混在气泡里表现为
+     * 「成功后还冒一条待发送」。mutex 保护（Default 协程写、UI 线程读）。
+     */
+    private val sendingKeys = mutableSetOf<String>()
+
+    /** UI 读的不可变快照（UI 线程非挂起读；写侧在 mutex 内整体替换）。 */
+    @Volatile
+    private var sendingSnapshot: Set<String> = emptySet()
+
+    /** UI 查询：该命令是否在途（在途不显示待发气泡）。 */
+    fun isSending(idempotencyKey: String): Boolean = idempotencyKey in sendingSnapshot
 
     /**
      * 重连后补发：PENDING 优先于 SENT，FIFO；断连即停（剩余下轮再补）。

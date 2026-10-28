@@ -12,6 +12,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -81,6 +82,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.sharpxia.agentreins.AppModel
@@ -100,6 +102,15 @@ import dev.sharpxia.agentreins.ui.theme.agentTintFor
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+
+/** LazyColumn 行 key（稳定键=分区加载 prepend 时的位置保持依据；锚恢复同源）。 */
+private fun rowKeyOf(row: ChatRow): String = when (row) {
+    is ChatRow.DayHeader -> "day-${row.atMs}"
+    is ChatRow.Entry -> row.entry.id
+    is ChatRow.ToolGroup -> row.key
+    is ChatRow.Boundary -> "bnd-${row.sessionKey}"
+    is ChatRow.CompactMark -> "cmp-${row.sessionKey}"
+}
 
 /**
  * 对话流（M3.3 墨水风重绘）：日分隔、助手墨水平文（Markdown v2 表格/嵌套/高亮）、
@@ -204,14 +215,13 @@ internal fun ChatScreen(
         (if (state?.hasMoreHistory == true && contentRowCount > 0) 1 else 0) +
         (if (contentRowCount == 0 && !runActive && historyLoaded) 1 else 0) +
         (if (runActive) 1 else 0)
-    // 用户是否在历史到达前主动滚动过（bug② 锚底保护：尊重用户位置）。
-    // rememberUpdatedState：effect key 只有 listState，闭包内读旧值会击穿保护
-    // （review R3-P2-1——首帧锚底的程序性滚动会被误判为用户手势）
-    val historyLoadedNow by rememberUpdatedState(historyLoaded)
+    // 用户是否在历史到达前主动滚动过（锚底保护：尊重用户位置）。
+    // 只认真实拖拽（DragInteraction）：程序性 scrollToItem（开局锚底/分区加载）也会置
+    // isScrollInProgress，把它当用户手势会误跳过历史到达后的锚底=进入位置随机（真机反馈④根因）
     var userScrolledBeforeLoad by remember { mutableStateOf(false) }
     LaunchedEffect(listState) {
-        snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
-            if (scrolling && !historyLoadedNow) userScrolledBeforeLoad = true
+        listState.interactionSource.interactions.collect {
+            if (it is DragInteraction.Start) userScrolledBeforeLoad = true
         }
     }
     LaunchedEffect(historyLoaded) {
@@ -244,8 +254,20 @@ internal fun ChatScreen(
     LaunchedEffect(listState) {
         snapshotFlow {
             listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
-        }.collect { atTop ->
-            if (atTop) if (timeline != null) model.loadConvTop() else model.loadOlderMessages()
+        }.collect { atTop -> if (atTop && timeline == null) model.loadOlderMessages() }
+    }
+    // 拼接时间线的分区懒加载（M4 真机反馈②重做）：分区头进入视口即加载该区（未拉过→
+    // 首页；有更多→翻更早一页），钉在分区头时 convSectionLoading 空闲翻转驱动连续翻页。
+    // 位置保持交给 LazyColumn 的稳定 key 锚定（prepend 不动首可见项）——不做手动回滚，
+    // 手动锚恢复会被无关重组提前消费把视口拽离阅读位（实测反例）。
+    LaunchedEffect(timeline != null) {
+        if (timeline == null) return@LaunchedEffect
+        snapshotFlow {
+            val first = listState.layoutInfo.visibleItemsInfo.firstOrNull()
+            (first?.key as? String) to (model.convSectionLoading == null)
+        }.collect { (firstKey, idle) ->
+            if (!idle || firstKey == null || !firstKey.startsWith("bnd-")) return@collect
+            model.loadSectionHistoryIfNeeded(firstKey.removePrefix("bnd-"))
         }
     }
     val keyboard = LocalSoftwareKeyboardController.current
@@ -346,15 +368,7 @@ internal fun ChatScreen(
                         )
                     }
                 }
-                itemsIndexed(rows, key = { _, row ->
-                    when (row) {
-                        is ChatRow.DayHeader -> "day-${row.atMs}"
-                        is ChatRow.Entry -> row.entry.id
-                        is ChatRow.ToolGroup -> row.key
-                        is ChatRow.Boundary -> "bnd-${row.sessionKey}"
-                        is ChatRow.CompactMark -> "cmp-${row.sessionKey}"
-                    }
-                }) { index, row ->
+                itemsIndexed(rows, key = { _, row -> rowKeyOf(row) }) { index, row ->
                     // 入场动画只给「最新一条 + 活跃 run/流式中」：分页前插与已加载内容零动画
                     // （placementSpec=null 禁位置过渡——历史回填时全列表漂移/滑不动的元凶）
                     val tail = row as? ChatRow.Entry
@@ -628,44 +642,61 @@ private fun ChatMessageItem(
         ?: agentId?.let { agentTintFor(it) }
         ?: AgentTintName.GRAY
     AgentTintScope(tintName) {
-        when (message.role) {
-            Message.Role.USER -> UserBubble(model, message, onCopy, onResend)
-            // 助手消息：墨水平文无气泡；流式中 shimmer，定型后 Markdown v2。
-            // 长按区贴内容（全宽 clickable 吞点击的坑，真机实锤）
-            Message.Role.ASSISTANT -> {
-                var menuOpen by remember { mutableStateOf(false) }
-                Row(Modifier.fillMaxWidth()) {
-                    Column(
-                        Modifier
-                            .combinedClickable(onClick = {}, onLongClick = { menuOpen = true })
-                            .then(if (message.streaming) Modifier.animateContentSize() else Modifier),
-                    ) {
-                        if (message.streaming) {
-                            ShimmerStreamingText(message.content)
-                        } else if (message.content.isNotBlank()) {
-                            InkMarkdown(message.content)
-                        }
-                        if (menuOpen) {
-                            MessageActionsSheet(
-                                message = message,
-                                onDismiss = { menuOpen = false },
-                                onCopy = onCopy,
-                                onResend = onResend,
-                                onQuote = { model.quoteMessage(it) },
-                                onFork = { model.forkFrom(it) },
-                            )
+        // 消息发送时间（M4 真机反馈①）：用户/助手消息右下角；system 过程注不标
+        Column(Modifier.fillMaxWidth()) {
+            when (message.role) {
+                Message.Role.USER -> UserBubble(model, message, onCopy, onResend)
+                // 助手消息：墨水平文无气泡；流式中 shimmer，定型后 Markdown v2。
+                // 长按区贴内容（全宽 clickable 吞点击的坑，真机实锤）
+                Message.Role.ASSISTANT -> {
+                    var menuOpen by remember { mutableStateOf(false) }
+                    Row(Modifier.fillMaxWidth()) {
+                        Column(
+                            Modifier
+                                .combinedClickable(onClick = {}, onLongClick = { menuOpen = true })
+                                .then(if (message.streaming) Modifier.animateContentSize() else Modifier),
+                        ) {
+                            if (message.streaming) {
+                                ShimmerStreamingText(message.content)
+                            } else if (message.content.isNotBlank()) {
+                                InkMarkdown(message.content)
+                            }
+                            if (menuOpen) {
+                                MessageActionsSheet(
+                                    message = message,
+                                    onDismiss = { menuOpen = false },
+                                    onCopy = onCopy,
+                                    onResend = onResend,
+                                    onQuote = { model.quoteMessage(it) },
+                                    onFork = { model.forkFrom(it) },
+                                )
+                            }
                         }
                     }
                 }
+                // agent 的 commentary（item 流 kind=preamble）：过程说明行内注
+                Message.Role.SYSTEM -> Text(
+                    message.content,
+                    style = InkTheme.type.textSm,
+                    fontStyle = FontStyle.Italic,
+                    color = InkTheme.colors.textTertiary,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                )
             }
-            // agent 的 commentary（item 流 kind=preamble）：过程说明行内注
-            Message.Role.SYSTEM -> Text(
-                message.content,
-                style = InkTheme.type.textSm,
-                fontStyle = FontStyle.Italic,
-                color = InkTheme.colors.textTertiary,
-                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-            )
+            if (message.role != Message.Role.SYSTEM) {
+                val time = formatMessageTime(message.timestampMs)
+                if (time.isNotEmpty()) {
+                    Text(
+                        time,
+                        style = InkTheme.type.textXs,
+                        color = InkTheme.colors.textTertiary,
+                        textAlign = TextAlign.End,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 1.dp),
+                    )
+                }
+            }
         }
     }
 }

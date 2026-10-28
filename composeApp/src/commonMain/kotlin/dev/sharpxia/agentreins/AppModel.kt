@@ -218,7 +218,9 @@ class AppModel(
     var convSections by mutableStateOf<List<ConvSection>>(emptyList())
         private set
     private val convLoadedKeys = mutableSetOf<String>()
-    private var convLoadingKey: String? = null
+    /** 当前在加载的分区（null=空闲；UI 快照流据此实现「钉在分区头时连续翻页」）。 */
+    var convSectionLoading by mutableStateOf<String?>(null)
+        private set
     private var convJob: Job? = null
 
     /**
@@ -238,41 +240,43 @@ class AppModel(
         convLoadedKeys.add(keys.first())
     }
 
-    /** 时间线内「向上到顶」加载：最旧区未拉过历史→拉首页；拉过且还有更多→翻更早一页。 */
-    fun loadConvTop() {
-        if (convSections.isEmpty()) {
-            loadOlderMessages()
-            return
-        }
-        if (convLoadingKey != null) return
-        val c = client ?: return
-        val top = convSections.last()
-        if (top.key !in convLoadedKeys) {
-            convLoadingKey = top.key
+    /**
+     * 按分区加载历史（M4 真机反馈②重做）：分区头进入视口即触发——未拉过→拉首页；
+     * 已拉过且有更多→翻更早一页。返回是否真的派发了加载（UI 据此捕获位置锚）。
+     * 旧实现只挂「绝对顶部」，空分区（probe 残留）拉完即卡死整条链=「下拉加载不可用」，
+     * 且中间分区永远没有机会加载。
+     */
+    fun loadSectionHistoryIfNeeded(sectionKey: String): Boolean {
+        if (convSectionLoading != null) return false
+        val c = client ?: return false
+        val section = convSections.firstOrNull { it.key == sectionKey } ?: return false
+        if (section.key !in convLoadedKeys) {
+            convSectionLoading = sectionKey
             scope.launch {
                 try {
-                    c.loadHistory(top.key)
+                    c.loadHistory(sectionKey)
                 } catch (e: Exception) {
                     lastError = e.message
                 } finally {
-                    convLoadedKeys.add(top.key)
-                    convLoadingKey = null
+                    convLoadedKeys.add(sectionKey)
+                    convSectionLoading = null
                 }
             }
-        } else {
-            val st = top.state ?: return
-            if (!st.hasMoreHistory) return
-            convLoadingKey = top.key
-            scope.launch {
-                try {
-                    c.loadHistoryOlder(top.key)
-                } catch (e: Exception) {
-                    lastError = e.message
-                } finally {
-                    convLoadingKey = null
-                }
+            return true
+        }
+        val st = section.state ?: return false
+        if (!st.hasMoreHistory) return false
+        convSectionLoading = sectionKey
+        scope.launch {
+            try {
+                c.loadHistoryOlder(sectionKey)
+            } catch (e: Exception) {
+                lastError = e.message
+            } finally {
+                convSectionLoading = null
             }
         }
+        return true
     }
 
     /** 离开对话路由时清时间线态（DisposableEffect onDispose）。 */
@@ -282,7 +286,7 @@ class AppModel(
         convJob?.cancel()
         convJob = null
         convLoadedKeys.clear()
-        convLoadingKey = null
+        convSectionLoading = null
     }
 
     /** 该 agent 的时间线成员：主线（main/ar-*）且未被本地归档/隐藏的 session，活跃降序。 */
@@ -1207,9 +1211,9 @@ class AppModel(
         /** conversation 级 overlay 的 kv 槽位（M4 P2）。 */
         const val CONV_OVERLAY_KEY = "conversationOverlay:v1"
 
-        /** 「当前 agent 状态」预置指令（M4 P4 工具栏动作③；协议无专用状态 RPC）。 */
-        const val AGENT_STATUS_PROMPT =
-            "请汇报你当前的状态：正在执行的任务、已派发的 subagent、待办事项。"
+        /** 「当前 agent 状态」（M4 P4 工具栏动作③）：**任务指令**（/ 开头，真机反馈③——
+         *  不是自然语言提示词），由网关侧 agent 的命令通道处理。 */
+        const val AGENT_STATUS_PROMPT = "/status"
 
         /** 外观偏好 kv 槽位（M3.1）。 */
         const val THEME_KEY = "appearance:v1"

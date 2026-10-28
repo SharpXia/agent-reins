@@ -1,6 +1,9 @@
 package dev.sharpxia.agentreins.ui
 
 import kotlin.time.Clock
+import kotlinx.datetime.Instant
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toLocalDateTime
 
 /** 对话 UI 的小格式化工具（commonMain 可用，无平台依赖）。 */
 
@@ -23,4 +26,15 @@ fun formatRelativeTime(epochMs: Long?, nowMs: Long = Clock.System.now().toEpochM
         diff < 24 * 60 * minute -> "${diff / (60 * minute)}小时前"
         else -> "${diff / (24 * 60 * minute)}天前"
     }
+}
+
+/** 消息发送时间（M4 真机反馈①）：当天 HH:mm，跨天 M-d HH:mm。 */
+fun formatMessageTime(epochMs: Long?, nowMs: Long = Clock.System.now().toEpochMilliseconds()): String {
+    if (epochMs == null) return ""
+    val zone = TimeZone.currentSystemDefault()
+    val dt = Instant.fromEpochMilliseconds(epochMs).toLocalDateTime(zone)
+    val today = Instant.fromEpochMilliseconds(nowMs).toLocalDateTime(zone).date
+    fun p(n: Int) = n.toString().padStart(2, '0')
+    return if (dt.date == today) "${p(dt.hour)}:${p(dt.minute)}"
+    else "${dt.monthNumber}-${dt.dayOfMonth} ${p(dt.hour)}:${p(dt.minute)}"
 }

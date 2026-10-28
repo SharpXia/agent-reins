@@ -14,6 +14,7 @@ import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -26,6 +27,7 @@ import dev.sharpxia.agentreins.ui.components.SandDivider
 import dev.sharpxia.agentreins.ui.components.SandToggleRow
 import dev.sharpxia.agentreins.ui.theme.InkTheme
 import dev.sharpxia.agentreins.ui.theme.ThemeMode
+import kotlinx.coroutines.launch
 
 /** 设置 tab（M3.1 首版：连接/外观/调试令牌页入口；M3.6 完整化：提示音子页 + 触感开关）。 */
 @Composable
@@ -35,10 +37,16 @@ fun SettingsScreen(
     onOpenThemeDemo: () -> Unit,
     onOpenSounds: () -> Unit,
 ) {
+    val scrollState = rememberScrollState()
+    val scope = rememberCoroutineScope()
+    // 多 Tab 回顶（状态栏点按）：设置页同享系统 scrollsToTop 通道
+    StatusBarTapEffect {
+        scope.launch { scrollState.animateScrollTo(0) }
+    }
     Column(
         Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(scrollState)
             .padding(vertical = 8.dp),
     ) {
         Text(

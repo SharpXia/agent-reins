@@ -827,6 +827,9 @@ class AppModel(
      * 通知 Nav 直达新会话页（真机反馈⑤-1：不再留在入口页）。
      * [creatingSession] 供抽屉行显示在途态并防双击（真机反馈⑥-1：静默失败不可见）。
      */
+    /** 状态栏回顶 Phase-1 诊断开关（iosMain 经 AGENTREINS_DEV_SCROLLPROBE=1 注入）：会话页顶栏出 scrollToItem(0) 测试按钮。 */
+    var devScrollProbe by mutableStateOf(false)
+
     var creatingSession by mutableStateOf(false)
         private set
 

@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
@@ -29,6 +30,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,6 +54,7 @@ import dev.sharpxia.agentreins.ui.components.UnreadBadge
 import dev.sharpxia.agentreins.ui.components.sandPressFill
 import dev.sharpxia.agentreins.ui.theme.InkTheme
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * 搜索 tab（M3.6）：上下双源。
@@ -64,6 +67,12 @@ fun SearchScreen(
     onOpenSession: (String) -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    // 多 Tab 回顶（状态栏点按）：搜索结果列表同享系统 scrollsToTop 通道
+    StatusBarTapEffect {
+        scope.launch { listState.animateScrollToItem(0) }
+    }
     val results by remember {
         derivedStateOf {
             val q = query.trim()
@@ -109,7 +118,7 @@ fun SearchScreen(
                 title = "无匹配结果",
                 subtitle = "换个关键词试试",
             )
-            else -> LazyColumn(Modifier.fillMaxSize()) {
+            else -> LazyColumn(Modifier.fillMaxSize(), state = listState) {
                 if (results.isNotEmpty()) {
                     item { SectionHeader("会话 · ${results.size}") }
                     items(results, key = { "s:${it.id}" }) { s ->

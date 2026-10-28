@@ -256,6 +256,20 @@ private fun SessionList(
                         color = InkTheme.colors.textTertiary,
                     )
                 }
+                // 状态栏回顶 Phase-1 诊断（AGENTREINS_DEV_SCROLLPROBE=1）：按钮直调 scrollToItem(0)，验证 Compose 侧滚动控制
+                if (model.devScrollProbe) {
+                    Text(
+                        "⤒回顶测试",
+                        style = InkTheme.type.textSm,
+                        color = InkTheme.colors.textTertiary,
+                        modifier = Modifier
+                            .clickable {
+                                println("AgentReins[P1] test button -> listState.scrollToItem(0)")
+                                scope.launch { listState.scrollToItem(0) }
+                            }
+                            .padding(horizontal = 6.dp),
+                    )
+                }
             // 一键已读（M3.6 反馈③）：全部未读打本地已读标记（overlay 持久化）
             if (totalUnread > 0 && !showStash) {
                 Text(

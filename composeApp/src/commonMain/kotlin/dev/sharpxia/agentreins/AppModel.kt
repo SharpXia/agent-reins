@@ -984,8 +984,10 @@ class AppModel(
         /** failover 单候选快速失败超时（真机反馈⑦-4）：不可达地址 3.5s 判死轮换。 */
         const val FAST_CANDIDATE_TIMEOUT_MS = 3_500L
 
-        /** failover 末位候选预算（远程中继慢握手不误判，对齐 RPC 15s 量级）。 */
-        const val SLOW_CANDIDATE_TIMEOUT_MS = 15_000L
+        /** failover 末位候选预算：须覆盖「握手 + 恢复上次会话 + 历史回填」全程——
+         *  预算掐在恢复动作上会把刚连好的连接拆掉（连接成功边缘被杀=永远连不上的
+         *  真机反馈⑧-1 根因），给足 30s。 */
+        const val SLOW_CANDIDATE_TIMEOUT_MS = 30_000L
 
         /** bootstrap 配对候选预算：网关侧等人工批准 150s + 余量（R 轮 P0 豁免）。 */
         const val PAIRING_CANDIDATE_TIMEOUT_MS = 170_000L

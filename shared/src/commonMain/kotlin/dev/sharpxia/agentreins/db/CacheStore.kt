@@ -3,6 +3,7 @@ package dev.sharpxia.agentreins.db
 import dev.sharpxia.agentreins.model.ChatEntry
 import dev.sharpxia.agentreins.model.Message
 import dev.sharpxia.agentreins.model.Session
+import dev.sharpxia.agentreins.model.ThinkingEntry
 import dev.sharpxia.agentreins.model.ToolCallEvent
 import dev.sharpxia.agentreins.openclaw.Outbox
 import kotlinx.serialization.json.Json
@@ -61,6 +62,7 @@ internal object EntryCodec {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private const val TYPE_MESSAGE = "message"
     private const val TYPE_TOOL = "tool_call"
+    private const val TYPE_THINKING = "thinking"
 
     fun encode(entry: ChatEntry): String = when (entry) {
         is Message -> buildJsonObject {
@@ -71,6 +73,8 @@ internal object EntryCodec {
             put("type", TYPE_TOOL)
             put("entry", json.encodeToString(ToolCallEvent.serializer(), entry))
         }
+        // 瞬态条目不落缓存（transcript 无 thinking，无可回放语义）；decode 无此型即丢弃
+        is ThinkingEntry -> buildJsonObject { put("type", TYPE_THINKING) }
     }.toString()
 
     fun decode(payload: String): ChatEntry? = runCatching {

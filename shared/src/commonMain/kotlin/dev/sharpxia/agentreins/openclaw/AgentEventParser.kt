@@ -3,6 +3,7 @@ package dev.sharpxia.agentreins.openclaw
 import dev.sharpxia.agentreins.model.ChatEntry
 import dev.sharpxia.agentreins.model.ConversationState
 import dev.sharpxia.agentreins.model.Message
+import dev.sharpxia.agentreins.model.ThinkingEntry
 import dev.sharpxia.agentreins.model.ToolCallEvent
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -148,17 +149,37 @@ object AgentEventParser {
         )
         is AgentStreamEvent.CommandOutput -> applyCommandOutput(state, event)
         is AgentStreamEvent.AssistantText -> applyAssistantText(state, event)
-        is AgentStreamEvent.Thinking -> state.copy(thinkingText = event.text)
+        is AgentStreamEvent.Thinking -> applyThinking(state, event)
         is AgentStreamEvent.Lifecycle -> when (event.phase) {
             "start" -> state.copy(activeRunId = event.runId ?: state.activeRunId)
             "end" -> state.copy(
                 activeRunId = null,
-                entries = state.entries.map { e ->
+                // 思考条目随 run 终局清除：transcript 无 thinking，留着只会在下次
+                // 历史回填后被甩到列表尾部（M3.6 反馈②「思考沉底」的根源）
+                entries = state.entries.filterNot { it is ThinkingEntry }.map { e ->
                     (e as? Message)?.takeIf { it.streaming }?.copy(streaming = false) ?: e
                 },
+                thinkingText = null,
             )
             else -> state
         }
+    }
+
+    /**
+     * 思考流（快照式全量重放）：作为**瞬态条目**落在条目流末尾——事件序即绑定序，
+     * 其后的工具卡/回复自然出现在它下方；新快照先摘除旧思考条目再落尾（同 run 的
+     * 第二段思考锚定最新输出，不回缩到旧位置）。thinkingText 快照保留作兼容。
+     * 边界（review R1-P2-2）：不按 activeRunId 门控——thinking 合法地可能先于
+     * lifecycle start 到达；代价是 run end 后迟到的重播快照会短暂挂卡，由下一次
+     * mergeHistory 自愈（leftovers 排除）。
+     */
+    private fun applyThinking(state: ConversationState, e: AgentStreamEvent.Thinking): ConversationState {
+        val runId = state.activeRunId
+        val entry = ThinkingEntry(id = "thinking:${runId ?: "live"}", text = e.text)
+        return state.copy(
+            entries = state.entries.filterNot { it is ThinkingEntry } + entry,
+            thinkingText = e.text,
+        )
     }
 
     private fun applyToolItem(state: ConversationState, e: AgentStreamEvent.ToolItem): ConversationState {
@@ -308,7 +329,7 @@ object AgentEventParser {
                 }
             }
         }
-        return ConversationState(sessionKey, entries, hasMoreHistory = hasMore)
+        return ConversationState(sessionKey, entries, hasMoreHistory = hasMore, historyLoaded = true)
     }
 
     /**
@@ -340,6 +361,8 @@ object AgentEventParser {
                         state = if (l.state == ToolCallEvent.State.RUNNING) entry.state else l.state,
                     )
                 }
+                // 历史不含 thinking（mapHistory 不产生）；分支只为穷尽性，透传无副作用
+                is ThinkingEntry -> entry
                 is Message -> when {
                     entry.role == Message.Role.USER && entry.id.startsWith(USER_ECHO_PREFIX) &&
                         entry.id.removePrefix(USER_ECHO_PREFIX) in echoRunIds(live) -> {
@@ -359,6 +382,8 @@ object AgentEventParser {
         val leftovers = live.entries.filter { entry ->
             when (entry) {
                 is ToolCallEvent -> entry.id !in usedToolIds
+                // 瞬态思考条目永不作为 leftover 保留（历史无对账依据，保尾即「沉底」）
+                is ThinkingEntry -> false
                 is Message -> when (entry.role) {
                     Message.Role.USER ->
                         entry.id.startsWith(LOCAL_ECHO_PREFIX) &&
@@ -391,6 +416,7 @@ object AgentEventParser {
             thinkingText = live.thinkingText,
             activeRunId = live.activeRunId,
             hasMoreHistory = history.hasMoreHistory,
+            historyLoaded = true,
         )
     }
 

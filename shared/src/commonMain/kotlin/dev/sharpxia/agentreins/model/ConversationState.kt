@@ -13,6 +13,8 @@ data class ConversationState(
     val activeRunId: String? = null,
     /** transcript 是否还有更早的历史（chat.hasMore），向上翻页懒加载的开关。 */
     val hasMoreHistory: Boolean = true,
+    /** 首页历史是否已到达（真机反馈 bug②）：false 时 UI 显示加载态而非空态。 */
+    val historyLoaded: Boolean = false,
 ) {
     val messages: List<Message> get() = entries.filterIsInstance<Message>()
     val toolCalls: List<ToolCallEvent> get() = entries.filterIsInstance<ToolCallEvent>()

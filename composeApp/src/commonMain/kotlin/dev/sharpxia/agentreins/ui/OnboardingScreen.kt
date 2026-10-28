@@ -193,7 +193,8 @@ fun SoundsSettingsScreen(model: AppModel, onBack: () -> Unit) {
         SandCard(Modifier.padding(horizontal = 16.dp)) {
             Text(
                 "「新回复」指非当前会话收到 Agent 消息；审批请求固定使用上行风铃，" +
-                    "连接成功固定使用 Blip，不受本页选择影响。触感开关在设置页。",
+                    "连接成功固定使用 Blip，不受本页选择影响。设置页的音效总开关关闭后，" +
+                    "本页选择保留、仅试听可出声（明确点按不计入事件音）。",
                 style = InkTheme.type.textXs,
                 color = InkTheme.colors.textTertiary,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 11.dp),

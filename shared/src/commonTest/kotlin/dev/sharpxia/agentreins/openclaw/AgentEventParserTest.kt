@@ -2,6 +2,7 @@ package dev.sharpxia.agentreins.openclaw
 
 import dev.sharpxia.agentreins.model.ConversationState
 import dev.sharpxia.agentreins.model.Message
+import dev.sharpxia.agentreins.model.ThinkingEntry
 import dev.sharpxia.agentreins.model.ToolCallEvent
 import dev.sharpxia.agentreins.openclaw.AgentEventParser.AgentStreamEvent
 import kotlinx.serialization.json.Json
@@ -79,7 +80,7 @@ class AgentEventParserTest {
     }
 
     @Test
-    fun thinking快照重放取最新且不进条目() {
+    fun thinking快照重放取最新且以瞬态条目绑定输出() {
         val base = replay(mySession)
         val state = AgentEventParser.apply(
             AgentEventParser.apply(
@@ -89,7 +90,32 @@ class AgentEventParserTest {
             AgentStreamEvent.Thinking("第二版思考（全量快照）"),
         )
         assertEquals("第二版思考（全量快照）", state.thinkingText)
-        assertEquals(base.entries, state.entries, "thinking 不产生对话条目")
+        // M3.6 反馈②：thinking 以瞬态条目落在条目流末尾（绑定其后继输出），
+        // 重放同快照幂等（filterNot+append 不重复）
+        val thinking = state.entries.filterIsInstance<ThinkingEntry>()
+        assertEquals(1, thinking.size)
+        assertEquals("第二版思考（全量快照）", thinking.single().text)
+        // 后继输出追加到思考条目之后（绑定语义）
+        val withTool = AgentEventParser.apply(state, AgentStreamEvent.ToolItem(
+            itemId = "item-x", toolCallId = "tool:x", toolName = "exec", title = null,
+            phase = AgentEventParser.Phase.START,
+            startedAtMs = null, endedAtMs = null, status = null,
+        ))
+        assertEquals(state.entries.size + 1, withTool.entries.size)
+        assertTrue(withTool.entries[withTool.entries.size - 2] is ThinkingEntry)
+        // run 终局清除思考条目（transcript 无 thinking，防历史回填甩尾）
+        val ended = AgentEventParser.apply(withTool, AgentStreamEvent.Lifecycle(
+            runId = "r1", phase = "end", startedAtMs = null, endedAtMs = null, terminalText = null,
+        ))
+        assertTrue(ended.entries.none { it is ThinkingEntry })
+        assertEquals(null, ended.thinkingText)
+        // 幂等回归：含 thinking 的序列整体重放两遍终态一致（快照 filterNot+append 不叠加）
+        val once = AgentEventParser.apply(state, AgentStreamEvent.Thinking("思考"))
+        val twice = AgentEventParser.apply(
+            AgentEventParser.apply(once, AgentStreamEvent.Thinking("思考")),
+            AgentStreamEvent.Thinking("思考"),
+        )
+        assertEquals(once.entries, twice.entries)
         // fixture 里的 thinking 重放帧（其它会话广播）也走 decode
         assertTrue(frames.any { payload(it).str("stream") == "thinking" && AgentEventParser.decode(payload(it)) != null })
     }

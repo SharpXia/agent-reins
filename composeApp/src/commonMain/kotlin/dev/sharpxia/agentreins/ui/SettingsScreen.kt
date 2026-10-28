@@ -95,6 +95,13 @@ fun SettingsScreen(
         }
         SectionHeader("提示音")
         SandCard(Modifier.padding(horizontal = 16.dp)) {
+            SandToggleRow(
+                title = "音效",
+                subtitle = "关闭后所有事件提示音静默（含连接与审批音），触感不受影响",
+                checked = FeedbackPrefs.soundEnabled.value,
+                onCheckedChange = { model.toggleSound(it) },
+            )
+            SandDivider(indent = 16)
             SandRow(
                 title = "通知音",
                 subtitle = FeedbackPrefs.notificationSound.value?.label ?: "无",

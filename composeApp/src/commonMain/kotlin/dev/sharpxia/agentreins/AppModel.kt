@@ -225,6 +225,12 @@ class AppModel(
         runCatching { cache.kvPut(gatewayId, THEME_KEY, mode.name) }
     }
 
+    /** 音效总开关（M3.6 反馈①）：关闭后所有事件音（含固定的连接/审批音）静默。 */
+    fun toggleSound(enabled: Boolean) {
+        FeedbackPrefs.soundEnabled.value = enabled
+        persistFeedbackPrefs()
+    }
+
     /** 触感开关（M3.6 设置页；kv 持久化，平台 actual 门控时读取）。 */
     fun toggleHaptics(enabled: Boolean) {
         FeedbackPrefs.hapticsEnabled.value = enabled
@@ -239,8 +245,15 @@ class AppModel(
 
     private fun persistFeedbackPrefs() {
         val s = FeedbackPrefs.notificationSound.value
-        val raw = "h=${if (FeedbackPrefs.hapticsEnabled.value) "1" else "0"};s=${s?.name ?: "none"}"
+        val raw = "h=${if (FeedbackPrefs.hapticsEnabled.value) "1" else "0"}" +
+            ";snd=${if (FeedbackPrefs.soundEnabled.value) "1" else "0"}" +
+            ";s=${s?.name ?: "none"}"
         runCatching { cache.kvPut(gatewayId, FEEDBACK_KEY, raw) }
+    }
+
+    /** 事件音统一出口：总开关门控（反馈①），通知音另有 per-call 选择。 */
+    private fun playSound(sound: AppSound) {
+        if (FeedbackPrefs.soundEnabled.value) sounds.play(sound)
     }
 
     private fun upsertAgent(agentId: String, transform: (AgentProfile) -> AgentProfile) {
@@ -288,6 +301,7 @@ class AppModel(
                 if (idx <= 0) null else it.take(idx) to it.substring(idx + 1)
             }.toMap()
             FeedbackPrefs.hapticsEnabled.value = parts["h"] != "0"
+            FeedbackPrefs.soundEnabled.value = parts["snd"] != "0"
             FeedbackPrefs.notificationSound.value =
                 parts["s"]?.takeIf { it != "none" }?.let { name ->
                     AppSound.entries.firstOrNull { it.name == name }
@@ -408,7 +422,7 @@ class AppModel(
                 if (approvalsEnabled) {
                     val isNew = pendingApproval == null
                     pendingApproval = req
-                    if (isNew) sounds.play(AppSound.CHIME_A) // 审批是关键事件，固定音不受通知音静音影响
+                    if (isNew) playSound(AppSound.CHIME_A) // 审批是关键事件，固定音不受通知音选择影响（受总开关）
                 }
             }
         }
@@ -443,7 +457,7 @@ class AppModel(
                         val now = epochMs()
                         if (now - (soundGates[key] ?: 0L) > SOUND_DEBOUNCE_MS) {
                             soundGates[key] = now
-                            sounds.play(sound)
+                            playSound(sound)
                         }
                     }
                 }
@@ -491,7 +505,7 @@ class AppModel(
                 connectedUrl = connected
                 resetAutoRetry() // 连上了，退避重试收队
                 if (!connectChimed) {
-                    sounds.play(AppSound.BLIP) // 连接成功提示音（M3.6 固定音；弱网自动重连不连响）
+                    playSound(AppSound.BLIP) // 连接成功提示音（固定音；弱网自动重连不连响）
                     connectChimed = true
                 }
                 // Onboarding-lite：首次连接（含老用户升级后首连）即完成标记并预告直达主会话
@@ -689,6 +703,7 @@ class AppModel(
             } catch (e: GatewayRpcException) {
                 lastError = when (e.code) {
                     "SEND_QUEUED" -> "已进入发送队列，重连后自动补发"
+                    "SEND_TIMEOUT" -> null // 结果未确认：outbox 待确认态展示，不弹错误条（真机反馈 bug①）
                     else -> e.message
                 }
             } catch (e: Exception) {
@@ -901,7 +916,7 @@ class AppModel(
         /** 审批面板开关 kv 槽位（M3.5）。 */
         const val APPROVALS_KEY = "approvalsPanel:v1"
 
-        /** 反馈偏好 kv 槽位（M3.6）：`h=1|0;s=<AppSound>|none`。 */
+        /** 反馈偏好 kv 槽位（M3.6）：`h=1|0;snd=1|0;s=<AppSound>|none`。 */
         const val FEEDBACK_KEY = "feedback:v1"
 
         /** Onboarding 完成标记 kv 槽位（M3.6）。 */

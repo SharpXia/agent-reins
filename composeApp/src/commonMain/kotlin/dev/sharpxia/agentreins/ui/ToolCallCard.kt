@@ -99,11 +99,20 @@ fun ToolCallCard(card: ToolCallEvent, modifier: Modifier = Modifier) {
                     }
                 }
                 Spacer(Modifier.width(8.dp))
-                Text(
-                    formatDuration(card.durationMs),
-                    style = InkTheme.type.textXs,
-                    color = c.textTertiary,
-                )
+                if (card.state == ToolCallEvent.State.RUNNING) {
+                    // 运行态显式文案（反馈②：收起时仅显示正在执行的工具，替代歧义「—」）
+                    Text(
+                        "执行中",
+                        style = InkTheme.type.textXs,
+                        color = c.awaiting,
+                    )
+                } else {
+                    Text(
+                        formatDuration(card.durationMs),
+                        style = InkTheme.type.textXs,
+                        color = c.textTertiary,
+                    )
+                }
                 Spacer(Modifier.width(8.dp))
                 ToolStateIcon(card.state)
                 Icon(

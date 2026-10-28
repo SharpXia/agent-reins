@@ -22,12 +22,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -61,6 +63,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -82,6 +85,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.sharpxia.agentreins.AppModel
 import dev.sharpxia.agentreins.model.Message
+import dev.sharpxia.agentreins.model.ThinkingEntry
 import dev.sharpxia.agentreins.model.ToolCallEvent
 import dev.sharpxia.agentreins.model.sessionKeyAgentId
 import dev.sharpxia.agentreins.openclaw.Outbox
@@ -129,6 +133,10 @@ internal fun ChatScreen(
             currentEntries.filterIsInstance<ToolCallEvent>().forEach {
                 append(':'); append(it.id); append('='); append(it.state.name)
             }
+            // 思考条目流式增长也要触发 rows 重建（快照全量重放，size 不变仅 text 变）
+            currentEntries.filterIsInstance<ThinkingEntry>().forEach {
+                append(':'); append(it.id); append('#'); append(it.text.length)
+            }
         }
     }
     val rows = remember(rowsSignature) { buildChatRows(currentEntries) }
@@ -136,10 +144,31 @@ internal fun ChatScreen(
     val contentRowCount = rows.size + pending.size
     val lastTextLen = (state?.entries?.lastOrNull() as? Message)?.content?.length ?: 0
     val runActive = state?.activeRunId != null
+    // 首页历史是否已到达（真机反馈 bug②）：未到达且无缓存时显示加载态而非空态
+    val historyLoaded = state?.historyLoaded == true
     val totalRows = contentRowCount +
         (if (state?.hasMoreHistory == true && contentRowCount > 0) 1 else 0) +
-        (if (contentRowCount == 0 && !runActive) 1 else 0) +
+        (if (contentRowCount == 0 && !runActive && historyLoaded) 1 else 0) +
+        (if (contentRowCount == 0 && !historyLoaded) 1 else 0) +
         (if (runActive) 1 else 0)
+    // 用户是否在历史到达前主动滚动过（bug② 锚底保护：尊重用户位置）。
+    // rememberUpdatedState：effect key 只有 listState，闭包内读旧值会击穿保护
+    // （review R3-P2-1——首帧锚底的程序性滚动会被误判为用户手势）
+    val historyLoadedNow by rememberUpdatedState(historyLoaded)
+    var userScrolledBeforeLoad by remember { mutableStateOf(false) }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+            if (scrolling && !historyLoadedNow) userScrolledBeforeLoad = true
+        }
+    }
+    LaunchedEffect(historyLoaded) {
+        // 历史到达一次性锚底：修复「加载出来突然显示且不一定滑到底部」——整表替换会
+        // 使 viewport 索引漂移；用户已在滚动则不打扰
+        if (historyLoaded && !userScrolledBeforeLoad && contentRowCount > 0 && !listState.isScrollInProgress) {
+            listState.scrollToItem(totalRows - 1)
+            initialScrollDone = true
+        }
+    }
     LaunchedEffect(totalRows, contentRowCount, lastTextLen, runActive) {
         if (contentRowCount == 0) return@LaunchedEffect
         if (!initialScrollDone) {
@@ -225,7 +254,7 @@ internal fun ChatScreen(
                         )
                     }
                 }
-                if (contentRowCount == 0 && !runActive) {
+                if (contentRowCount == 0 && !runActive && historyLoaded) {
                     item(key = "empty") {
                         Text(
                             "暂无消息，发一条开始对话",
@@ -233,6 +262,23 @@ internal fun ChatScreen(
                             color = InkTheme.colors.textTertiary,
                             modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
                         )
+                    }
+                }
+                if (contentRowCount == 0 && !historyLoaded) {
+                    // 加载态（真机反馈 bug②）：进页先显示加载中，不再闪「暂无消息」
+                    item(key = "loading-history") {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                        ) {
+                            TypingDots()
+                            Text(
+                                "加载历史消息…",
+                                style = InkTheme.type.textSm,
+                                color = InkTheme.colors.textTertiary,
+                            )
+                        }
                     }
                 }
                 itemsIndexed(rows, key = { _, row ->
@@ -261,6 +307,7 @@ internal fun ChatScreen(
                             is ChatRow.DayHeader -> DayHeaderRow(row.atMs)
                             is ChatRow.Entry -> when (val entry = row.entry) {
                                 is ToolCallEvent -> ToolCallCard(entry)
+                                is ThinkingEntry -> ThinkingCard(entry)
                                 is Message -> ChatMessageItem(
                                     model = model,
                                     message = entry,
@@ -279,7 +326,11 @@ internal fun ChatScreen(
                     )
                 }
                 if (runActive) {
-                    item(key = "typing") { TypingIndicator(state?.thinkingText) }
+                    // 生成中指示：思考条目在尾时由 ThinkingCard 承担「进行中」表达，不重复沉底
+                    val thinkingAtTail = currentEntries.lastOrNull() is ThinkingEntry
+                    if (!thinkingAtTail) {
+                        item(key = "typing") { TypingIndicator() }
+                    }
                 }
             }
             if (showJumpToLatest) {
@@ -640,10 +691,13 @@ private fun PendingOutboxItem(cmd: Outbox.Command, onRetry: () -> Unit, onDelete
                 )
             }
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 2.dp)) {
+                // 「未发出」= 确定未送达（离线入队/明确失败）；「核对中」= 回执超时结果
+                // 未确认（幂等键保护自动核对，真机反馈 bug①）——两者不共用红色报警
+                val unconfirmed = cmd.lastError?.contains("结果未确认") == true
                 Text(
-                    "未发出",
+                    if (unconfirmed) "核对中" else "未发出",
                     style = InkTheme.type.textXs,
-                    color = c.danger.text,
+                    color = if (unconfirmed) c.textTertiary else c.danger.text,
                 )
                 IconButton(onClick = onRetry, modifier = Modifier.size(28.dp)) {
                     Icon(ArIcons.Retry, contentDescription = "重试发送", tint = c.textTertiary, modifier = Modifier.size(16.dp))
@@ -719,22 +773,65 @@ internal fun TypingDots() {
 }
 
 @Composable
-private fun TypingIndicator(thinkingText: String?) {
+private fun TypingIndicator() {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.padding(vertical = 4.dp),
     ) {
         TypingDots()
         Spacer(Modifier.size(8.dp))
-        val lastThinking = thinkingText?.lineSequence()?.lastOrNull { it.isNotBlank() }
         Text(
-            lastThinking?.let { "思考中：$it" } ?: "生成中…",
+            "生成中…",
             style = InkTheme.type.textSm,
             fontStyle = FontStyle.Italic,
             color = InkTheme.colors.textTertiary,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
         )
+    }
+}
+
+/**
+ * 思考卡（M3.6 反馈②）：瞬态条目，事件序落位=与后继工具/回复绑定。run 终局整卡消失。
+ * 显示快照**尾部** 6 行（思考在末尾增长，旧 TypingIndicator 语义=看最新）；
+ * 左缘细竖线做结构锚，与助手正文的斜体引用排版区分（review R2-P1-1）。
+ */
+@Composable
+private fun ThinkingCard(entry: ThinkingEntry) {
+    val c = InkTheme.colors
+    val tail = remember(entry.text) {
+        entry.text.lineSequence().filter { it.isNotBlank() }.toList().takeLast(6).joinToString("\n")
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        TypingDots()
+        Row(
+            Modifier.weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Box(
+                Modifier
+                    .width(2.dp)
+                    .heightIn(min = 20.dp)
+                    .background(c.borderTertiary),
+            )
+            Column {
+                Text(
+                    "思考中",
+                    style = InkTheme.type.textXs,
+                    color = c.textDisabled,
+                )
+                Text(
+                    tail,
+                    style = InkTheme.type.textSm,
+                    fontStyle = FontStyle.Italic,
+                    color = c.textTertiary,
+                )
+            }
+        }
     }
 }
 

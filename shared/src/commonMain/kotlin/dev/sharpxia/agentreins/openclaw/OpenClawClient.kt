@@ -10,6 +10,7 @@ import dev.sharpxia.agentreins.model.ApprovalRequest
 import dev.sharpxia.agentreins.model.ConversationState
 import dev.sharpxia.agentreins.model.GatewayStatus
 import dev.sharpxia.agentreins.model.Message
+import dev.sharpxia.agentreins.model.ThinkingEntry
 import dev.sharpxia.agentreins.model.Session
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.websocket.WebSockets
@@ -17,6 +18,7 @@ import io.ktor.client.plugins.websocket.webSocket
 import io.ktor.websocket.Frame
 import io.ktor.websocket.readText
 import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -252,7 +254,10 @@ class OpenClawClient(
 
     private suspend fun persistConversation(sessionKey: String) {
         val flow = mutex.withLock { flowForUnlocked(sessionKey) }
-        runCatching { cache.saveMessages(gatewayId, sessionKey, flow.value.entries) }
+        // 瞬态思考条目不落库（review R1-P2-1）：saveMessages 只 upsert 不删除，
+        // 写入占位行会在 run 终局后永久残留为死行
+        val persistable = flow.value.entries.filterNot { it is ThinkingEntry }
+        runCatching { cache.saveMessages(gatewayId, sessionKey, persistable) }
             .onFailure { /* 缓存层故障不伤在线功能 */ }
     }
 
@@ -539,6 +544,19 @@ class OpenClawClient(
             )
             refreshOutboxCount()
             true
+        } catch (e: TimeoutCancellationException) {
+            // 回执超时 ≠ 发送失败（真机反馈 bug①）：agent 忙时网关排队应答，15s 内无回执
+            // 但消息可能已受理。按 PENDING 保留 + 延迟补发核对（同幂等键，网关幂等不重复
+            // 投递）；错误串带「结果未确认」标记，UI 走中性「核对中」不走红字「未发出」。
+            if (cacheHasCommand(cmd.idempotencyKey)) {
+                cache.upsertOutbox(
+                    Outbox.afterSendAttempt(cmd, ok = false, error = "回执超时（结果未确认）"),
+                    gatewayId,
+                )
+            }
+            refreshOutboxCount()
+            scheduleFlush(SEND_RETRY_DELAY_MS)
+            throw GatewayRpcException("SEND_TIMEOUT", "发送结果未确认，稍后自动核对（不会重复发送）")
         } catch (e: CancellationException) {
             throw e // 取消（retryPendingNow 重排/断连收尾）不算发送失败，剩余条目留给下一轮
         } catch (e: Exception) {
@@ -561,15 +579,29 @@ class OpenClawClient(
      * （持续失败由下次 send/reconnect 触发新一轮 flush 兜底）。
      */
     private suspend fun flushOutbox() {
+        var needsRecheck = false
         try {
             val attempted = mutableSetOf<String>()
             while (true) {
                 val cmds = Outbox.pendingForRound(cache.loadOutbox(gatewayId), attempted)
-                if (cmds.isEmpty()) return
+                if (cmds.isEmpty()) {
+                    if (needsRecheck) scheduleFlush(SEND_RETRY_DELAY_MS) // bug① 修复：本轮超时条目延迟再核对（review R3-P1-1，scheduleFlush 单飞守卫在本协程存活期间恒 no-op，只能在循环尾补排）
+                    return
+                }
                 for (cmd in cmds) {
                     if (_status.value !is GatewayStatus.Connected || explicitClose) return
                     attempted += cmd.idempotencyKey
-                    sendOutboxCommand(cmd)
+                    try {
+                        sendOutboxCommand(cmd)
+                    } catch (e: GatewayRpcException) {
+                        if (e.code == "SEND_TIMEOUT") {
+                            // 回执超时：条目保持 PENDING，本轮不中止、记一轮延迟核对
+                            // （review R3-P0-1：GatewayRpcException 穿出 launch 即未处理异常，Native 直接终止进程）
+                            needsRecheck = true
+                        } else {
+                            throw e
+                        }
+                    }
                 }
             }
         } finally {

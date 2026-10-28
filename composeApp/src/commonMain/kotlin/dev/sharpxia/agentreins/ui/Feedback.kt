@@ -32,6 +32,9 @@ object FeedbackPrefs {
     /** 触感开关（iOS UIImpactFeedback/UINotificationFeedbackGenerator 是否生效）。 */
     var hapticsEnabled = mutableStateOf(true)
 
+    /** 音效总开关：关闭后所有事件音（含固定的连接/审批音）静默（M3.6 反馈①）。 */
+    var soundEnabled = mutableStateOf(true)
+
     /** 通知音（新回复）：null = 静音。审批/连接音为固定音，不受此项控制。 */
     var notificationSound = mutableStateOf<AppSound?>(AppSound.DOUBLE_TICK)
 }

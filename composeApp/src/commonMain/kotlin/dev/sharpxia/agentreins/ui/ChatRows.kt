@@ -3,6 +3,7 @@ package dev.sharpxia.agentreins.ui
 import androidx.compose.ui.graphics.Color
 import dev.sharpxia.agentreins.model.ChatEntry
 import dev.sharpxia.agentreins.model.Message
+import dev.sharpxia.agentreins.model.ThinkingEntry
 import dev.sharpxia.agentreins.model.ToolCallEvent
 import kotlin.time.Clock
 import kotlinx.datetime.DateTimeUnit
@@ -57,6 +58,7 @@ fun buildChatRows(
         val safe = if (id == entry.id) entry else when (entry) {
             is Message -> entry.copy(id = id)
             is ToolCallEvent -> entry.copy(id = id)
+            is ThinkingEntry -> entry.copy(id = id)
             else -> entry
         }
         rows += ChatRow.Entry(safe)

@@ -204,9 +204,6 @@ class AppModel(
         return (active.isNotEmpty()) to derived
     }
 
-    /** 行内「已派发 N」chip 点击 → 任务详情只读页的导航锚（Nav 层消费）。 */
-    var pendingTaskDetail by mutableStateOf<String?>(null)
-
     /** conversation 时间线进入时的一次性分区锚（agent 主页 sessions 行定位；ChatScreen 消费后清）。 */
     var pendingConvAnchor by mutableStateOf<String?>(null)
 

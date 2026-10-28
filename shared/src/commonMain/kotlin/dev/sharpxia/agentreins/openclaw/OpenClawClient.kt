@@ -197,6 +197,10 @@ class OpenClawClient(
                 },
             )
         } catch (e: Exception) {
+            // 失败终态（R2-P1-2）：拉取失败不能让 toolbar「加载中」永挂——缓存播种的
+            // 内容按已加载对待（M2.5 断网可读语义），重连周期会自动刷新覆盖
+            val flow = mutex.withLock { flowForUnlocked(sessionKey) }
+            flow.value = flow.value.copy(historyLoaded = true)
             return
         }
         val flow = mutex.withLock { flowForUnlocked(sessionKey) }

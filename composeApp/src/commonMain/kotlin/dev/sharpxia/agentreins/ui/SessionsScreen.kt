@@ -18,9 +18,15 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
@@ -70,7 +76,7 @@ import kotlinx.coroutines.launch
 fun SessionsScreen(
     model: AppModel,
     onOpenSession: (String) -> Unit,
-    onOpenArchived: () -> Unit = {},
+    onOpenAgent: (String) -> Unit = {},
 ) {
     if (model.sessions.isEmpty()) {
         ConnectionEmptyState(model)
@@ -79,6 +85,7 @@ fun SessionsScreen(
             model = model,
             offline = model.status !is GatewayStatus.Connected,
             onOpenSession = onOpenSession,
+            onOpenAgent = onOpenAgent,
         )
     }
 }
@@ -88,7 +95,6 @@ fun SessionsScreen(
 @Composable
 private fun NewSessionSheet(
     model: AppModel,
-    onOpenSession: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val summaries = remember(model.sessions, model.agentProfiles) {
@@ -118,7 +124,7 @@ private fun NewSessionSheet(
                         .fillMaxWidth()
                         .clickable {
                             onDismiss()
-                            model.createNewSession(s.profile.agentId) { key -> onOpenSession(key) }
+                            model.createNewSession(s.profile.agentId) // 完成后经导航事件流直达新会话
                         }
                         .padding(horizontal = 20.dp, vertical = 10.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -143,6 +149,7 @@ private fun SessionList(
     model: AppModel,
     offline: Boolean,
     onOpenSession: (String) -> Unit,
+    onOpenAgent: (String) -> Unit,
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -150,35 +157,127 @@ private fun SessionList(
     var showStash by remember { mutableStateOf(false) } // 收纳视图：归档 + 已隐藏
     var showNewSheet by remember { mutableStateOf(false) }
     val totalUnread = model.sessions.sumOf { it.unread }
-    val mainSessions = remember(model.sessions) {
-        SessionListMapper.visibleForList(model.sessions.filter { !it.hidden })
+    // Agent 过滤（真机反馈⑤-5）：null = All；选中后会话页只显示该 agent 的会话。
+    // rememberSaveable：进会话再返回（destination 离开组合）不能把筛选静默丢回 All
+    var agentFilter by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
+    val summaries = remember(model.sessions, model.agentProfiles) {
+        dev.sharpxia.agentreins.AgentRegistry.summarize(model.sessions, model.agentProfiles)
     }
-    val archived = remember(model.sessions) { model.sessions.filter { it.archived && !it.hidden } }
-    val hidden = remember(model.sessions) { model.sessions.filter { it.hidden } }
+    val filterMatches: (Session) -> Boolean = { s ->
+        agentFilter == null || (s.agentId ?: sessionKeyAgentId(s.id)) == agentFilter
+    }
+    val mainSessions = remember(model.sessions, agentFilter) {
+        SessionListMapper.visibleForList(model.sessions.filter { !it.hidden }.filter(filterMatches))
+    }
+    val archived = remember(model.sessions, agentFilter) {
+        model.sessions.filter { it.archived && !it.hidden }.filter(filterMatches)
+    }
+    val hidden = remember(model.sessions, agentFilter) {
+        model.sessions.filter { it.hidden }.filter(filterMatches)
+    }
     val pinnedCount = mainSessions.count { it.pinned }
+    val drawerState = androidx.compose.material3.rememberDrawerState(
+        androidx.compose.material3.DrawerValue.Closed,
+    )
+    val selectedProfile = agentFilter?.let {
+        model.agentProfiles[it] ?: dev.sharpxia.agentreins.AgentProfile.default(it)
+    }
 
     StatusBarTapEffect {
         if (mainSessions.isNotEmpty()) {
             scope.launch { listState.animateScrollToItem(0) }
         }
     }
-    Column(Modifier.fillMaxSize()) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(start = 16.dp, end = 8.dp, top = 16.dp, bottom = 8.dp),
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(if (showStash) "收纳" else "会话", style = InkTheme.type.headingMd, color = InkTheme.colors.ink)
+    androidx.compose.material3.ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            androidx.compose.material3.ModalDrawerSheet(
+                drawerContainerColor = InkTheme.colors.elevated,
+            ) {
                 Text(
-                    when {
-                        showStash -> "归档 ${archived.size} · 隐藏 ${hidden.size}"
-                        offline -> "离线中 · 显示缓存列表"
-                        else -> "${mainSessions.size} 个会话"
-                    },
-                    style = InkTheme.type.textSm,
-                    color = InkTheme.colors.textTertiary,
+                    "Agents",
+                    style = InkTheme.type.headingMd,
+                    color = InkTheme.colors.ink,
+                    modifier = Modifier.padding(start = 20.dp, top = 24.dp, bottom = 6.dp),
                 )
+                // All（默认）：显示全部会话
+                DrawerAgentRow(
+                    name = "All",
+                    subtitle = "全部会话",
+                    tintName = null,
+                    selected = agentFilter == null,
+                    onClick = {
+                        haptics.tap()
+                        agentFilter = null
+                        showStash = false
+                        scope.launch { drawerState.close() }
+                    },
+                )
+                summaries.forEach { s ->
+                    DrawerAgentRow(
+                        name = s.profile.name,
+                        subtitle = "${s.sessionCount} 个会话",
+                        tintName = s.profile.tint,
+                        selected = agentFilter == s.profile.agentId,
+                        onClick = {
+                            haptics.tap()
+                            agentFilter = s.profile.agentId
+                            showStash = false
+                            scope.launch { drawerState.close() }
+                        },
+                        onEdit = {
+                            agentFilter = s.profile.agentId
+                            scope.launch { drawerState.close() }
+                            onOpenAgent(s.profile.agentId)
+                        },
+                    )
+                }
             }
+        },
+    ) {
+        Column(Modifier.fillMaxSize()) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(start = 8.dp, end = 8.dp, top = 16.dp, bottom = 8.dp),
+            ) {
+                // 头部左侧入口（真机反馈⑤-5）：All 时抽屉图标；选中 agent 时其头像
+                if (agentFilter != null && selectedProfile != null) {
+                    AgentTintScope(selectedProfile.tint) {
+                        AgentAvatar(LocalAgentTint.current, selectedProfile.name, size = 34)
+                    }
+                    Spacer(Modifier.size(2.dp))
+                }
+                androidx.compose.material3.IconButton(onClick = {
+                    haptics.tap()
+                    scope.launch { drawerState.open() }
+                }) {
+                    androidx.compose.material3.Icon(
+                        androidx.compose.material.icons.Icons.Filled.Menu,
+                        contentDescription = "打开 Agents 抽屉",
+                        tint = InkTheme.colors.ink,
+                    )
+                }
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        when {
+                            showStash -> "收纳"
+                            agentFilter != null -> selectedProfile?.name ?: agentFilter!!
+                            else -> "会话"
+                        },
+                        style = InkTheme.type.headingMd,
+                        color = InkTheme.colors.ink,
+                    )
+                    Text(
+                        when {
+                            showStash -> "归档 ${archived.size} · 隐藏 ${hidden.size}"
+                            offline -> "离线中 · 显示缓存列表"
+                            agentFilter != null -> "${mainSessions.size} 个会话 · 来自 ${selectedProfile?.name ?: agentFilter}"
+                            else -> "${mainSessions.size} 个会话"
+                        },
+                        style = InkTheme.type.textSm,
+                        color = InkTheme.colors.textTertiary,
+                    )
+                }
             // 一键已读（M3.6 反馈③）：全部未读打本地已读标记（overlay 持久化）
             if (totalUnread > 0 && !showStash) {
                 Text(
@@ -207,7 +306,7 @@ private fun SessionList(
             }
         }
         if (showNewSheet) {
-            NewSessionSheet(model = model, onOpenSession = onOpenSession, onDismiss = { showNewSheet = false })
+            NewSessionSheet(model = model, onDismiss = { showNewSheet = false })
         }
         LazyColumn(state = listState) {
             if (showStash) {
@@ -238,6 +337,7 @@ private fun SessionList(
                     SwipeableSessionRow(model, s, onOpenSession, haptics)
                 }
             }
+        }
         }
     }
 }
@@ -296,6 +396,76 @@ private fun SwipeableSessionRow(
         },
     ) {
         SessionRowContent(model, session, stash, onClick = { onOpenSession(session.id) })
+    }
+}
+
+/** 抽屉行（真机反馈⑤-5）：All/Agent 选择项，tint 头像 + 名称 + 会话数；编辑入口进 Agent 域页。 */
+@Composable
+private fun DrawerAgentRow(
+    name: String,
+    subtitle: String,
+    tintName: dev.sharpxia.agentreins.ui.theme.AgentTintName?,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onEdit: (() -> Unit)? = null,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .sandPressFill(interaction, 0)
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+    ) {
+        when (tintName) {
+            null -> {
+                Box(
+                    Modifier
+                        .size(42.dp)
+                        .clip(CircleShape)
+                        .background(InkTheme.colors.surfaceTertiary),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Filled.Home,
+                        contentDescription = null,
+                        tint = InkTheme.colors.ink,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
+            else -> dev.sharpxia.agentreins.ui.theme.AgentTintScope(tintName) {
+                AgentAvatar(LocalAgentTint.current, name)
+            }
+        }
+        Column(Modifier.weight(1f).padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Text(
+                name,
+                style = if (selected) InkTheme.type.headingXs else InkTheme.type.textLg,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                color = InkTheme.colors.ink,
+            )
+            Text(subtitle, style = InkTheme.type.textXs, color = InkTheme.colors.textTertiary)
+        }
+        if (selected) {
+            Icon(
+                Icons.Filled.Check,
+                contentDescription = "已选",
+                tint = InkTheme.colors.ink,
+                modifier = Modifier.size(16.dp),
+            )
+        }
+        if (onEdit != null) {
+            IconButton(onClick = onEdit, modifier = Modifier.size(32.dp)) {
+                Icon(
+                    Icons.Filled.Edit,
+                    contentDescription = "编辑 Agent",
+                    tint = InkTheme.colors.textTertiary,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
     }
 }
 

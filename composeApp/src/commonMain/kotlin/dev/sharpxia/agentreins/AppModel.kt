@@ -795,9 +795,10 @@ class AppModel(
 
     /**
      * 新建干净会话（M3.6 反馈①：列表入口，可选 agent）：sessions.create 开全新
-     * surface 键（agent 状态在网关侧保留，会话从零开始）。[onCreated] 带新键供导航。
+     * surface 键（agent 状态在网关侧保留，会话从零开始）。完成后经 [navigationEvents]
+     * 通知 Nav 直达新会话页（真机反馈⑤-1：不再留在入口页）。
      */
-    fun createNewSession(agentId: String, onCreated: (String) -> Unit = {}) {
+    fun createNewSession(agentId: String) {
         val c = client ?: run { lastError = "未连接网关，无法新建会话"; return }
         val newKey = "agent:$agentId:ar-${epochMs().toString(36)}"
         scope.launch {
@@ -810,7 +811,8 @@ class AppModel(
                         selectedSession = newKey
                         openConversation(c, newKey)
                     }
-                onCreated(newKey)
+                // 导航经事件流（主线程消费），不再从 Default 协程直调 navigate（毁导航栈）
+                navigationEvents.tryEmit(newKey)
             } catch (e: Exception) {
                 lastError = "新建会话失败：${e.message}"
             }
@@ -827,7 +829,11 @@ class AppModel(
         createNewSession(agentId)
     }
 
-    /** 一键已读（M3.6 反馈③）：全部未读会话打本地已读标记（overlay 持久化，跨重启）。 */
+    /**
+     * 一键已读（M3.6 反馈③）：全部未读会话打本地已读标记（overlay 持久化，跨重启）。
+     * **同时清 client 侧 localUnread**（真机反馈⑤-1）：gateway refresh 会把 localUnread
+     * 回写列表，只写 overlay 不清计数 → 已读会话再次刷出未读。
+     */
     fun markAllRead() {
         val targets = sessions.filter { it.unread > 0 }
         if (targets.isEmpty()) return
@@ -837,10 +843,19 @@ class AppModel(
         }
         scheduleOverlayPersist()
         publishSessions()
+        client?.let { c -> targets.forEach { c.clearUnread(it.id) } }
     }
 
     // ---- M3.6：服务端搜索（sessions.search）+ 直达消费 ----
 
+    /**
+     * 导航事件（真机反馈⑤-1）：createNewSession 的完成回调原本在 Default 协程里直接调
+     * navController.navigate——Navigation 非线程安全，跨线程调用会毁掉导航栈（列表可滑
+     * 但 navigate 全部失效）。改为事件流，Nav 层在组合协程（主线程）消费后导航。
+     */
+    val navigationEvents = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 4)
+
+    /** 该命令是否仍在队列（未被用户删除）。 */
     /** UI 自增、结果协程比对（review R1-P2-1：跨线程普通 var 无可见性保证）。 */
     @Volatile
     private var searchSeq = 0

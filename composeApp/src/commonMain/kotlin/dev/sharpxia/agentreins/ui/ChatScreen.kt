@@ -149,7 +149,6 @@ internal fun ChatScreen(
     val totalRows = contentRowCount +
         (if (state?.hasMoreHistory == true && contentRowCount > 0) 1 else 0) +
         (if (contentRowCount == 0 && !runActive && historyLoaded) 1 else 0) +
-        (if (contentRowCount == 0 && !historyLoaded) 1 else 0) +
         (if (runActive) 1 else 0)
     // 用户是否在历史到达前主动滚动过（bug② 锚底保护：尊重用户位置）。
     // rememberUpdatedState：effect key 只有 listState，闭包内读旧值会击穿保护
@@ -218,7 +217,7 @@ internal fun ChatScreen(
             ApprovalSheet(request = req, onDecide = { model.respondApproval(it) })
         }
         var showStartFresh by remember { mutableStateOf(false) }
-        ChatTopBar(model, sessionKey, runActive, onBack, onShowStartFresh = { showStartFresh = true })
+        ChatTopBar(model, sessionKey, runActive, historyLoaded, onBack, onShowStartFresh = { showStartFresh = true })
         if (showStartFresh) {
             StartFreshDialog(
                 onConfirm = {
@@ -264,27 +263,11 @@ internal fun ChatScreen(
                         )
                     }
                 }
-                if (contentRowCount == 0 && !historyLoaded) {
-                    // 加载态（真机反馈 bug②）：进页先显示加载中，不再闪「暂无消息」
-                    item(key = "loading-history") {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
-                        ) {
-                            TypingDots()
-                            Text(
-                                "加载历史消息…",
-                                style = InkTheme.type.textSm,
-                                color = InkTheme.colors.textTertiary,
-                            )
-                        }
-                    }
-                }
                 itemsIndexed(rows, key = { _, row ->
                     when (row) {
                         is ChatRow.DayHeader -> "day-${row.atMs}"
                         is ChatRow.Entry -> row.entry.id
+                        is ChatRow.ToolGroup -> row.key
                     }
                 }) { index, row ->
                     // 入场动画只给「最新一条 + 活跃 run/流式中」：分页前插与已加载内容零动画
@@ -315,6 +298,7 @@ internal fun ChatScreen(
                                     onResend = { text -> haptics.tap(); model.resendText(text) },
                                 )
                             }
+                            is ChatRow.ToolGroup -> ToolGroupCard(row.items)
                         }
                     }
                 }
@@ -370,6 +354,7 @@ private fun ChatTopBar(
     model: AppModel,
     sessionKey: String,
     runActive: Boolean,
+    historyLoaded: Boolean,
     onBack: () -> Unit,
     onShowStartFresh: () -> Unit,
 ) {
@@ -396,13 +381,26 @@ private fun ChatTopBar(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Text(
-                        session?.kind?.takeIf { it.isNotBlank() } ?: sessionKey,
-                        style = InkTheme.type.textXs,
-                        color = InkTheme.colors.textTertiary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    if (!historyLoaded) {
+                        // 加载态上移 toolbar（真机反馈⑤-3）：进页即知在加载，列表区不再闪空态文案
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TypingDots()
+                            Spacer(Modifier.size(8.dp))
+                            Text(
+                                "加载中",
+                                style = InkTheme.type.textXs,
+                                color = InkTheme.colors.textTertiary,
+                            )
+                        }
+                    } else {
+                        Text(
+                            session?.kind?.takeIf { it.isNotBlank() } ?: sessionKey,
+                            style = InkTheme.type.textXs,
+                            color = InkTheme.colors.textTertiary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
                 Box {
                     IconButton(onClick = { menuOpen = true }) {

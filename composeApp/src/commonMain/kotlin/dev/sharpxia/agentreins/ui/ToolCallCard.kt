@@ -50,6 +50,89 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 
 /**
+ * 工具调用组（真机反馈⑤-4）：连续 ≥2 张已完成工具卡收入一个可折叠组。
+ * 折叠态 = 「N 次工具调用」+ 成功/失败计数 + 总耗时；展开态 = 逐张 [ToolCallCard]
+ * （每张仍可独立展开看参数/结果）。
+ */
+@Composable
+fun ToolGroupCard(items: List<ToolCallEvent>, modifier: Modifier = Modifier) {
+    var expanded by remember(items.firstOrNull()?.id, items.size) { mutableStateOf(false) }
+    val c = InkTheme.colors
+    val failed = items.count { it.state == ToolCallEvent.State.FAILED }
+    val totalMs = items.sumOf { it.durationMs ?: 0L }
+    Surface(
+        shape = RoundedCornerShape(InkTheme.shapes.md.dp),
+        color = c.elevated,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Column(
+            Modifier
+                .clickable { expanded = !expanded }
+                .animateContentSize()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Filled.Build,
+                    contentDescription = null,
+                    tint = c.textTertiary,
+                    modifier = Modifier.size(15.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "${items.size} 次工具调用",
+                        style = InkTheme.type.textSm,
+                        color = c.ink,
+                    )
+                    Text(
+                        if (failed > 0) "$failed 次失败" else "全部成功",
+                        style = InkTheme.type.textXs,
+                        color = if (failed > 0) c.danger.text else c.textTertiary,
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    formatDuration(totalMs),
+                    style = InkTheme.type.textXs,
+                    color = c.textTertiary,
+                )
+                Spacer(Modifier.width(8.dp))
+                if (failed > 0) {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "含失败",
+                        tint = c.danger.text,
+                        modifier = Modifier.size(15.dp),
+                    )
+                } else {
+                    Icon(
+                        Icons.Filled.Check,
+                        contentDescription = "全部成功",
+                        tint = c.success.text,
+                        modifier = Modifier.size(15.dp),
+                    )
+                }
+                Icon(
+                    Icons.Filled.KeyboardArrowDown,
+                    contentDescription = if (expanded) "收起" else "展开",
+                    tint = c.textTertiary,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            AnimatedVisibility(expanded) {
+                Column(Modifier.padding(top = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    HorizontalDivider(color = c.borderSecondary)
+                    items.forEach { card ->
+                        ToolCallCard(card)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
  * 工具调用卡片（M3.5 墨水化 + Canvas-lite）：折叠态 = 名称 + 摘要 + 耗时 + 状态；
  * 展开态 = 参数/结果；结果长文可进全屏查看器（等宽 + 复制，M3.5 Canvas-lite 裁剪版——
  * Grok 的 WebView 画布无协议支撑，做查看器形态）。

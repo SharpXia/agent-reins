@@ -18,13 +18,19 @@ import kotlinx.datetime.toLocalDateTime
  * 纯函数，desktopTest 覆盖；时区显式传入便于测试。
  */
 
-/** LazyColumn 的一行：日分隔头或原条目。 */
+/** LazyColumn 的一行：日分隔头、原条目、或连续已完成工具调用的折叠组。 */
 sealed interface ChatRow {
     /** 日分隔头（取当天任一时间戳渲染日期文案）。 */
     data class DayHeader(val atMs: Long) : ChatRow
 
     /** 原对话条目（消息 / 工具卡）。 */
     data class Entry(val entry: ChatEntry) : ChatRow
+
+    /**
+     * 连续已完成工具调用组（真机反馈⑤-4）：≥2 张非 RUNNING 的工具卡收入一个可折叠
+     * 组；RUNNING 的工具永远独立成行（「收起时仅显示正在执行的工具」语义）。
+     */
+    data class ToolGroup(val items: List<ToolCallEvent>, val key: String) : ChatRow
 }
 
 /**
@@ -38,7 +44,7 @@ fun buildChatRows(
     val rows = mutableListOf<ChatRow>()
     var lastDate: LocalDate? = null
     val usedIds = mutableSetOf<String>()
-    for (entry in entries) {
+    fun addEntry(entry: ChatEntry) {
         val ts = (entry as? Message)?.timestampMs
         if (ts != null) {
             val date = dateOf(ts, zone)
@@ -62,6 +68,39 @@ fun buildChatRows(
             else -> entry
         }
         rows += ChatRow.Entry(safe)
+    }
+    var i = 0
+    while (i < entries.size) {
+        val entry = entries[i]
+        if (entry is ToolCallEvent && entry.state != ToolCallEvent.State.RUNNING) {
+            // 贪食连续段：连续非 RUNNING 工具卡收入一组（≥2 张才成组，真机反馈⑤-4）
+            var j = i
+            val run = mutableListOf<ToolCallEvent>()
+            while (j < entries.size &&
+                entries[j] is ToolCallEvent &&
+                (entries[j] as ToolCallEvent).state != ToolCallEvent.State.RUNNING
+            ) {
+                run += entries[j] as ToolCallEvent
+                j++
+            }
+            if (run.size >= 2) {
+                // 组键同样走撞号兜底（LazyColumn key 重复=布局期崩溃，与 entry 同防御）
+                var key = "grp:${run.first().id}:${run.size}"
+                var n = 2
+                while (!usedIds.add(key)) {
+                    key = "grp:${run.first().id}:${run.size}#${n}"
+                    n++
+                }
+                rows += ChatRow.ToolGroup(items = run, key = key)
+                i = j
+                continue
+            }
+            addEntry(entry)
+            i++
+            continue
+        }
+        addEntry(entry)
+        i++
     }
     return rows
 }

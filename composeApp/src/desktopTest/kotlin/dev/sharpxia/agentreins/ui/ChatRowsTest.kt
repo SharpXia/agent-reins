@@ -68,6 +68,64 @@ class ChatRowsTest {
     }
 
     @Test
+    fun consecutiveCompletedToolsCollapseIntoGroup() {
+        val tools = listOf(
+            ToolCallEvent(id = "t1", toolName = "exec", state = ToolCallEvent.State.SUCCEEDED),
+            ToolCallEvent(id = "t2", toolName = "exec", state = ToolCallEvent.State.SUCCEEDED),
+        )
+        val rows = buildChatRows(listOf(msg("a", null)) + tools, utc)
+        // [a, ToolGroup(t1,t2)]——null 时间戳无日分隔；≥2 张连续已完成卡成组
+        assertEquals(2, rows.size)
+        val group = rows[1] as ChatRow.ToolGroup
+        assertEquals(listOf("t1", "t2"), group.items.map { it.id })
+    }
+
+    @Test
+    fun runningToolStaysStandaloneAndBreaksGroup() {
+        val rows = buildChatRows(
+            listOf(
+                ToolCallEvent(id = "t1", toolName = "exec", state = ToolCallEvent.State.SUCCEEDED),
+                ToolCallEvent(id = "t2", toolName = "exec", state = ToolCallEvent.State.RUNNING),
+                ToolCallEvent(id = "t3", toolName = "exec", state = ToolCallEvent.State.SUCCEEDED),
+            ),
+            utc,
+        )
+        // RUNNING 独立成行并打断组：t3 单独一张普通卡
+        assertEquals(3, rows.size)
+        assertEquals("t2", (rows[1] as ChatRow.Entry).entry.id)
+        assertTrue(rows[0] is ChatRow.Entry && rows[2] is ChatRow.Entry)
+    }
+
+    @Test
+    fun failedToolCountsAsTerminalForGrouping() {
+        val rows = buildChatRows(
+            listOf(
+                ToolCallEvent(id = "t1", toolName = "exec", state = ToolCallEvent.State.SUCCEEDED),
+                ToolCallEvent(id = "t2", toolName = "exec", state = ToolCallEvent.State.FAILED),
+            ),
+            utc,
+        )
+        // FAILED 也是终态：两张连续终态卡同样成组
+        assertEquals(1, rows.size)
+        assertEquals(2, (rows[0] as ChatRow.ToolGroup).items.size)
+    }
+
+    @Test
+    fun messageBreaksToolGrouping() {
+        val rows = buildChatRows(
+            listOf(
+                ToolCallEvent(id = "t1", toolName = "exec", state = ToolCallEvent.State.SUCCEEDED),
+                msg("a", null),
+                ToolCallEvent(id = "t2", toolName = "exec", state = ToolCallEvent.State.SUCCEEDED),
+            ),
+            utc,
+        )
+        // 消息打断贪食段：两张工具卡各自独立
+        assertEquals(3, rows.size)
+        assertTrue(rows.all { it is ChatRow.Entry })
+    }
+
+    @Test
     fun labelsTodayYesterdayAndDate() {
         // today 取当前真实时钟，因此用相对日期断言：昨天-今天 跨日给「昨天」
         val today = Clock.System.now()

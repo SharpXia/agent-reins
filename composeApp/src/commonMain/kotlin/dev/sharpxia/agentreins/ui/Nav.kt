@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -70,7 +69,6 @@ import kotlinx.coroutines.launch
  */
 object Routes {
     const val TAB_SESSIONS = "tab:sessions"
-    const val TAB_AGENTS = "tab:agents"
     const val TAB_SEARCH = "tab:search"
     const val TAB_SETTINGS = "tab:settings"
     const val CHAT = "chat/{sessionKey}"
@@ -106,7 +104,6 @@ private data class TabSpec(
 
 private val TABS = listOf(
     TabSpec(Routes.TAB_SESSIONS, "会话", Icons.Filled.Home),
-    TabSpec(Routes.TAB_AGENTS, "Agents", Icons.Filled.AccountCircle),
     TabSpec(Routes.TAB_SEARCH, "搜索", Icons.Filled.Search),
     TabSpec(Routes.TAB_SETTINGS, "设置", Icons.Filled.Settings),
 )
@@ -125,6 +122,17 @@ fun AppRoot(model: AppModel) {
     if (model.showOnboarding) {
         OnboardingScreen(model = model)
         return
+    }
+
+    // 导航事件（createNewSession 完成直达）：组合协程=主线程消费，navigate 不再被
+    // 后台线程调用（真机反馈⑤-1：跨线程 navigate 毁导航栈 → 列表可滑但导航全失效）
+    LaunchedEffect(Unit) {
+        model.navigationEvents.collect { key ->
+            navController.navigate(Routes.chat(key)) {
+                popUpTo(Routes.TAB_SESSIONS) { saveState = true }
+                launchSingleTop = true
+            }
+        }
     }
 
     Scaffold(
@@ -180,14 +188,7 @@ fun AppRoot(model: AppModel) {
                 SessionsScreen(
                     model = model,
                     onOpenSession = { key -> navController.navigate(Routes.chat(key)) },
-                    onOpenArchived = { navController.navigate(Routes.TAB_SEARCH) }, // 归档视图 M3.2 并入列表域
-                )
-            }
-            composable(Routes.TAB_AGENTS) {
-                AgentsScreen(
-                    model = model,
                     onOpenAgent = { agentId -> navController.navigate(Routes.agent(agentId)) },
-                    onOpenSession = { key -> navController.navigate(Routes.chat(key)) },
                 )
             }
             composable(Routes.TAB_SEARCH) {
@@ -237,11 +238,11 @@ fun AppRoot(model: AppModel) {
 @Composable
 private fun InkBottomBar(navController: NavHostController, currentRoute: String?) {
     // 二级页归属来源 tab 的选中态（review R2-P0-1）：settings/sounds、themeDemo、
-    // connection 都从设置域推入，底栏不能全灰丢锚点。
+    // connection 都从设置域推入；agent 详情（抽屉编辑入口）归属会话 tab（R1-P1-1）。
     val selectedRoute = when (currentRoute) {
-        Routes.TAB_SESSIONS, Routes.TAB_AGENTS, Routes.TAB_SEARCH, Routes.TAB_SETTINGS -> currentRoute
+        Routes.TAB_SESSIONS, Routes.TAB_SEARCH, Routes.TAB_SETTINGS -> currentRoute
         Routes.SETTINGS_SOUNDS, Routes.THEME_DEMO, Routes.CONNECTION -> Routes.TAB_SETTINGS
-        Routes.AGENT -> Routes.TAB_AGENTS // review R3-P2-9：agent 详情页锚回 Agents tab
+        Routes.AGENT -> Routes.TAB_SESSIONS
         else -> null
     }
     NavigationBar(containerColor = InkTheme.colors.elevated) {

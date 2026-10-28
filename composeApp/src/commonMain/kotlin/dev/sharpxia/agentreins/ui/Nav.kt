@@ -72,12 +72,14 @@ object Routes {
     const val TAB_SEARCH = "tab:search"
     const val TAB_SETTINGS = "tab:settings"
     const val CHAT = "chat/{sessionKey}"
+    const val CONVERSATION = "conversation/{convId}"
     const val AGENT = "agent/{agentId}"
     const val CONNECTION = "connection"
     const val THEME_DEMO = "themeDemo"
     const val SETTINGS_SOUNDS = "settings/sounds"
 
     fun chat(sessionKey: String) = "chat/${encodeSegment(sessionKey)}"
+    fun conversation(convId: String) = "conversation/${encodeSegment(convId)}"
     fun agent(agentId: String) = "agent/${encodeSegment(agentId)}"
 
     /**
@@ -114,8 +116,8 @@ fun AppRoot(model: AppModel) {
     val backStack by navController.currentBackStackEntryAsState()
     val currentRoute = backStack?.destination?.route
     val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
-    // 对话域（chat 路由）隐藏底栏——一级导航不进对话（M2.6 真机反馈）
-    val chatMode = currentRoute == Routes.CHAT
+    // 对话域（chat/conversation 路由）隐藏底栏——一级导航不进对话（M2.6 真机反馈）
+    val chatMode = currentRoute == Routes.CHAT || currentRoute == Routes.CONVERSATION
 
     // Onboarding-lite：从未连接过的全新安装先过引导页（存有凭据的升级用户直接进主界面）。
     // 引导域不进 NavHost（此时主图尚未挂载）——连接页由引导页内部状态切换。
@@ -187,8 +189,9 @@ fun AppRoot(model: AppModel) {
                 }
                 SessionsScreen(
                     model = model,
-                    onOpenSession = { key -> navController.navigate(Routes.chat(key)) },
+                    onOpenConversation = { convId -> navController.navigate(Routes.conversation(convId)) },
                     onOpenAgent = { agentId -> navController.navigate(Routes.agent(agentId)) },
+                    onCreateFor = { agentId -> model.createNewSession(agentId) },
                 )
             }
             composable(Routes.TAB_SEARCH) {
@@ -216,12 +219,19 @@ fun AppRoot(model: AppModel) {
                 ChatRoute(model = model, sessionKey = key, onBack = { navController.popBackStack() })
             }
 
+            // 对话详情（M4 P2：conversation 入口；P2 阶段落当前主 session，P3 换拼接时间线）
+            composable(Routes.CONVERSATION) { entry ->
+                val convId = entry.arguments?.read { getStringOrNull("convId") } ?: ""
+                ConversationRoute(model = model, convId = convId, onBack = { navController.popBackStack() })
+            }
+
             composable(Routes.AGENT) { entry ->
                 val agentId = entry.arguments?.read { getStringOrNull("agentId") } ?: ""
                 AgentDetailScreen(
                     model = model,
                     agentId = agentId,
                     onOpenSession = { key -> navController.navigate(Routes.chat(key)) },
+                    onOpenConversation = { convId -> navController.navigate(Routes.conversation(convId)) },
                     onBack = { navController.popBackStack() },
                 )
             }
@@ -242,7 +252,7 @@ private fun InkBottomBar(navController: NavHostController, currentRoute: String?
     val selectedRoute = when (currentRoute) {
         Routes.TAB_SESSIONS, Routes.TAB_SEARCH, Routes.TAB_SETTINGS -> currentRoute
         Routes.SETTINGS_SOUNDS, Routes.THEME_DEMO, Routes.CONNECTION -> Routes.TAB_SETTINGS
-        Routes.AGENT -> Routes.TAB_SESSIONS
+        Routes.AGENT, Routes.CHAT, Routes.CONVERSATION -> Routes.TAB_SESSIONS
         else -> null
     }
     NavigationBar(containerColor = InkTheme.colors.elevated) {
@@ -270,6 +280,21 @@ private fun InkBottomBar(navController: NavHostController, currentRoute: String?
     }
 }
 
+
+/**
+ * 对话详情路由（M4 P2）：convId → 该 conversation 的当前（最近活跃）主 session，
+ * P2 阶段直接复用 per-session ChatRoute；P3 换拼接时间线。
+ */
+@Composable
+private fun ConversationRoute(model: AppModel, convId: String, onBack: () -> Unit) {
+    val targetKey = model.conversations.firstOrNull { it.id == convId }?.sessionKeys?.firstOrNull()
+    if (targetKey == null) {
+        // conv 未就绪（冷启动直进/参数失效）：落回列表
+        LaunchedEffect(Unit) { onBack() }
+        return
+    }
+    ChatRoute(model = model, sessionKey = targetKey, onBack = onBack)
+}
 
 /**
  * 对话页 + iOS 边缘返回（M2.6 交互原样保留，导航层由 NavHost 承担）：
@@ -303,8 +328,8 @@ private fun ChatRoute(model: AppModel, sessionKey: String, onBack: () -> Unit) {
                     alpha = if (backDragPx > 0f) (0.55f + 0.45f * (1f - progress.coerceIn(0f, 1f))) else 1f
                 },
         ) {
-            if (model.sessions.isNotEmpty()) {
-                SessionsScreen(model = model, onOpenSession = {})
+            if (model.conversations.isNotEmpty()) {
+                SessionsScreen(model = model, onOpenConversation = {})
             } else {
                 ConnectionEmptyState(model)
             }

@@ -11,6 +11,10 @@ import dev.sharpxia.agentreins.model.ConversationState
 import dev.sharpxia.agentreins.model.GatewayStatus
 import dev.sharpxia.agentreins.model.Message
 import dev.sharpxia.agentreins.model.Session
+import dev.sharpxia.agentreins.openclaw.Conversation
+import dev.sharpxia.agentreins.openclaw.ConversationKind
+import dev.sharpxia.agentreins.openclaw.ConversationOverlay
+import dev.sharpxia.agentreins.openclaw.ConversationRepository
 import dev.sharpxia.agentreins.openclaw.ConnectionStore
 import dev.sharpxia.agentreins.openclaw.GatewayRpcException
 import dev.sharpxia.agentreins.openclaw.OpenClawClient
@@ -175,10 +179,40 @@ class AppModel(
     /** 本地覆盖层（kv 持久化，跨重启）。 */
     private var sessionOverlay by mutableStateOf(emptyMap<String, SessionOverlay.Entry>())
 
+    // ---- M4 P2：conversation 派生（首页数据源）+ conversation 级本地 overlay ----
+    /** 首页 conversation 列表（由 sessions 派生；置顶/归档/隐藏走 conv 级 overlay）。 */
+    var conversations by mutableStateOf<List<Conversation>>(emptyList())
+        private set
+    private var convOverlay by mutableStateOf(emptyMap<String, ConversationOverlay.Entry>())
+
     /** overlay 叠加后发布到 UI 状态（网关刷新与本地操作共用同一出口）。 */
     private fun publishSessions() {
         sessions = SessionOverlay.apply(rawSessions, sessionOverlay)
+        conversations = ConversationRepository.build(sessions, convOverlay)
     }
+
+    fun setConversationPinned(conv: Conversation, pinned: Boolean) {
+        convOverlay = ConversationOverlay.toggled(convOverlay, conv.id, pinned = pinned)
+        scheduleOverlayPersist()
+        publishSessions()
+    }
+
+    fun setConversationArchived(conv: Conversation, archived: Boolean) {
+        convOverlay = ConversationOverlay.toggled(convOverlay, conv.id, archived = archived)
+        scheduleOverlayPersist()
+        publishSessions()
+    }
+
+    fun setConversationHidden(conv: Conversation, hidden: Boolean) {
+        convOverlay = ConversationOverlay.toggled(convOverlay, conv.id, hidden = hidden)
+        scheduleOverlayPersist()
+        publishSessions()
+    }
+
+    /** 该 agent 的 conversation id（主线优先；仅渠道往来时落渠道线程）。 */
+    fun conversationIdForAgent(agentId: String): String? =
+        conversations.firstOrNull { it.agentId == agentId && it.kind == ConversationKind.MAINLINE }?.id
+            ?: conversations.firstOrNull { it.agentId == agentId }?.id
 
     /** 归档/置顶（本地即时生效 + kv 持久化；离线可用）。 */
     fun setSessionArchived(session: Session, archived: Boolean) {
@@ -271,10 +305,12 @@ class AppModel(
 
     private fun scheduleOverlayPersist() {
         val snapshot = sessionOverlay
+        val convSnapshot = convOverlay
         overlayPersistJob?.cancel()
         overlayPersistJob = scope.launch {
             delay(300)
             runCatching { cache.kvPut(gatewayId, OVERLAY_KEY, SessionOverlay.serialize(snapshot)) }
+            runCatching { cache.kvPut(gatewayId, CONV_OVERLAY_KEY, ConversationOverlay.serialize(convSnapshot)) }
         }
     }
 
@@ -293,6 +329,7 @@ class AppModel(
             ?.let { rawSessions = it }
         // overlay（pinned/archived 本地状态）随后叠加并发布
         sessionOverlay = SessionOverlay.parse(runCatching { cache.kvGet(gatewayId, OVERLAY_KEY) }.getOrNull())
+        convOverlay = ConversationOverlay.parse(runCatching { cache.kvGet(gatewayId, CONV_OVERLAY_KEY) }.getOrNull())
         publishSessions()
         agentProfiles = AgentRegistry.parse(runCatching { cache.kvGet(gatewayId, AgentRegistry.KV_KEY) }.getOrNull())
         themeMode = runCatching { cache.kvGet(gatewayId, THEME_KEY) }.getOrNull()
@@ -980,6 +1017,9 @@ class AppModel(
     private companion object {
         /** session overlay（pinned/archived 本地状态）的 kv 槽位（M2.6）。 */
         const val OVERLAY_KEY = "sessionOverlay:v1"
+
+        /** conversation 级 overlay 的 kv 槽位（M4 P2）。 */
+        const val CONV_OVERLAY_KEY = "conversationOverlay:v1"
 
         /** 外观偏好 kv 槽位（M3.1）。 */
         const val THEME_KEY = "appearance:v1"

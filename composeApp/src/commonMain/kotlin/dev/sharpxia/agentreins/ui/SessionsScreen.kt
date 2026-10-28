@@ -22,9 +22,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Edit
@@ -55,9 +55,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.sharpxia.agentreins.AppModel
 import dev.sharpxia.agentreins.model.GatewayStatus
-import dev.sharpxia.agentreins.model.Session
-import dev.sharpxia.agentreins.model.sessionKeyAgentId
-import dev.sharpxia.agentreins.openclaw.SessionListMapper
+import dev.sharpxia.agentreins.openclaw.Conversation
+import dev.sharpxia.agentreins.openclaw.ConversationKind
+import dev.sharpxia.agentreins.openclaw.SessionCategory
+import dev.sharpxia.agentreins.openclaw.SessionClassifier
 import kotlin.math.abs
 import dev.sharpxia.agentreins.ui.components.ConnectionEmptyState
 import dev.sharpxia.agentreins.ui.components.SectionHeader
@@ -71,67 +72,66 @@ import dev.sharpxia.agentreins.ui.theme.LocalAgentTint
 import kotlinx.coroutines.launch
 
 /**
- * 会话列表（M3.2 墨水风重绘）：
- * - 行：agent tint 头像（未注册 seed 散列）+ 标题/预览 + 相对时间 + 未读徽标 + 置顶 Pin
- * - 操作：右滑置顶、左滑归档（swipe-to-act，指示器实时渐显），长按菜单含隐藏
- * - 分区：主列表（归档/隐藏过滤）↔ 收纳视图（归档 + 已隐藏两段）
- * - pinned/archived/hidden 全走本地 overlay（AppModel；网关同步留 scope 升级流程）
- * 断网可见缓存列表（M2.5 语义不变）。
+ * 会话首页（M4 P2 Conversation-first 重构）：
+ * - 行 = conversation（1 agent ↔ 1 主线线程，承载其全部主 session；渠道直连为独立线程）
+ * - 行内容：agent tint 头像 + agent 显示名（+ 渠道徽标）+ 预览 + 相对时间 + 未读徽标 + Pin
+ * - 操作：右滑置顶/归档（conversation 级 overlay），长按菜单含隐藏；收纳视图 = 归档+隐藏
+ * - 派生（subagent）/系统/未识别会话不进首页——治理入口在 agent 主页 sessions list
+ * 断网可见缓存派生的列表（M2.5 语义不变）。
  */
 @Composable
 fun SessionsScreen(
     model: AppModel,
-    onOpenSession: (String) -> Unit,
+    onOpenConversation: (String) -> Unit,
     onOpenAgent: (String) -> Unit = {},
+    onCreateFor: (String) -> Unit = {},
 ) {
-    if (model.sessions.isEmpty()) {
+    if (model.conversations.isEmpty()) {
         ConnectionEmptyState(model)
     } else {
-        SessionList(
+        ConversationList(
             model = model,
             offline = model.status !is GatewayStatus.Connected,
-            onOpenSession = onOpenSession,
+            onOpenConversation = onOpenConversation,
             onOpenAgent = onOpenAgent,
+            onCreateFor = onCreateFor,
         )
     }
 }
 
 @Composable
-private fun SessionList(
+private fun ConversationList(
     model: AppModel,
     offline: Boolean,
-    onOpenSession: (String) -> Unit,
+    onOpenConversation: (String) -> Unit,
     onOpenAgent: (String) -> Unit,
+    onCreateFor: (String) -> Unit,
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val haptics = rememberHapticPlayer()
     var showStash by remember { mutableStateOf(false) } // 收纳视图：归档 + 已隐藏
-    val totalUnread = model.sessions.sumOf { it.unread }
-    // 展开菜单的行（真机反馈⑦-3）：同一时刻至多一行展开；滚动/他处触摸即收起
+    val totalUnread = model.conversations.sumOf { it.unread }
+    // 展开菜单的行：同一时刻至多一行展开；滚动/他处触摸即收起
     var revealedRowId by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(listState.isScrollInProgress) {
         if (listState.isScrollInProgress) revealedRowId = null
     }
-    // Agent 过滤（真机反馈⑤-5）：null = All；选中后会话页只显示该 agent 的会话。
-    // rememberSaveable：进会话再返回（destination 离开组合）不能把筛选静默丢回 All
+    // Agent 过滤：null = All；rememberSaveable——进会话再返回不丢筛选
     var agentFilter by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
+    val filterMatches: (Conversation) -> Boolean = { c -> agentFilter == null || c.agentId == agentFilter }
+    val mainConvs = remember(model.conversations, agentFilter) {
+        model.conversations.filter { !it.hidden && !it.archived }.filter(filterMatches)
+    }
+    val archived = remember(model.conversations, agentFilter) {
+        model.conversations.filter { it.archived && !it.hidden }.filter(filterMatches)
+    }
+    val hidden = remember(model.conversations, agentFilter) {
+        model.conversations.filter { it.hidden }.filter(filterMatches)
+    }
     val summaries = remember(model.sessions, model.agentProfiles) {
         dev.sharpxia.agentreins.AgentRegistry.summarize(model.sessions, model.agentProfiles)
     }
-    val filterMatches: (Session) -> Boolean = { s ->
-        agentFilter == null || (s.agentId ?: sessionKeyAgentId(s.id)) == agentFilter
-    }
-    val mainSessions = remember(model.sessions, agentFilter) {
-        SessionListMapper.visibleForList(model.sessions.filter { !it.hidden }.filter(filterMatches))
-    }
-    val archived = remember(model.sessions, agentFilter) {
-        model.sessions.filter { it.archived && !it.hidden }.filter(filterMatches)
-    }
-    val hidden = remember(model.sessions, agentFilter) {
-        model.sessions.filter { it.hidden }.filter(filterMatches)
-    }
-    val pinnedCount = mainSessions.count { it.pinned }
     val drawerState = androidx.compose.material3.rememberDrawerState(
         androidx.compose.material3.DrawerValue.Closed,
     )
@@ -140,7 +140,7 @@ private fun SessionList(
     }
 
     StatusBarTapEffect {
-        if (mainSessions.isNotEmpty()) {
+        if (mainConvs.isNotEmpty()) {
             scope.launch { listState.animateScrollToItem(0) }
         }
     }
@@ -151,7 +151,7 @@ private fun SessionList(
                 drawerContainerColor = InkTheme.colors.elevated,
                 modifier = Modifier.fillMaxHeight(),
             ) {
-                // 内容置顶（真机反馈⑥-3）：显式顶部锚定 + 可滚动，铺满抽屉高度
+                // 内容置顶：显式顶部锚定 + 可滚动，铺满抽屉高度
                 Column(
                     Modifier
                         .fillMaxHeight()
@@ -163,10 +163,10 @@ private fun SessionList(
                         color = InkTheme.colors.ink,
                         modifier = Modifier.padding(start = 20.dp, top = 24.dp, bottom = 6.dp),
                     )
-                    // All（默认）：显示全部会话
+                    // All（默认）：显示全部对话
                     DrawerAgentRow(
                         name = "All",
-                        subtitle = "全部会话",
+                        subtitle = "全部对话",
                         tintName = null,
                         selected = agentFilter == null,
                         onClick = {
@@ -188,16 +188,22 @@ private fun SessionList(
                                 showStash = false
                                 scope.launch { drawerState.close() }
                             },
+                            // 头像点击 = 进该 agent 的对话（M4 P2：头像即对话入口）
+                            onOpenConversation = {
+                                scope.launch { drawerState.close() }
+                                val convId = model.conversationIdForAgent(s.profile.agentId)
+                                if (convId != null) onOpenConversation(convId) else onCreateFor(s.profile.agentId)
+                            },
                             onEdit = {
                                 agentFilter = s.profile.agentId
                                 scope.launch { drawerState.close() }
                                 onOpenAgent(s.profile.agentId)
                             },
-                            // ＋ 即建（真机反馈⑥-1）：新建走抽屉内联，不再经 ModalBottomSheet
+                            // ＋ = 进入对话 + 新开主 session（快捷语义；见 M4 需求 R5）
                             onCreate = {
                                 haptics.tap()
-                                model.createNewSession(s.profile.agentId)
                                 scope.launch { drawerState.close() }
+                                onCreateFor(s.profile.agentId)
                             },
                             creating = model.creatingSession,
                         )
@@ -221,13 +227,16 @@ private fun SessionList(
                         tint = InkTheme.colors.ink,
                     )
                 }
-                // Agent 头像（真机反馈⑥-4）：Menu 右侧区域最左，点击进 Agent 主页配置
+                // Agent 头像：筛选中显示，点击进该 agent 的对话
                 if (agentFilter != null && selectedProfile != null) {
                     AgentTintScope(selectedProfile.tint) {
                         Box(
                             Modifier
                                 .size(34.dp)
-                                .clickable { onOpenAgent(selectedProfile.agentId) },
+                                .clickable {
+                                    val convId = model.conversationIdForAgent(selectedProfile.agentId)
+                                    if (convId != null) onOpenConversation(convId) else onCreateFor(selectedProfile.agentId)
+                                },
                             contentAlignment = Alignment.Center,
                         ) {
                             AgentAvatar(LocalAgentTint.current, selectedProfile.name, size = 34)
@@ -249,8 +258,8 @@ private fun SessionList(
                         when {
                             showStash -> "归档 ${archived.size} · 隐藏 ${hidden.size}"
                             offline -> "离线中 · 显示缓存列表"
-                            agentFilter != null -> "${mainSessions.size} 个会话 · 来自 ${selectedProfile?.name ?: agentFilter}"
-                            else -> "${mainSessions.size} 个会话"
+                            agentFilter != null -> "${mainConvs.size} 个对话 · 来自 ${selectedProfile?.name ?: agentFilter}"
+                            else -> "${mainConvs.size} 个对话"
                         },
                         style = InkTheme.type.textSm,
                         color = InkTheme.colors.textTertiary,
@@ -275,14 +284,13 @@ private fun SessionList(
                 Text(
                     "全部已读",
                     style = InkTheme.type.textSm,
-                    color = InkTheme.colors.ink, // 墨水双色基线（review R2-P1-9：info 蓝是第三种蓝）
+                    color = InkTheme.colors.ink,
                     modifier = Modifier
                         .clickable { haptics.tap(); model.markAllRead() }
                         .padding(horizontal = 10.dp, vertical = 8.dp),
                 )
             }
-            // 新建会话（真机反馈⑦-5）：＋ 弹 agent 选择列表——首项为当前过滤的 agent，
-            // 点击即创建并直达；DropdownMenu 为真机已验证的弹层（消息长按菜单同款）
+            // ＋ 选 agent 进对话（无主线会话的 agent 直接创建首个主 session）
             Box {
                 var pickerOpen by remember { mutableStateOf(false) }
                 Text(
@@ -300,8 +308,8 @@ private fun SessionList(
                 ) {
                     val options = buildList {
                         agentFilter?.let { cur ->
-                            // 过滤 agent 可能不在 summaries（可见会话全归档）：合成首项保证
-                            // 「在当前 agent 新建」始终可得
+                            // 过滤 agent 可能不在 summaries（可见对话全归档）：合成首项保证
+                            // 「进当前 agent 的对话」始终可得
                             val summary = summaries.firstOrNull { it.profile.agentId == cur }
                                 ?: dev.sharpxia.agentreins.AgentSummary(
                                     profile = model.agentProfiles[cur]
@@ -328,7 +336,7 @@ private fun SessionList(
                             text = {
                                 Column {
                                     Text(
-                                        if (first) "在「" + s.profile.name + "」新建会话" else s.profile.name,
+                                        if (first) "进入「" + s.profile.name + "」的对话" else s.profile.name,
                                         style = InkTheme.type.textLg,
                                         color = InkTheme.colors.ink,
                                     )
@@ -346,7 +354,8 @@ private fun SessionList(
                             },
                             onClick = {
                                 pickerOpen = false
-                                model.createNewSession(s.profile.agentId)
+                                val convId = model.conversationIdForAgent(s.profile.agentId)
+                                if (convId != null) onOpenConversation(convId) else onCreateFor(s.profile.agentId)
                             },
                         )
                     }
@@ -382,20 +391,20 @@ private fun SessionList(
             if (showStash) {
                 if (archived.isNotEmpty()) {
                     item(key = "hdr-archived") { SectionHeader("归档") }
-                    items(archived, key = { "a-${it.id}" }) { s ->
-                        SwipeRevealRow(model, s, onOpenSession, haptics, revealed = revealedRowId == s.id, onRevealedChange = { r -> revealedRowId = if (r) s.id else null })
+                    items(archived, key = { "a-${it.id}" }) { c ->
+                        SwipeRevealRow(model, c, onOpenConversation, haptics, revealed = revealedRowId == c.id, onRevealedChange = { r -> revealedRowId = if (r) c.id else null })
                     }
                 }
                 if (hidden.isNotEmpty()) {
                     item(key = "hdr-hidden") { SectionHeader("已隐藏") }
-                    items(hidden, key = { "h-${it.id}" }) { s ->
-                        SwipeRevealRow(model, s, onOpenSession, haptics, revealed = revealedRowId == s.id, onRevealedChange = { r -> revealedRowId = if (r) s.id else null })
+                    items(hidden, key = { "h-${it.id}" }) { c ->
+                        SwipeRevealRow(model, c, onOpenConversation, haptics, revealed = revealedRowId == c.id, onRevealedChange = { r -> revealedRowId = if (r) c.id else null })
                     }
                 }
                 if (archived.isEmpty() && hidden.isEmpty()) {
                     item(key = "stash-empty") {
                         Text(
-                            "没有归档或隐藏的会话",
+                            "没有归档或隐藏的对话",
                             style = InkTheme.type.textMd,
                             color = InkTheme.colors.textTertiary,
                             modifier = Modifier.padding(24.dp),
@@ -403,8 +412,8 @@ private fun SessionList(
                     }
                 }
             } else {
-                items(mainSessions, key = { it.id }) { s ->
-                    SwipeRevealRow(model, s, onOpenSession, haptics, revealed = revealedRowId == s.id, onRevealedChange = { r -> revealedRowId = if (r) s.id else null })
+                items(mainConvs, key = { it.id }) { c ->
+                    SwipeRevealRow(model, c, onOpenConversation, haptics, revealed = revealedRowId == c.id, onRevealedChange = { r -> revealedRowId = if (r) c.id else null })
                 }
             }
         }
@@ -413,26 +422,25 @@ private fun SessionList(
 }
 
 /**
- * 会话行滑动操作（真机反馈⑦-3 定稿）：仅「从右向左」滑展开操作菜单（置顶/归档 或
- * 恢复/隐藏），过半吸附，二次点击执行；**右向手势（含左缘起点）不消费——让位抽屉
- * 边缘手势**（方向感知自绘裁决，不用 detectHorizontalDragGestures——它吃掉双向
- * slop 导致抽屉左滑被屏蔽）；展开后任意非按钮触摸/滚动即收起（revealedRowId 钩子）。
+ * conversation 行滑动操作（沿用真机打磨过的方向裁决）：仅「从右向左」滑展开操作菜单
+ * （置顶/归档 或 恢复/隐藏），过半吸附，二次点击执行；右向手势（含左缘起点）不消费——
+ * 让位抽屉边缘手势；展开后任意非按钮触摸/滚动即收起。
  */
 @Composable
 private fun SwipeRevealRow(
     model: AppModel,
-    session: Session,
-    onOpenSession: (String) -> Unit,
+    conv: Conversation,
+    onOpenConversation: (String) -> Unit,
     haptics: HapticPlayer,
     revealed: Boolean,
     onRevealedChange: (Boolean) -> Unit,
 ) {
     val density = androidx.compose.ui.platform.LocalDensity.current
     val revealPx = with(density) { 128.dp.toPx() }
-    val stash = session.archived || session.hidden
+    val stash = conv.archived || conv.hidden
     val scope = rememberCoroutineScope()
-    val currentSession by rememberUpdatedState(session)
-    var offsetX by remember(session.id) { mutableStateOf(0f) }
+    val currentConv by rememberUpdatedState(conv)
+    var offsetX by remember(conv.id) { mutableStateOf(0f) }
 
     // 收起态同步：外部（滚动/他行展开/抽屉）判定收起时回弹归零
     LaunchedEffect(revealed) {
@@ -466,34 +474,34 @@ private fun SwipeRevealRow(
         ) {
             SwipeActionButton(
                 label = when {
-                    !stash && currentSession.pinned -> "取消置顶"
+                    !stash && currentConv.pinned -> "取消置顶"
                     !stash -> "置顶"
                     else -> "恢复"
                 },
-                icon = if (!stash && currentSession.pinned) ArIcons.Pin else if (stash) ArIcons.Unarchive else ArIcons.Pin,
+                icon = if (!stash && currentConv.pinned) ArIcons.Pin else if (stash) ArIcons.Unarchive else ArIcons.Pin,
                 tint = InkTheme.colors.success,
                 onClick = {
                     haptics.success()
                     when {
-                        !stash -> model.setSessionPinned(currentSession, !currentSession.pinned)
-                        currentSession.archived -> model.setSessionArchived(currentSession, false)
-                        else -> model.setSessionHidden(currentSession, false)
+                        !stash -> model.setConversationPinned(currentConv, !currentConv.pinned)
+                        currentConv.archived -> model.setConversationArchived(currentConv, false)
+                        else -> model.setConversationHidden(currentConv, false)
                     }
                     onRevealedChange(false)
                 },
             )
             SwipeActionButton(
                 label = when {
-                    stash -> if (currentSession.hidden) "取消隐藏" else "隐藏"
+                    stash -> if (currentConv.hidden) "取消隐藏" else "隐藏"
                     else -> "归档"
                 },
                 icon = if (stash) ArIcons.EyeOff else ArIcons.Archive,
-                tint = if (stash && currentSession.hidden) InkTheme.colors.success else InkTheme.colors.warning,
+                tint = if (stash && currentConv.hidden) InkTheme.colors.success else InkTheme.colors.warning,
                 onClick = {
                     haptics.tap()
                     when {
-                        stash -> model.setSessionHidden(currentSession, !currentSession.hidden)
-                        else -> model.setSessionArchived(currentSession, true)
+                        stash -> model.setConversationHidden(currentConv, !currentConv.hidden)
+                        else -> model.setConversationArchived(currentConv, true)
                     }
                     onRevealedChange(false)
                 },
@@ -504,7 +512,7 @@ private fun SwipeRevealRow(
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer { translationX = offsetX }
-                .pointerInput(session.id, revealPx) {
+                .pointerInput(conv.id, revealPx) {
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = true)
                         var total = 0f
@@ -536,13 +544,13 @@ private fun SwipeRevealRow(
                     }
                 },
         ) {
-            SessionRowContent(
+            ConversationRowContent(
                 model = model,
-                session = currentSession,
+                conv = currentConv,
                 stash = stash,
                 onClick = {
-                    if (revealed) onRevealedChange(false) // 展开时点行=先收起，不进会话
-                    else onOpenSession(session.id)
+                    if (revealed) onRevealedChange(false) // 展开时点行=先收起，不进对话
+                    else onOpenConversation(currentConv.id)
                 },
             )
         }
@@ -570,7 +578,7 @@ private fun SwipeActionButton(
     }
 }
 
-/** 抽屉行（真机反馈⑤-5/⑥-1）：All/Agent 选择 + ＋ 内联新建 + ✎ 编辑进 Agent 域页。 */
+/** 抽屉行：All/Agent 选择；头像点击 = 进对话；＋ = 新开主 session 并进入；✎ = 编辑进 Agent 域页。 */
 @Composable
 private fun DrawerAgentRow(
     name: String,
@@ -578,6 +586,7 @@ private fun DrawerAgentRow(
     tintName: AgentTintName?,
     selected: Boolean,
     onClick: () -> Unit,
+    onOpenConversation: (() -> Unit)? = null,
     onEdit: (() -> Unit)? = null,
     onCreate: (() -> Unit)? = null,
     creating: Boolean = false,
@@ -609,7 +618,13 @@ private fun DrawerAgentRow(
                 }
             }
             else -> AgentTintScope(tintName) {
-                AgentAvatar(LocalAgentTint.current, name)
+                if (onOpenConversation != null) {
+                    Box(Modifier.clickable(onClick = onOpenConversation)) {
+                        AgentAvatar(LocalAgentTint.current, name)
+                    }
+                } else {
+                    AgentAvatar(LocalAgentTint.current, name)
+                }
             }
         }
         Column(Modifier.weight(1f).padding(horizontal = 12.dp, vertical = 10.dp)) {
@@ -657,17 +672,15 @@ private fun DrawerAgentRow(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SessionRowContent(
+private fun ConversationRowContent(
     model: AppModel,
-    session: Session,
+    conv: Conversation,
     stash: Boolean,
     onClick: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
-    val agentId = session.agentId ?: sessionKeyAgentId(session.id)
-    val tintName = model.agentProfiles[agentId]?.tint
-        ?: agentId?.let { dev.sharpxia.agentreins.ui.theme.agentTintFor(it) }
-        ?: AgentTintName.GRAY
+    val tintName = model.agentProfiles[conv.agentId]?.tint
+        ?: dev.sharpxia.agentreins.ui.theme.agentTintFor(conv.agentId)
     AgentTintScope(tintName) {
         val tint = LocalAgentTint.current
         val c = InkTheme.colors
@@ -685,13 +698,12 @@ private fun SessionRowContent(
                 )
                 .padding(horizontal = 16.dp, vertical = 10.dp),
         ) {
-            // 头像用 agent 身份（真机反馈⑦-1）：名称取 agent 注册名，非会话标题首字
-            val agentName = model.agentProfiles[agentId]?.name ?: agentId ?: session.title ?: session.id
+            val agentName = model.agentProfiles[conv.agentId]?.name ?: conv.agentId
             AgentAvatar(tint, agentName)
             Spacer(Modifier.size(12.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (session.pinned && !stash) {
+                    if (conv.pinned && !stash) {
                         Icon(
                             ArIcons.Pin,
                             contentDescription = "已置顶",
@@ -700,7 +712,7 @@ private fun SessionRowContent(
                         )
                         Spacer(Modifier.size(5.dp))
                     }
-                    if (session.hidden) {
+                    if (conv.hidden) {
                         Icon(
                             ArIcons.EyeOff,
                             contentDescription = "已隐藏",
@@ -710,16 +722,21 @@ private fun SessionRowContent(
                         Spacer(Modifier.size(5.dp))
                     }
                     Text(
-                        session.title ?: session.id,
+                        agentName,
                         style = InkTheme.type.textLg,
-                        fontWeight = if (session.unread > 0) FontWeight.SemiBold else FontWeight.Medium,
+                        fontWeight = if (conv.unread > 0) FontWeight.SemiBold else FontWeight.Medium,
                         color = c.ink,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        // weight 占满余量、时间钉右缘（review R2-P1-1）
+                        // weight 占满余量、时间钉右缘
                         modifier = Modifier.weight(1f),
                     )
-                    formatRelativeTime(session.lastActiveAtMs).takeIf { it.isNotEmpty() }?.let {
+                    val channelBadge = if (conv.kind == ConversationKind.CHANNEL) conv.channel else null
+                    if (channelBadge != null) {
+                        ChannelBadge(channelBadge)
+                        Spacer(Modifier.size(6.dp))
+                    }
+                    formatRelativeTime(conv.lastActiveAtMs).takeIf { it.isNotEmpty() }?.let {
                         Text(
                             it,
                             style = InkTheme.type.textXs,
@@ -730,23 +747,23 @@ private fun SessionRowContent(
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        session.preview?.takeIf { it.isNotBlank() } ?: session.id,
+                        conv.preview ?: conv.id,
                         style = InkTheme.type.textSm,
                         color = c.textTertiary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
                     )
-                    if (session.unread > 0) {
+                    if (conv.unread > 0) {
                         Spacer(Modifier.size(8.dp))
-                        UnreadBadge(session.unread)
+                        UnreadBadge(conv.unread)
                     }
                 }
             }
-            SessionRowMenu(
+            ConversationRowMenu(
                 expanded = menuOpen,
                 onDismiss = { menuOpen = false },
-                session = session,
+                conv = conv,
                 stash = stash,
                 model = model,
             )
@@ -754,44 +771,58 @@ private fun SessionRowContent(
     }
 }
 
-/** 长按菜单：置顶 / 归档 / 隐藏（收纳视图里为对应反向操作）。 */
+/** 渠道徽标（CHANNEL 线程的身份标注）。 */
 @Composable
-private fun SessionRowMenu(
+private fun ChannelBadge(channel: String) {
+    Text(
+        channel,
+        style = InkTheme.type.textXs,
+        color = InkTheme.colors.textTertiary,
+        modifier = Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(InkTheme.colors.surfaceTertiary)
+            .padding(horizontal = 5.dp, vertical = 1.dp),
+    )
+}
+
+/** 长按菜单：置顶 / 归档 / 隐藏（收纳视图里为对应反向操作）——conversation 级 overlay。 */
+@Composable
+private fun ConversationRowMenu(
     expanded: Boolean,
     onDismiss: () -> Unit,
-    session: Session,
+    conv: Conversation,
     stash: Boolean,
     model: AppModel,
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
         if (!stash) {
             DropdownMenuItem(
-                text = { Text(if (session.pinned) "取消置顶" else "置顶") },
+                text = { Text(if (conv.pinned) "取消置顶" else "置顶") },
                 leadingIcon = { Icon(ArIcons.Pin, contentDescription = null, modifier = Modifier.size(18.dp)) },
-                onClick = { model.setSessionPinned(session, !session.pinned); onDismiss() },
+                onClick = { model.setConversationPinned(conv, !conv.pinned); onDismiss() },
             )
         }
         DropdownMenuItem(
-            text = { Text(if (session.archived) "取消归档" else "归档") },
+            text = { Text(if (conv.archived) "取消归档" else "归档") },
             leadingIcon = {
                 Icon(
-                    if (session.archived) ArIcons.Unarchive else ArIcons.Archive,
+                    if (conv.archived) ArIcons.Unarchive else ArIcons.Archive,
                     contentDescription = null,
                     modifier = Modifier.size(18.dp),
                 )
             },
-            onClick = { model.setSessionArchived(session, !session.archived); onDismiss() },
+            onClick = { model.setConversationArchived(conv, !conv.archived); onDismiss() },
         )
         DropdownMenuItem(
-            text = { Text(if (session.hidden) "取消隐藏" else "隐藏") },
+            text = { Text(if (conv.hidden) "取消隐藏" else "隐藏") },
             leadingIcon = {
                 Icon(
-                    if (session.hidden) ArIcons.Unarchive else ArIcons.EyeOff,
+                    if (conv.hidden) ArIcons.Unarchive else ArIcons.EyeOff,
                     contentDescription = null,
                     modifier = Modifier.size(18.dp),
                 )
             },
-            onClick = { model.setSessionHidden(session, !session.hidden); onDismiss() },
+            onClick = { model.setConversationHidden(conv, !conv.hidden); onDismiss() },
         )
     }
 }

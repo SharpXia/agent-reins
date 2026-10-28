@@ -162,12 +162,13 @@ fun AgentAvatar(tint: AgentTintColors, name: String, size: Int = 42) {
     }
 }
 
-/** Agent 域页：身份头（改名/选色）+ 该 agent 的会话组。 */
+/** Agent 域页：身份头（改名/选色）+ 该 agent 的会话组（M4：sessions 管理落点）。 */
 @Composable
 fun AgentDetailScreen(
     model: AppModel,
     agentId: String,
     onOpenSession: (String) -> Unit,
+    onOpenConversation: (String) -> Unit = {},
     onBack: () -> Unit,
 ) {
     val profile = model.agentProfiles[agentId] ?: dev.sharpxia.agentreins.AgentProfile.default(agentId)
@@ -213,8 +214,16 @@ fun AgentDetailScreen(
         LazyColumn(Modifier.fillMaxSize()) {
             items(sessions, key = { it.id }) { s ->
                 AgentSessionRow(s, onClick = {
-                    model.select(s)
-                    onOpenSession(s.id)
+                    // M4：主线会话行 → 该 agent 的 conversation（落最新）；派生/系统/未识别
+                    // 行保持 per-session chat（调试与治理用途）
+                    if (dev.sharpxia.agentreins.openclaw.SessionClassifier.classify(s.id) ==
+                        dev.sharpxia.agentreins.openclaw.SessionCategory.MAINLINE
+                    ) {
+                        onOpenConversation(dev.sharpxia.agentreins.openclaw.ConversationRepository.convId(agentId))
+                    } else {
+                        model.select(s)
+                        onOpenSession(s.id)
+                    }
                 })
             }
         }

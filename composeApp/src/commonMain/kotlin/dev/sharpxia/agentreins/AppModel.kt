@@ -11,6 +11,7 @@ import dev.sharpxia.agentreins.model.ConversationState
 import dev.sharpxia.agentreins.model.GatewayStatus
 import dev.sharpxia.agentreins.model.Message
 import dev.sharpxia.agentreins.model.Session
+import dev.sharpxia.agentreins.model.sessionKeyAgentId
 import dev.sharpxia.agentreins.openclaw.Conversation
 import dev.sharpxia.agentreins.openclaw.ConversationKind
 import dev.sharpxia.agentreins.openclaw.ConversationOverlay
@@ -36,6 +37,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.datetime.Instant
 import kotlinx.datetime.TimeZone
@@ -179,6 +181,106 @@ class AppModel(
     /** 本地覆盖层（kv 持久化，跨重启）。 */
     private var sessionOverlay by mutableStateOf(emptyMap<String, SessionOverlay.Entry>())
 
+    // ---- M4 P3：对话详情拼接时间线（1 conversation = 该 agent 全部主 session） ----
+    /** 时间线分区：key + 创建时 label（分区头文案）+ 该 session 的对话流状态。 */
+    data class ConvSection(val key: String, val label: String?, val state: ConversationState?)
+
+    /** 当前对话的 agentId（null = 非 conversation 路由）。 */
+    var convAgentId by mutableStateOf<String?>(null)
+        private set
+    /** 拼接时间线分区（最近活跃降序；index 0 = 输入锚定的当前主 session）。 */
+    var convSections by mutableStateOf<List<ConvSection>>(emptyList())
+        private set
+    private val convLoadedKeys = mutableSetOf<String>()
+    private var convLoadingKey: String? = null
+    private var convJob: Job? = null
+
+    /**
+     * 打开某 agent 的 conversation 时间线：主线 session 全集按活跃降序成区，select 当前
+     * （驱动事件/草稿/outbox），并收集全部区流（含未打开 session——operator 收全量广播，
+     * 每个有活动的 session 都会有流）。
+     */
+    fun openConversationTimeline(agentId: String) {
+        if (convAgentId == agentId && convSections.isNotEmpty()) return
+        val c = client ?: return
+        val keys = convMainlineKeys(agentId)
+        if (keys.isEmpty()) return
+        convAgentId = agentId
+        convLoadedKeys.clear()
+        rebuildConvSections(keys)
+        sessions.firstOrNull { it.id == keys.first() }?.let { select(it) }
+        convLoadedKeys.add(keys.first())
+    }
+
+    /** 时间线内「向上到顶」加载：最旧区未拉过历史→拉首页；拉过且还有更多→翻更早一页。 */
+    fun loadConvTop() {
+        if (convSections.isEmpty()) {
+            loadOlderMessages()
+            return
+        }
+        if (convLoadingKey != null) return
+        val c = client ?: return
+        val top = convSections.last()
+        if (top.key !in convLoadedKeys) {
+            convLoadingKey = top.key
+            scope.launch {
+                try {
+                    c.loadHistory(top.key)
+                } catch (e: Exception) {
+                    lastError = e.message
+                } finally {
+                    convLoadedKeys.add(top.key)
+                    convLoadingKey = null
+                }
+            }
+        } else {
+            val st = top.state ?: return
+            if (!st.hasMoreHistory) return
+            convLoadingKey = top.key
+            scope.launch {
+                try {
+                    c.loadHistoryOlder(top.key)
+                } catch (e: Exception) {
+                    lastError = e.message
+                } finally {
+                    convLoadingKey = null
+                }
+            }
+        }
+    }
+
+    /** 离开对话路由时清时间线态（DisposableEffect onDispose）。 */
+    fun closeConversationTimeline() {
+        convAgentId = null
+        convSections = emptyList()
+        convJob?.cancel()
+        convJob = null
+        convLoadedKeys.clear()
+        convLoadingKey = null
+    }
+
+    /** 该 agent 的时间线成员：主线（main/ar-*）且未被本地归档/隐藏的 session，活跃降序。 */
+    private fun convMainlineKeys(agentId: String): List<String> =
+        ConversationRepository.mainlineKeysOf(
+            agentId,
+            sessions.filter {
+                (it.agentId ?: sessionKeyAgentId(it.id)) == agentId && !it.hidden && !it.archived
+            },
+        )
+
+    private fun rebuildConvSections(keys: List<String>) {
+        val c = client ?: return
+        val byKey = sessions.associateBy { it.id }
+        convSections = keys.map { ConvSection(it, byKey[it]?.title, null) }
+        convJob?.cancel()
+        convJob = scope.launch {
+            val flows = keys.map { k -> c.conversation(k) }
+            combine(flows) { arr -> arr.toList() }.collect { states ->
+                convSections = convSections.mapIndexed { i, s -> s.copy(state = states[i]) }
+            }
+        }
+    }
+
     // ---- M4 P2：conversation 派生（首页数据源）+ conversation 级本地 overlay ----
     /** 首页 conversation 列表（由 sessions 派生；置顶/归档/隐藏走 conv 级 overlay）。 */
     var conversations by mutableStateOf<List<Conversation>>(emptyList())
@@ -213,6 +315,19 @@ class AppModel(
     fun conversationIdForAgent(agentId: String): String? =
         conversations.firstOrNull { it.agentId == agentId && it.kind == ConversationKind.MAINLINE }?.id
             ?: conversations.firstOrNull { it.agentId == agentId }?.id
+
+    /** 会话列表刷新后同步时间线成员（新会话加入/会话隐藏移除）；当前锚定变了则切 select。 */
+    private fun refreshConvSections() {
+        val agentId = convAgentId ?: return
+        if (convSections.isEmpty()) return
+        val keys = convMainlineKeys(agentId)
+        if (keys == convSections.map { it.key }) return
+        rebuildConvSections(keys)
+        val current = keys.firstOrNull()
+        if (current != null && selectedSession != current) {
+            sessions.firstOrNull { it.id == current }?.let { select(it) }
+        }
+    }
 
     /** 归档/置顶（本地即时生效 + kv 持久化；离线可用）。 */
     fun setSessionArchived(session: Session, archived: Boolean) {
@@ -471,6 +586,8 @@ class AppModel(
             c.sessions.collect { list ->
                 rawSessions = list
                 publishSessions()
+                // conversation 路由中列表刷新（新 ar-* 会话等）：时间线成员重建 + 锚定切换
+                refreshConvSections()
                 // 通知音防抖表随列表修剪，不随会话消失无限增长（review R3-P2-4）
                 soundGates.keys.retainAll(list.mapTo(mutableSetOf()) { it.id })
                 // Onboarding-lite「直达主会话」：首次连接后的第一份非空列表即挑主会话。

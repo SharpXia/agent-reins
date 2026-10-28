@@ -138,6 +138,42 @@ class ChatRowsTest {
         )
     }
 
+    // ---- M4 P3：conversation 拼接时间线 ----
+
+    @Test
+    fun conversationRowsOldestFirstWithBoundaryPerSection() {
+        val rows = buildConversationRows(
+            listOf(
+                TimelineSection("agent:main:ar-new", "新会话 10-29", listOf(msg("n1", day(2026, 10, 29, 2)))),
+                TimelineSection("agent:main:main", null, listOf(msg("m1", day(2026, 10, 28, 2)))),
+            ),
+            utc,
+        )
+        // 渲染序 = 最旧在最上；每区以 Boundary 开头（main 无 label 兜底「常驻对话」）
+        assertTrue(rows.first() is ChatRow.Boundary)
+        assertEquals("常驻对话", (rows.first() as ChatRow.Boundary).label)
+        val labels = rows.filterIsInstance<ChatRow.Boundary>().map { it.label }
+        assertEquals(listOf("常驻对话", "新会话 10-29"), labels)
+        // 条目顺序：m1（旧区）在 n1（新区）前
+        val entryIds = rows.filterIsInstance<ChatRow.Entry>().map { it.entry.id }
+        assertEquals(listOf("m1", "n1"), entryIds)
+    }
+
+    @Test
+    fun boundaryKeysFollowRenderOrder() {
+        val rows = buildConversationRows(
+            listOf(
+                TimelineSection("agent:main:ar-a", "A", emptyList()),
+                TimelineSection("agent:main:ar-b", "B", emptyList()),
+            ),
+            utc,
+        )
+        assertEquals(
+            listOf("agent:main:ar-b", "agent:main:ar-a"),
+            rows.filterIsInstance<ChatRow.Boundary>().map { it.sessionKey },
+        )
+    }
+
     private fun day(y: Int, m: Int, d: Int, hour: Int): Long =
         kotlinx.datetime.Instant.parse("%04d-%02d-%02dT%02d:00:00Z".format(y, m, d, hour)).toEpochMilliseconds()
 }

@@ -282,26 +282,45 @@ private fun InkBottomBar(navController: NavHostController, currentRoute: String?
 
 
 /**
- * 对话详情路由（M4 P2）：convId → 该 conversation 的当前（最近活跃）主 session，
- * P2 阶段直接复用 per-session ChatRoute；P3 换拼接时间线。
+ * 对话详情路由（M4）：主线 conversation → 拼接时间线（多主 session 分区）；渠道线程
+ * 保持单 session ChatRoute。时间线生命周期绑路由组合（进开/离清）。
  */
 @Composable
 private fun ConversationRoute(model: AppModel, convId: String, onBack: () -> Unit) {
-    val targetKey = model.conversations.firstOrNull { it.id == convId }?.sessionKeys?.firstOrNull()
-    if (targetKey == null) {
-        // conv 未就绪（冷启动直进/参数失效）：落回列表
-        LaunchedEffect(Unit) { onBack() }
-        return
+    val conv = model.conversations.firstOrNull { it.id == convId }
+    val targetKey = conv?.sessionKeys?.firstOrNull()
+    when {
+        conv == null || targetKey == null -> LaunchedEffect(Unit) { onBack() }
+        conv.kind == dev.sharpxia.agentreins.openclaw.ConversationKind.CHANNEL ->
+            ChatRoute(model = model, sessionKey = targetKey, onBack = onBack)
+        else -> {
+            val agentId = conv.agentId
+            androidx.compose.runtime.DisposableEffect(agentId) {
+                model.openConversationTimeline(agentId)
+                onDispose { model.closeConversationTimeline() }
+            }
+            val agentName = model.agentProfiles[agentId]?.name ?: agentId
+            ChatPageScaffold(model = model, onBack = onBack) {
+                ChatScreen(
+                    model = model,
+                    sessionKey = model.selectedSession ?: "",
+                    modifier = Modifier.fillMaxSize(),
+                    onBack = onBack,
+                    timeline = model.convSections,
+                    convTitle = agentName,
+                    convSubtitle = "对话 · ${model.convSections.size} 个会话",
+                )
+            }
+        }
     }
-    ChatRoute(model = model, sessionKey = targetKey, onBack = onBack)
 }
 
 /**
- * 对话页 + iOS 边缘返回（M2.6 交互原样保留，导航层由 NavHost 承担）：
- * 底层铺真实会话列表视差露出，左缘起手横拖超过 30% 即返回。
+ * 对话页脚手架 + iOS 边缘返回（M2.6 交互原样保留，导航层由 NavHost 承担）：
+ * 底层铺真实对话列表视差露出，左缘起手横拖超过 30% 即返回。
  */
 @Composable
-private fun ChatRoute(model: AppModel, sessionKey: String, onBack: () -> Unit) {
+private fun ChatPageScaffold(model: AppModel, onBack: () -> Unit, content: @Composable () -> Unit) {
     var backDragPx by remember { mutableStateOf(0f) }
     var edgeDragArmed by remember { mutableStateOf(false) }
     var screenWidthPx by remember { mutableStateOf(1f) }
@@ -309,13 +328,6 @@ private fun ChatRoute(model: AppModel, sessionKey: String, onBack: () -> Unit) {
     val haptics = rememberHapticPlayer()
     val edgeWidthPx = with(LocalDensity.current) { 28.dp.toPx() }
     val commitFraction = 0.3f
-
-    LaunchedEffect(Unit) {
-        // 路由参数直达（Agent 域/搜索）：确保模型层选中态与路由一致
-        if (model.selectedSession != sessionKey) {
-            model.sessions.firstOrNull { it.id == sessionKey }?.let { model.select(it) }
-        }
-    }
 
     Box(Modifier.fillMaxSize()) {
         // 底层：真实列表（拖拽时视差平移并压暗）
@@ -368,7 +380,21 @@ private fun ChatRoute(model: AppModel, sessionKey: String, onBack: () -> Unit) {
                     }
                 },
         ) {
-            ChatScreen(model, sessionKey, Modifier.fillMaxSize(), onBack = onBack)
+            content()
         }
+    }
+}
+
+/** per-session 对话页（搜索/agent 主页/fork 直达路径；conversation 主路径走 ConversationRoute）。 */
+@Composable
+private fun ChatRoute(model: AppModel, sessionKey: String, onBack: () -> Unit) {
+    LaunchedEffect(Unit) {
+        // 路由参数直达（Agent 域/搜索）：确保模型层选中态与路由一致
+        if (model.selectedSession != sessionKey) {
+            model.sessions.firstOrNull { it.id == sessionKey }?.let { model.select(it) }
+        }
+    }
+    ChatPageScaffold(model = model, onBack = onBack) {
+        ChatScreen(model, sessionKey, Modifier.fillMaxSize(), onBack = onBack)
     }
 }

@@ -104,6 +104,7 @@ import kotlinx.coroutines.launch
  * 对话流（M3.3 墨水风重绘）：日分隔、助手墨水平文（Markdown v2 表格/嵌套/高亮）、
  * 用户 tint 气泡、流式 shimmer、消息入场/高度过渡、长按菜单、outbox 待发气泡。
  * 滚动定位/分页/键盘逻辑沿用 M2.6（真机打磨过的行为不动）。
+ * M4 P3：[timeline] 非 null = conversation 拼接模式（多主 session 分区时间线）。
  */
 @Composable
 internal fun ChatScreen(
@@ -111,6 +112,9 @@ internal fun ChatScreen(
     sessionKey: String,
     modifier: Modifier = Modifier,
     onBack: () -> Unit = {},
+    timeline: List<AppModel.ConvSection>? = null,
+    convTitle: String? = null,
+    convSubtitle: String? = null,
 ) {
     val state = model.conversation
     val listState = rememberLazyListState()
@@ -139,13 +143,41 @@ internal fun ChatScreen(
             }
         }
     }
-    val rows = remember(rowsSignature) { buildChatRows(currentEntries) }
+    // 拼接模式：全部区的内容签名（任一区变化才重建整表）
+    val timelineSignature = remember(timeline) {
+        timeline?.joinToString("|") { s ->
+            val e = s.state?.entries ?: emptyList()
+            buildString {
+                append(s.key); append('#'); append(e.size)
+                append(':'); append(e.firstOrNull()?.id)
+                append(':'); append(e.lastOrNull()?.id)
+                append(':'); append((e.lastOrNull() as? Message)?.content?.length ?: 0)
+                e.filterIsInstance<ToolCallEvent>().forEach {
+                    append(':'); append(it.id); append('='); append(it.state.name)
+                }
+                e.filterIsInstance<ThinkingEntry>().forEach {
+                    append(':'); append(it.id); append('#'); append(it.text.length)
+                }
+            }
+        }
+    }
+    val rows = if (timeline != null) {
+        remember(timelineSignature) {
+            buildConversationRows(timeline.map { TimelineSection(it.key, it.label, it.state?.entries ?: emptyList()) })
+        }
+    } else {
+        remember(rowsSignature) { buildChatRows(currentEntries) }
+    }
     val pending = model.pendingOutbox
     val contentRowCount = rows.size + pending.size
     val lastTextLen = (state?.entries?.lastOrNull() as? Message)?.content?.length ?: 0
     val runActive = state?.activeRunId != null
     // 首页历史是否已到达（真机反馈 bug②）：未到达且无缓存时显示加载态而非空态
     val historyLoaded = state?.historyLoaded == true
+    // 拼接模式：更早按钮看最旧（最上）区是否还有历史
+    val showLoadingOlder = contentRowCount > 0 &&
+        if (timeline != null) timeline.lastOrNull()?.state?.hasMoreHistory == true
+        else state?.hasMoreHistory == true
     val totalRows = contentRowCount +
         (if (state?.hasMoreHistory == true && contentRowCount > 0) 1 else 0) +
         (if (contentRowCount == 0 && !runActive && historyLoaded) 1 else 0) +
@@ -190,7 +222,9 @@ internal fun ChatScreen(
     LaunchedEffect(listState) {
         snapshotFlow {
             listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
-        }.collect { atTop -> if (atTop) model.loadOlderMessages() }
+        }.collect { atTop ->
+            if (atTop) if (timeline != null) model.loadConvTop() else model.loadOlderMessages()
+        }
     }
     val keyboard = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
@@ -217,7 +251,16 @@ internal fun ChatScreen(
             ApprovalSheet(request = req, onDecide = { model.respondApproval(it) })
         }
         var showStartFresh by remember { mutableStateOf(false) }
-        ChatTopBar(model, sessionKey, runActive, historyLoaded, onBack, onShowStartFresh = { showStartFresh = true })
+        ChatTopBar(
+            model,
+            sessionKey,
+            runActive,
+            historyLoaded,
+            onBack,
+            onShowStartFresh = { showStartFresh = true },
+            titleOverride = convTitle,
+            subtitleOverride = convSubtitle,
+        )
         if (showStartFresh) {
             StartFreshDialog(
                 onConfirm = {
@@ -243,7 +286,7 @@ internal fun ChatScreen(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                if (state?.hasMoreHistory == true && contentRowCount > 0) {
+                if (showLoadingOlder) {
                     item(key = "loading-older") {
                         Text(
                             "上拉加载更早消息…",
@@ -268,6 +311,7 @@ internal fun ChatScreen(
                         is ChatRow.DayHeader -> "day-${row.atMs}"
                         is ChatRow.Entry -> row.entry.id
                         is ChatRow.ToolGroup -> row.key
+                        is ChatRow.Boundary -> "bnd-${row.sessionKey}"
                     }
                 }) { index, row ->
                     // 入场动画只给「最新一条 + 活跃 run/流式中」：分页前插与已加载内容零动画
@@ -288,6 +332,7 @@ internal fun ChatScreen(
                     Box(itemModifier) {
                         when (row) {
                             is ChatRow.DayHeader -> DayHeaderRow(row.atMs)
+                            is ChatRow.Boundary -> BoundaryRow(row.label)
                             is ChatRow.Entry -> when (val entry = row.entry) {
                                 is ToolCallEvent -> ToolCallCard(entry)
                                 is ThinkingEntry -> ThinkingCard(entry)
@@ -357,6 +402,8 @@ private fun ChatTopBar(
     historyLoaded: Boolean,
     onBack: () -> Unit,
     onShowStartFresh: () -> Unit,
+    titleOverride: String? = null,
+    subtitleOverride: String? = null,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     Surface(color = InkTheme.colors.paper) {
@@ -375,7 +422,7 @@ private fun ChatTopBar(
                 Column(Modifier.weight(1f)) {
                     val session = model.sessions.firstOrNull { it.id == sessionKey }
                     Text(
-                        session?.title ?: sessionKey,
+                        titleOverride ?: session?.title ?: sessionKey,
                         style = InkTheme.type.headingSm,
                         color = InkTheme.colors.ink,
                         maxLines = 1,
@@ -394,7 +441,9 @@ private fun ChatTopBar(
                         }
                     } else {
                         Text(
-                            session?.kind?.takeIf { it.isNotBlank() } ?: sessionKey,
+                            subtitleOverride
+                                ?: session?.kind?.takeIf { it.isNotBlank() }
+                                ?: sessionKey,
                             style = InkTheme.type.textXs,
                             color = InkTheme.colors.textTertiary,
                             maxLines = 1,
@@ -468,6 +517,22 @@ private fun DayHeaderRow(atMs: Long) {
             style = InkTheme.type.textXs,
             color = InkTheme.colors.textTertiary,
             modifier = Modifier.padding(vertical = 6.dp),
+        )
+    }
+}
+
+/** conversation 分区头（M4 P3）：新开主 session 的延续标记，居中小胶囊。 */
+@Composable
+private fun BoundaryRow(label: String) {
+    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Text(
+            label,
+            style = InkTheme.type.textXs,
+            color = InkTheme.colors.textTertiary,
+            modifier = Modifier
+                .clip(RoundedCornerShape(10.dp))
+                .background(InkTheme.colors.surfaceTertiary)
+                .padding(horizontal = 10.dp, vertical = 3.dp),
         )
     }
 }

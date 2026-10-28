@@ -31,7 +31,17 @@ sealed interface ChatRow {
      * 组；RUNNING 的工具永远独立成行（「收起时仅显示正在执行的工具」语义）。
      */
     data class ToolGroup(val items: List<ToolCallEvent>, val key: String) : ChatRow
+
+    /** conversation 时间线的 session 分区头（M4 P3：新开主 session 的延续标记）。 */
+    data class Boundary(val sessionKey: String, val label: String) : ChatRow
 }
+
+/** 拼接时间线的分区输入（与 AppModel 解耦的纯数据，便于单测）。 */
+data class TimelineSection(
+    val key: String,
+    val label: String?,
+    val entries: List<ChatEntry>,
+)
 
 /**
  * 条目序列 → 带日分隔的行序列：相邻两条已知时间戳的消息跨日时插入分隔头；
@@ -116,6 +126,26 @@ fun dayHeaderLabel(atMs: Long, zone: TimeZone = TimeZone.currentSystemDefault())
         date.year != today.year -> "${date.year}年${date.monthNumber}月${date.dayOfMonth}日"
         else -> "${date.monthNumber}月${date.dayOfMonth}日"
     }
+}
+
+/**
+ * conversation 拼接时间线（M4 P3）：多个主 session 的时间线按「最旧在最上」拼接，
+ * 每个 session 以 [ChatRow.Boundary] 分区头开头（label = 创建时的会话 label；
+ * 常驻 main 无 label 时兜底「常驻对话」）。单 session 内部沿用 [buildChatRows]。
+ * 入参 sections 为最近活跃**降序**（index 0 = 当前锚定 session）。
+ */
+fun buildConversationRows(
+    sections: List<TimelineSection>,
+    zone: TimeZone = TimeZone.currentSystemDefault(),
+): List<ChatRow> {
+    val rows = mutableListOf<ChatRow>()
+    sections.asReversed().forEach { s ->
+        val label = s.label?.takeIf { it.isNotBlank() }
+            ?: if (s.key.endsWith(":main")) "常驻对话" else s.key.substringAfterLast(':')
+        rows += ChatRow.Boundary(sessionKey = s.key, label = label)
+        rows += buildChatRows(s.entries, zone)
+    }
+    return rows
 }
 
 private fun dateOf(ms: Long, zone: TimeZone): LocalDate =

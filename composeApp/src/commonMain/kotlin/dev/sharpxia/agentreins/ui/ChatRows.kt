@@ -34,6 +34,9 @@ sealed interface ChatRow {
 
     /** conversation 时间线的 session 分区头（M4 P3：新开主 session 的延续标记）。 */
     data class Boundary(val sessionKey: String, val label: String) : ChatRow
+
+    /** 压缩上下文标记（M4 P4：sessions.compact 成功后在该 session 区尾渲染）。 */
+    data class CompactMark(val sessionKey: String, val atMs: Long) : ChatRow
 }
 
 /** 拼接时间线的分区输入（与 AppModel 解耦的纯数据，便于单测）。 */
@@ -137,6 +140,7 @@ fun dayHeaderLabel(atMs: Long, zone: TimeZone = TimeZone.currentSystemDefault())
 fun buildConversationRows(
     sections: List<TimelineSection>,
     zone: TimeZone = TimeZone.currentSystemDefault(),
+    compactMarks: Map<String, Long> = emptyMap(),
 ): List<ChatRow> {
     val rows = mutableListOf<ChatRow>()
     sections.asReversed().forEach { s ->
@@ -144,6 +148,7 @@ fun buildConversationRows(
             ?: if (s.key.endsWith(":main")) "常驻对话" else s.key.substringAfterLast(':')
         rows += ChatRow.Boundary(sessionKey = s.key, label = label)
         rows += buildChatRows(s.entries, zone)
+        compactMarks[s.key]?.let { rows += ChatRow.CompactMark(sessionKey = s.key, atMs = it) }
     }
     return rows
 }

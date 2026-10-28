@@ -987,7 +987,7 @@ class AppModel(
     var creatingSession by mutableStateOf(false)
         private set
 
-    fun createNewSession(agentId: String) {
+    fun createNewSession(agentId: String, stayInConversation: Boolean = false) {
         if (creatingSession) return
         val c = client ?: run { lastError = "未连接网关，无法新建会话"; return }
         val ts = epochMs()
@@ -1010,6 +1010,9 @@ class AppModel(
                         selectedSession = newKey
                         openConversation(c, newKey)
                     }
+                // conversation 内新开：不跳路由——时间线经 refreshConvSections 追加分区，
+                // 输入锚定随 select 切到新主 session（M4 需求 D3-①）
+                if (stayInConversation) return@launch
                 // 导航经事件流（主线程消费），不再从 Default 协程直调 navigate（毁导航栈）
                 if (!navigationEvents.tryEmit(newKey)) {
                     lastError = "会话已创建，但跳转失败——请从列表进入"
@@ -1020,6 +1023,44 @@ class AppModel(
                 creatingSession = false
             }
         }
+    }
+
+    // ---- M4 P4：对话内操作（工具栏动作列表三动作） ----
+
+    /** 压缩标记（sessionKey → 时刻）：时间线在该区尾渲染「已压缩上下文」。 */
+    var compactMarks by mutableStateOf<Map<String, Long>>(emptyMap())
+        private set
+
+    /** 对话内新开主 session（工具栏动作①）：不跳路由，同屏追加分区头。 */
+    fun createSessionInConversation() {
+        val agentId = convAgentId ?: return
+        createNewSession(agentId, stayInConversation = true)
+    }
+
+    /** 压缩当前主 session 上下文（工具栏动作②；admin scope 不足时诚实报错）。 */
+    fun compactContext() {
+        val key = selectedSession ?: return
+        val c = client ?: run { lastError = "未连接网关，无法压缩上下文"; return }
+        scope.launch {
+            try {
+                c.compact(key)
+                compactMarks = compactMarks + (key to epochMs())
+            } catch (e: GatewayRpcException) {
+                lastError = if (e.code == "FORBIDDEN" || e.message?.contains("scope") == true) {
+                    "压缩上下文需要网关 admin 权限，当前连接不支持（协议 scope 限制）"
+                } else {
+                    "压缩失败：${e.message}"
+                }
+            } catch (e: Exception) {
+                lastError = "压缩失败：${e.message}"
+            }
+        }
+    }
+
+    /** 当前 agent 状态指令（工具栏动作③）：预置 prompt 按普通消息发入当前主 session。 */
+    fun sendAgentStatusPrompt() {
+        val key = selectedSession ?: return
+        sendText(key, AGENT_STATUS_PROMPT)
     }
 
     /** 新会话列表标题 `新会话 MM-dd HH:mm:ss`：网关不自动起标题，缺 label 时列表落到 key 尾段。 */
@@ -1137,6 +1178,10 @@ class AppModel(
 
         /** conversation 级 overlay 的 kv 槽位（M4 P2）。 */
         const val CONV_OVERLAY_KEY = "conversationOverlay:v1"
+
+        /** 「当前 agent 状态」预置指令（M4 P4 工具栏动作③；协议无专用状态 RPC）。 */
+        const val AGENT_STATUS_PROMPT =
+            "请汇报你当前的状态：正在执行的任务、已派发的 subagent、待办事项。"
 
         /** 外观偏好 kv 槽位（M3.1）。 */
         const val THEME_KEY = "appearance:v1"

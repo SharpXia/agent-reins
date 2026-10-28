@@ -150,6 +150,11 @@ class OpenClawClient(
     private val _sessionActivity = MutableSharedFlow<String>(extraBufferCapacity = 64)
     val sessionActivity: SharedFlow<String> = _sessionActivity.asSharedFlow()
 
+    /** 全局在途 run 的 sessionKey 集（M4 P5；operator 收全量广播——含派生 subagent 会话），
+     *  conversation 行内「执行中/已派发」按此判定。 */
+    private val _activeRuns = MutableStateFlow<Set<String>>(emptySet())
+    val activeRuns: StateFlow<Set<String>> = _activeRuns.asStateFlow()
+
     /** 待补发队列条数（PENDING+SENT 未退休）。 */
     private val _outboxPendingCount = MutableStateFlow(0)
     val outboxPendingCount: StateFlow<Int> = _outboxPendingCount.asStateFlow()
@@ -733,6 +738,17 @@ class OpenClawClient(
         return res.str("key") ?: key
     }
 
+    /**
+     * 压缩会话上下文（sessions.compact {sessionKey}）。⚠️ 探针实锤（2026-10-29）：
+     * 要求 operator.admin scope——普通 operator 连接返回 FORBIDDEN/MISSING_SCOPE，
+     * 调用方须按错误码转译为可见提示（M4 需求 §7）。
+     */
+    suspend fun compact(sessionKey: String): JsonObject =
+        rpc(
+            "sessions.compact",
+            buildJsonObject { put("sessionKey", sessionKey) },
+        )
+
     // ---- M3.6：服务端全文搜索（探针实锤：{query, limit?} → {results:[…]}） ----
 
     /**
@@ -926,9 +942,16 @@ class OpenClawClient(
         val flow = mutex.withLock { flowForUnlocked(key) }
         flow.value = AgentEventParser.apply(flow.value, decoded)
         _sessionActivity.emit(key)
-        // run 终局后回填 transcript：工具参数/结果只在 chat.history 里，事件态仅含耗时
-        if (decoded is AgentEventParser.AgentStreamEvent.Lifecycle && decoded.phase == "end") {
-            scheduleBackfill(key, HISTORY_RELOAD_DELAY)
+        if (decoded is AgentEventParser.AgentStreamEvent.Lifecycle) {
+            // 全局在途 run 追踪（M4 P5）：含派生 subagent 会话——conversation 行内状态数据源
+            when (decoded.phase) {
+                "start" -> _activeRuns.value = _activeRuns.value + key
+                "end" -> _activeRuns.value = _activeRuns.value - key
+            }
+            // run 终局后回填 transcript：工具参数/结果只在 chat.history 里，事件态仅含耗时
+            if (decoded.phase == "end") {
+                scheduleBackfill(key, HISTORY_RELOAD_DELAY)
+            }
         }
     }
 

@@ -143,8 +143,9 @@ internal fun ChatScreen(
             }
         }
     }
-    // 拼接模式：全部区的内容签名（任一区变化才重建整表）
-    val timelineSignature = remember(timeline) {
+    // 拼接模式：全部区的内容签名（任一区变化才重建整表）；压缩标记也进签名
+    val compactMarks = model.compactMarks
+    val timelineSignature = remember(timeline, compactMarks) {
         timeline?.joinToString("|") { s ->
             val e = s.state?.entries ?: emptyList()
             buildString {
@@ -152,6 +153,7 @@ internal fun ChatScreen(
                 append(':'); append(e.firstOrNull()?.id)
                 append(':'); append(e.lastOrNull()?.id)
                 append(':'); append((e.lastOrNull() as? Message)?.content?.length ?: 0)
+                append(';'); append(compactMarks[s.key] ?: 0L)
                 e.filterIsInstance<ToolCallEvent>().forEach {
                     append(':'); append(it.id); append('='); append(it.state.name)
                 }
@@ -163,7 +165,10 @@ internal fun ChatScreen(
     }
     val rows = if (timeline != null) {
         remember(timelineSignature) {
-            buildConversationRows(timeline.map { TimelineSection(it.key, it.label, it.state?.entries ?: emptyList()) })
+            buildConversationRows(
+                timeline.map { TimelineSection(it.key, it.label, it.state?.entries ?: emptyList()) },
+                compactMarks = compactMarks,
+            )
         }
     } else {
         remember(rowsSignature) { buildChatRows(currentEntries) }
@@ -261,6 +266,24 @@ internal fun ChatScreen(
             titleOverride = convTitle,
             subtitleOverride = convSubtitle,
         )
+        // 错误可见面（M4 P4：压缩上下文等 RPC 失败在对话页也要可见，点击清除）
+        model.lastError?.let { err ->
+            Surface(
+                color = InkTheme.colors.danger.subtle,
+                shape = RoundedCornerShape(InkTheme.shapes.md.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                    .clickable { model.lastError = null },
+            ) {
+                Text(
+                    err,
+                    style = InkTheme.type.textSm,
+                    color = InkTheme.colors.danger.text,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                )
+            }
+        }
         if (showStartFresh) {
             StartFreshDialog(
                 onConfirm = {
@@ -312,6 +335,7 @@ internal fun ChatScreen(
                         is ChatRow.Entry -> row.entry.id
                         is ChatRow.ToolGroup -> row.key
                         is ChatRow.Boundary -> "bnd-${row.sessionKey}"
+                        is ChatRow.CompactMark -> "cmp-${row.sessionKey}"
                     }
                 }) { index, row ->
                     // 入场动画只给「最新一条 + 活跃 run/流式中」：分页前插与已加载内容零动画
@@ -333,6 +357,7 @@ internal fun ChatScreen(
                         when (row) {
                             is ChatRow.DayHeader -> DayHeaderRow(row.atMs)
                             is ChatRow.Boundary -> BoundaryRow(row.label)
+                            is ChatRow.CompactMark -> CompactMarkRow(row.atMs)
                             is ChatRow.Entry -> when (val entry = row.entry) {
                                 is ToolCallEvent -> ToolCallCard(entry)
                                 is ThinkingEntry -> ThinkingCard(entry)
@@ -529,6 +554,23 @@ private fun BoundaryRow(label: String) {
             label,
             style = InkTheme.type.textXs,
             color = InkTheme.colors.textTertiary,
+            modifier = Modifier
+                .clip(RoundedCornerShape(10.dp))
+                .background(InkTheme.colors.surfaceTertiary)
+                .padding(horizontal = 10.dp, vertical = 3.dp),
+        )
+    }
+}
+
+/** 压缩上下文标记（M4 P4）：sessions.compact 成功的本地可视痕迹。 */
+@Composable
+private fun CompactMarkRow(atMs: Long) {
+    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Text(
+            "已压缩上下文 · " + formatRelativeTime(atMs),
+            style = InkTheme.type.textXs,
+            color = InkTheme.colors.textTertiary,
+            fontStyle = FontStyle.Italic,
             modifier = Modifier
                 .clip(RoundedCornerShape(10.dp))
                 .background(InkTheme.colors.surfaceTertiary)
@@ -970,6 +1012,9 @@ private fun ChatInputBar(model: AppModel, haptics: HapticPlayer, modifier: Modif
                 keyboardActions = KeyboardActions(onSend = { haptics.tap(); model.send() }),
             )
             Spacer(Modifier.size(6.dp))
+            // 对话操作（M4 P4）：发送键左侧矢量 icon → 三动作（新开会话/压缩上下文/agent 状态）
+            ComposerActions(model = model, haptics = haptics)
+            Spacer(Modifier.size(2.dp))
             // 发送/停止态切换：run 进行中优先停止
             if (runActive) {
                 StopButton(haptics = haptics, onStop = { model.stopRun() })
@@ -1020,5 +1065,63 @@ private fun StopButton(haptics: HapticPlayer, onStop: () -> Unit) {
                 .size(12.dp)
                 .background(c.paper, RoundedCornerShape(2.dp)),
         )
+    }
+}
+
+/**
+ * Composer 动作入口（M4 P4 需求 D3）：发送按钮左侧自绘矢量 icon（ArIcons.Tune），
+ * 点击弹 DropdownMenu（真机验证过的弹层；ModalBottomSheet 在抽屉层级内点击不可靠是
+ * 0.2.15 实锤坑）。动作 v1：新开会话（对话内不跳路由）/ 压缩上下文 / 当前 agent 状态。
+ */
+@Composable
+private fun ComposerActions(model: AppModel, haptics: HapticPlayer) {
+    val c = InkTheme.colors
+    Box {
+        var open by remember { mutableStateOf(false) }
+        Box(
+            Modifier
+                .padding(bottom = 6.dp)
+                .size(34.dp)
+                .clip(CircleShape)
+                .background(c.surfaceTertiary)
+                .clickable {
+                    haptics.tap()
+                    open = true
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                ArIcons.Tune,
+                contentDescription = "对话操作",
+                tint = c.textSecondary,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(
+                text = { Text("新开会话", style = InkTheme.type.textMd, color = c.ink) },
+                leadingIcon = { Icon(ArIcons.Retry, contentDescription = null, modifier = Modifier.size(18.dp), tint = c.textTertiary) },
+                onClick = {
+                    open = false
+                    if (model.convAgentId != null) model.createSessionInConversation() else model.startFresh()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("压缩上下文", style = InkTheme.type.textMd, color = c.ink) },
+                leadingIcon = { Icon(ArIcons.Compress, contentDescription = null, modifier = Modifier.size(18.dp), tint = c.textTertiary) },
+                onClick = {
+                    open = false
+                    model.compactContext()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("当前 agent 状态", style = InkTheme.type.textMd, color = c.ink) },
+                leadingIcon = { Icon(ArIcons.Tune, contentDescription = null, modifier = Modifier.size(18.dp), tint = c.textTertiary) },
+                onClick = {
+                    open = false
+                    model.sendAgentStatusPrompt()
+                },
+            )
+        }
     }
 }

@@ -77,6 +77,7 @@ object Routes {
     const val AGENT = "agent/{agentId}"
     const val CONNECTION = "connection"
     const val THEME_DEMO = "themeDemo"
+    const val SETTINGS_SOUNDS = "settings/sounds"
 
     fun chat(sessionKey: String) = "chat/${encodeSegment(sessionKey)}"
     fun agent(agentId: String) = "agent/${encodeSegment(agentId)}"
@@ -119,10 +120,22 @@ fun AppRoot(model: AppModel) {
     // 对话域（chat 路由）隐藏底栏——一级导航不进对话（M2.6 真机反馈）
     val chatMode = currentRoute == Routes.CHAT
 
+    // Onboarding-lite：从未连接过的全新安装先过引导页（存有凭据的升级用户直接进主界面）。
+    // 引导域不进 NavHost（此时主图尚未挂载）——连接页由引导页内部状态切换。
+    if (model.showOnboarding) {
+        OnboardingScreen(model = model)
+        return
+    }
+
     Scaffold(
         containerColor = InkTheme.colors.paper,
         bottomBar = {
-            if (!imeVisible && !chatMode) {
+            // 键盘/对话域滑出底栏（M3.6 过场细节：跟随动效而非硬切）
+            androidx.compose.animation.AnimatedVisibility(
+                visible = !imeVisible && !chatMode,
+                enter = androidx.compose.animation.slideInVertically { it } + androidx.compose.animation.fadeIn(),
+                exit = androidx.compose.animation.slideOutVertically { it } + androidx.compose.animation.fadeOut(),
+            ) {
                 InkBottomBar(navController, currentRoute)
             }
         },
@@ -147,16 +160,21 @@ fun AppRoot(model: AppModel) {
             },
         ) {
             composable(Routes.TAB_SESSIONS) {
-                // dev 通道自动进会话（desktop/iOS 壳 devAutoSelectKey）：M3.1 起 select()
-                // 不驱动路由；放在图内组合保证 NavController 就绪（冷启动 navigate 崩修复）
+                // dev 通道自动进会话（desktop/iOS 壳 devAutoSelectKey）+ Onboarding 直达
+                // （autoOpenKey）：M3.1 起 select() 不驱动路由；放在图内组合保证
+                // NavController 就绪（冷启动 navigate 崩修复）。消费后清 autoOpenKey，
+                // 防从 chat 返回列表时被再次吸进同一会话。
                 LaunchedEffect(Unit) {
                     snapshotFlow { model.selectedSession }
                         .filterNotNull()
                         .take(1)
                         .collect { key ->
-                            if (key == model.devAutoSelectKey) {
+                            if (key == model.devAutoSelectKey || key == model.autoOpenKey) {
                                 navController.navigate(Routes.chat(key))
                             }
+                            // 无论匹配与否都消费（review R3-P2-3）：用户抢先手动进会话时
+                            // autoOpenKey 会搁浅，之后断线重连被陈旧重放
+                            model.consumeAutoOpen()
                         }
                 }
                 SessionsScreen(
@@ -183,10 +201,14 @@ fun AppRoot(model: AppModel) {
                     model = model,
                     onOpenConnection = { navController.navigate(Routes.CONNECTION) },
                     onOpenThemeDemo = { navController.navigate(Routes.THEME_DEMO) },
+                    onOpenSounds = { navController.navigate(Routes.SETTINGS_SOUNDS) },
                 )
             }
             composable(Routes.THEME_DEMO) {
                 dev.sharpxia.agentreins.ui.components.ThemeDemoScreen()
+            }
+            composable(Routes.SETTINGS_SOUNDS) {
+                SoundsSettingsScreen(model, onBack = { navController.popBackStack() })
             }
             composable(Routes.CHAT) { entry ->
                 val key = entry.arguments?.read { getStringOrNull("sessionKey") } ?: ""
@@ -214,10 +236,18 @@ fun AppRoot(model: AppModel) {
 /** 墨水风底栏（毛玻璃 M3.6 接 haze）。 */
 @Composable
 private fun InkBottomBar(navController: NavHostController, currentRoute: String?) {
+    // 二级页归属来源 tab 的选中态（review R2-P0-1）：settings/sounds、themeDemo、
+    // connection 都从设置域推入，底栏不能全灰丢锚点。
+    val selectedRoute = when (currentRoute) {
+        Routes.TAB_SESSIONS, Routes.TAB_AGENTS, Routes.TAB_SEARCH, Routes.TAB_SETTINGS -> currentRoute
+        Routes.SETTINGS_SOUNDS, Routes.THEME_DEMO, Routes.CONNECTION -> Routes.TAB_SETTINGS
+        Routes.AGENT -> Routes.TAB_AGENTS // review R3-P2-9：agent 详情页锚回 Agents tab
+        else -> null
+    }
     NavigationBar(containerColor = InkTheme.colors.elevated) {
         TABS.forEach { tab ->
             NavigationBarItem(
-                selected = currentRoute == tab.route,
+                selected = selectedRoute == tab.route,
                 onClick = {
                     navController.navigate(tab.route) {
                         popUpTo(Routes.TAB_SESSIONS) { saveState = true }

@@ -12,11 +12,13 @@ private class IosHapticPlayer : HapticPlayer {
     private val notify = UINotificationFeedbackGenerator()
 
     override fun tap() {
+        if (!FeedbackPrefs.hapticsEnabled.value) return // M3.6 设置页开关门控
         impact.prepare()
         impact.impactOccurred()
     }
 
     override fun success() {
+        if (!FeedbackPrefs.hapticsEnabled.value) return
         notify.prepare()
         notify.notificationOccurred(UINotificationFeedbackType.UINotificationFeedbackTypeSuccess)
     }

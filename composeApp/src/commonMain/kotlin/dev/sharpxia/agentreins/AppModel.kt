@@ -15,8 +15,12 @@ import dev.sharpxia.agentreins.openclaw.ConnectionStore
 import dev.sharpxia.agentreins.openclaw.GatewayRpcException
 import dev.sharpxia.agentreins.openclaw.OpenClawClient
 import dev.sharpxia.agentreins.openclaw.Outbox
+import dev.sharpxia.agentreins.openclaw.SearchHit
 import dev.sharpxia.agentreins.openclaw.SessionOverlay
 import dev.sharpxia.agentreins.openclaw.StoredConnection
+import dev.sharpxia.agentreins.ui.AppSound
+import dev.sharpxia.agentreins.ui.FeedbackPrefs
+import dev.sharpxia.agentreins.ui.createSoundPlayer
 import dev.sharpxia.agentreins.ui.theme.AgentTintName
 import dev.sharpxia.agentreins.ui.theme.ThemeMode
 import dev.sharpxia.agentreins.crypto.secureRandomBytes
@@ -28,6 +32,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.concurrent.Volatile
 
 /**
  * 连接配置 + 网关客户端生命周期 + 会话/对话流状态。
@@ -93,6 +98,35 @@ class AppModel(
     var pendingApproval by mutableStateOf<ApprovalRequest?>(null)
         private set
 
+    // ---- M3.6：Onboarding-lite（首次连接 → 直达主会话） ----
+    /** 引导完成标记（kv 持久化）。已有存量连接的老用户（beta-0.2.7 升级）仅首连补一次直达。 */
+    var onboardingDone by mutableStateOf(false)
+        private set
+
+    /** 首次连接成功后要直达的会话键（主会话），Nav 层据它 navigate 到 chat。 */
+    var autoOpenKey by mutableStateOf<String?>(null)
+        private set
+
+    /** 待「直达主会话」判定（连接成功置位，第一份非空列表消费）。 */
+    private var pendingFirstOpen = false
+
+    /**
+     * 引导页退出条件用「构造期一次性事实」而非活值（review R1-P1-1）： ConnectionStore
+     * 只在连接成功后落盘，故「构造时有无存档连接」即「是否全新安装」。
+     * 若用 url/apiKey 活值判定，用户在引导内连接页打下第一个字符就会被弹回空列表。
+     */
+    private val hadStoredConnection = runCatching { ConnectionStore.load() }.getOrNull() != null
+
+    /** 是否展示引导页：从未完成引导且非存量升级用户。 */
+    val showOnboarding: Boolean
+        get() = !onboardingDone && !hadStoredConnection
+
+    /** M3.6 服务端搜索最近一次结果（Search tab 渲染；null=未搜或失败）。 */
+    var searchHits by mutableStateOf<List<SearchHit>>(emptyList())
+        private set
+    var searching by mutableStateOf(false)
+        private set
+
     /** 草稿（per-session 持久化到 kv，500ms 去抖）。 */
     private val draftState = mutableStateOf("")
     var draft: String
@@ -105,6 +139,15 @@ class AppModel(
     /** 本地缓存（M2.5 数据基座）。driver 不可用时 Noop 降级，全部能力退化为无缓存。 */
     private val cache: CacheStore = SqlCacheStore.open(createAppDriver())
     private val gatewayId = SqlCacheStore.DEFAULT_GATEWAY_ID
+
+    /** M3.6 音效播放（iOS 真声，其余平台 no-op）。事件挂点：连接成功/新回复/审批请求。 */
+    private val sounds = createSoundPlayer()
+
+    /** 通知音按会话防抖（流式 run 每条 delta 一次 activity，逐事件响铃不可闻）。 */
+    private val soundGates = mutableMapOf<String, Long>()
+
+    /** 连接成功 BLIP 每次应用运行只响一声；用户显式断开后重连再响（review R1-P2-8）。 */
+    private var connectChimed = false
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var client: OpenClawClient? = null
@@ -182,6 +225,24 @@ class AppModel(
         runCatching { cache.kvPut(gatewayId, THEME_KEY, mode.name) }
     }
 
+    /** 触感开关（M3.6 设置页；kv 持久化，平台 actual 门控时读取）。 */
+    fun toggleHaptics(enabled: Boolean) {
+        FeedbackPrefs.hapticsEnabled.value = enabled
+        persistFeedbackPrefs()
+    }
+
+    /** 通知音（新回复）选择；null = 静音。 */
+    fun setNotificationSound(sound: AppSound?) {
+        FeedbackPrefs.notificationSound.value = sound
+        persistFeedbackPrefs()
+    }
+
+    private fun persistFeedbackPrefs() {
+        val s = FeedbackPrefs.notificationSound.value
+        val raw = "h=${if (FeedbackPrefs.hapticsEnabled.value) "1" else "0"};s=${s?.name ?: "none"}"
+        runCatching { cache.kvPut(gatewayId, FEEDBACK_KEY, raw) }
+    }
+
     private fun upsertAgent(agentId: String, transform: (AgentProfile) -> AgentProfile) {
         val current = agentProfiles[agentId] ?: AgentProfile.default(agentId)
         agentProfiles = agentProfiles + (agentId to transform(current))
@@ -220,6 +281,19 @@ class AppModel(
         themeMode = runCatching { cache.kvGet(gatewayId, THEME_KEY) }.getOrNull()
             ?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() } ?: ThemeMode.SYSTEM
         approvalsEnabled = runCatching { cache.kvGet(gatewayId, APPROVALS_KEY) }.getOrNull() == "1"
+        // M3.6 反馈偏好与引导标记
+        runCatching { cache.kvGet(gatewayId, FEEDBACK_KEY) }.getOrNull()?.let { raw ->
+            val parts = raw.split(';').mapNotNull {
+                val idx = it.indexOf('=')
+                if (idx <= 0) null else it.take(idx) to it.substring(idx + 1)
+            }.toMap()
+            FeedbackPrefs.hapticsEnabled.value = parts["h"] != "0"
+            FeedbackPrefs.notificationSound.value =
+                parts["s"]?.takeIf { it != "none" }?.let { name ->
+                    AppSound.entries.firstOrNull { it.name == name }
+                }
+        }
+        onboardingDone = runCatching { cache.kvGet(gatewayId, ONBOARDING_KEY) }.getOrNull() == "1"
         // iOS 进后台 WS 必死：回前台自动用已存配置重连（显式断开除外）
         scope.launch {
             appForegroundEvents.collect {
@@ -313,6 +387,9 @@ class AppModel(
         lastError = null
         explicitDisconnect = false
         connectedUrl = null
+        // 直达判定必须早于 connect()（review R1-P1-2）：refreshSessions 在 connect 返回前
+        // 就把首份列表写进 StateFlow，置位晚了首份发射已被消费、StateFlow 不再发射时直达静默失效
+        if (!onboardingDone) pendingFirstOpen = true
         autoRetryJob?.cancel() // 手动/重入连接优先，别让在途退避重试插进来
         // 旧客户端先收尾（重连场景）：WS 任务与 HttpClient 不能泄漏
         val old = client
@@ -327,23 +404,49 @@ class AppModel(
         statusJob = scope.launch { c.status.collect { status = it } }
         approvalsJob?.cancel()
         approvalsJob = scope.launch {
-            c.approvals.collect { if (approvalsEnabled) pendingApproval = it }
+            c.approvals.collect { req ->
+                if (approvalsEnabled) {
+                    val isNew = pendingApproval == null
+                    pendingApproval = req
+                    if (isNew) sounds.play(AppSound.CHIME_A) // 审批是关键事件，固定音不受通知音静音影响
+                }
+            }
         }
         sessionsJob = scope.launch {
             c.sessions.collect { list ->
                 rawSessions = list
                 publishSessions()
+                // 通知音防抖表随列表修剪，不随会话消失无限增长（review R3-P2-4）
+                soundGates.keys.retainAll(list.mapTo(mutableSetOf()) { it.id })
+                // Onboarding-lite「直达主会话」：首次连接后的第一份非空列表即挑主会话。
+                // dev 通道有自己的目标会话，不抢（review R1-P2-5）。
+                if (pendingFirstOpen && list.isNotEmpty() && devAutoSelectKey == null) {
+                    pendingFirstOpen = false
+                    autoOpenKey = (list.firstOrNull { it.id == MAIN_SESSION_KEY } ?: list.firstOrNull())?.id
+                    autoOpenKey?.let { k -> list.firstOrNull { it.id == k }?.let { select(it) } }
+                }
                 // Dev 直连：列表就绪后自动打开目标会话
-                val auto = devAutoSelectKey
+                val auto = devAutoSelectKey ?: autoOpenKey
                 if (auto != null && selectedSession == null) {
                     list.firstOrNull { it.id == auto }?.let { select(it) }
                 }
             }
         }
-        // 非当前会话的 agent 事件 → 未读 +1（A8 叠加）；当前会话不计数
+        // 非当前会话的 agent 事件 → 未读 +1（A8 叠加）+ 通知音（M3.6，3s 防抖：
+        // 流式 run 每条 delta 都发 activity，逐事件响铃会哒哒连响——review R1-P1-3）。
+        // 当前会话不计数不出声。
         activityJob = scope.launch {
             c.sessionActivity.collect { key ->
-                if (key != selectedSession) c.incrementUnread(key)
+                if (key != selectedSession) {
+                    c.incrementUnread(key)
+                    FeedbackPrefs.notificationSound.value?.let { sound ->
+                        val now = epochMs()
+                        if (now - (soundGates[key] ?: 0L) > SOUND_DEBOUNCE_MS) {
+                            soundGates[key] = now
+                            sounds.play(sound)
+                        }
+                    }
+                }
             }
         }
         outboxJob = scope.launch {
@@ -387,6 +490,16 @@ class AppModel(
                     ?: throw (lastTransportError ?: IllegalStateException("connect failed"))
                 connectedUrl = connected
                 resetAutoRetry() // 连上了，退避重试收队
+                if (!connectChimed) {
+                    sounds.play(AppSound.BLIP) // 连接成功提示音（M3.6 固定音；弱网自动重连不连响）
+                    connectChimed = true
+                }
+                // Onboarding-lite：首次连接（含老用户升级后首连）即完成标记并预告直达主会话
+                if (!onboardingDone) {
+                    onboardingDone = true
+                    runCatching { cache.kvPut(gatewayId, ONBOARDING_KEY, "1") }
+                    pendingFirstOpen = true // 列表到达后由 sessions collector 挑主会话
+                }
                 // 扫码/连接成功即记住本次配置与设备凭证（M1 存 Documents，M3 迁 Keychain）
                 // 主地址保持用户输入/QR 主地址（到家优先 LAN），备用列表原样保存
                 deviceToken = c.deviceToken ?: deviceToken
@@ -476,6 +589,27 @@ class AppModel(
         val c = client ?: return
         c.clearUnread(session.id)
         openConversation(c, session.id)
+    }
+
+    /** 按会话键直达（服务端搜索命中本地列表没有的会话时）：与 select 同语义。 */
+    fun openSessionByKey(sessionKey: String) {
+        sessions.firstOrNull { it.id == sessionKey }?.let { return select(it) }
+        selectedSession?.let { old ->
+            draftPersistJob?.cancel()
+            runCatching { cache.kvPut(gatewayId, draftKey(old), draftState.value) }
+        }
+        selectedSession = sessionKey
+        conversation = null
+        conversationJob?.cancel()
+        conversationJob = null
+        queuedCount = runCatching {
+            cache.loadOutbox(gatewayId).count { it.sessionKey == sessionKey }
+        }.getOrDefault(0)
+        refreshPendingOutbox()
+        draftState.value = runCatching { cache.kvGet(gatewayId, draftKey(sessionKey)) }.getOrNull() ?: ""
+        val c = client ?: return
+        c.clearUnread(sessionKey)
+        openConversation(c, sessionKey)
     }
 
     /** 当前会话 PENDING 待发命令快照（聊天页「未发出」气泡的数据源）。 */
@@ -690,10 +824,51 @@ class AppModel(
         publishSessions()
     }
 
+    // ---- M3.6：服务端搜索（sessions.search）+ 直达消费 ----
+
+    /** UI 自增、结果协程比对（review R1-P2-1：跨线程普通 var 无可见性保证）。 */
+    @Volatile
+    private var searchSeq = 0
+
+    /**
+     * 服务端消息全文搜索（sessions.search，M3.6 探针证实 {query,limit} 可用）。
+     * 结果只在高频词连续请求的最后一次生效（seq 防乱序回填）；失败静默清空——
+     * 搜索页同时有客户端会话过滤结果，服务端失败不该打断主路径。
+     */
+    fun searchServer(query: String) {
+        val q = query.trim()
+        val c = client
+        if (q.length < 2 || c == null) {
+            searchSeq++
+            searchHits = emptyList()
+            searching = false
+            return
+        }
+        val seq = ++searchSeq
+        searching = true
+        searchHits = emptyList() // 新查询先清旧命中，RTT 窗口内不展示陈旧片段（review R3-P2-6）
+        scope.launch {
+            try {
+                val hits = c.searchSessions(q)
+                if (seq == searchSeq) searchHits = hits
+            } catch (e: Exception) {
+                if (seq == searchSeq) searchHits = emptyList()
+            } finally {
+                if (seq == searchSeq) searching = false
+            }
+        }
+    }
+
+    /** Nav 层消费完直达跳转后清除，防返回列表时被再次吸进会话。 */
+    fun consumeAutoOpen() {
+        autoOpenKey = null
+    }
+
     fun disconnect() {
         explicitDisconnect = true
         connectedUrl = null
         resetAutoRetry() // 用户主动断开不自动重连
+        connectChimed = false // 下次手动重连再给一声 BLIP
         scope.launch { client?.disconnect() }
         selectedSession = null
         conversation = null
@@ -726,7 +901,19 @@ class AppModel(
         /** 审批面板开关 kv 槽位（M3.5）。 */
         const val APPROVALS_KEY = "approvalsPanel:v1"
 
+        /** 反馈偏好 kv 槽位（M3.6）：`h=1|0;s=<AppSound>|none`。 */
+        const val FEEDBACK_KEY = "feedback:v1"
+
+        /** Onboarding 完成标记 kv 槽位（M3.6）。 */
+        const val ONBOARDING_KEY = "onboarding:v1"
+
+        /** 「主会话」键（直达目标；网关无该键时回落列表首个）。 */
+        const val MAIN_SESSION_KEY = "agent:main:main"
+
         /** 自动连接退避重试上限（2s→4s→8s→16s→32s，约 1 分钟窗口）。 */
         const val AUTO_RETRY_MAX_ATTEMPTS = 5
+
+        /** 非当前会话通知音防抖窗口（review R1-P1-3）。 */
+        const val SOUND_DEBOUNCE_MS = 3_000L
     }
 }

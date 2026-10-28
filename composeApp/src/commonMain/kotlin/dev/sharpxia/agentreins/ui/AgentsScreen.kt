@@ -3,6 +3,7 @@ package dev.sharpxia.agentreins.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,6 +47,7 @@ import dev.sharpxia.agentreins.ui.components.EmptyState
 import dev.sharpxia.agentreins.ui.components.SandCard
 import dev.sharpxia.agentreins.ui.components.SandSheet
 import dev.sharpxia.agentreins.ui.components.UnreadBadge
+import dev.sharpxia.agentreins.ui.components.sandPressFill
 import dev.sharpxia.agentreins.ui.theme.AgentTintColors
 import dev.sharpxia.agentreins.ui.theme.AgentTintName
 import dev.sharpxia.agentreins.ui.theme.AgentTintScope
@@ -101,11 +103,13 @@ fun AgentsScreen(
 private fun AgentSummaryRow(s: AgentSummary, onClick: () -> Unit) {
     AgentTintScope(s.profile.tint) {
         val tint = LocalAgentTint.current
+        val interaction = remember { MutableInteractionSource() }
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable(onClick = onClick)
+                .sandPressFill(interaction, 0)
+                .clickable(interactionSource = interaction, indication = null, onClick = onClick)
                 .padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
             AgentAvatar(tint, s.profile.name)
@@ -275,11 +279,11 @@ private fun AgentEditSheet(model: AppModel, agentId: String, onDismiss: () -> Un
             }
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.End) {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            TextButton(onClick = onDismiss) { Text("取消", color = InkTheme.colors.ink) }
             TextButton(onClick = {
                 model.setAgentName(agentId, name)
                 onDismiss()
-            }) { Text("保存") }
+            }) { Text("保存", color = InkTheme.colors.ink) }
         }
     }
 }
@@ -287,11 +291,13 @@ private fun AgentEditSheet(model: AppModel, agentId: String, onDismiss: () -> Un
 /** Agent 域内的会话行（M3.2 会与主列表行统一重绘）。 */
 @Composable
 private fun AgentSessionRow(session: Session, onClick: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .sandPressFill(interaction, 0)
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 11.dp),
     ) {
         Column(Modifier.weight(1f)) {

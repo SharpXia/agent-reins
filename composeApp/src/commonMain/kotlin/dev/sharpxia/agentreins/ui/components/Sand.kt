@@ -140,6 +140,47 @@ fun SectionHeader(
     )
 }
 
+/** 开关行（M3.6 触感/审批共用）：整行按压填充 + 尾部 Switch，墨水配色。 */
+@Composable
+fun SandToggleRow(
+    title: String,
+    subtitle: String?,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp), // 文本与 Switch 间距（review R2-P1-2）
+        modifier = modifier
+            .fillMaxWidth()
+            .defaultMinSize(minHeight = 44.dp)
+            .sandPressFill(interaction, 0)
+            .clickable(interactionSource = interaction, indication = null) { onCheckedChange(!checked) }
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = InkTheme.type.textLg, color = InkTheme.colors.ink)
+            if (subtitle != null) {
+                Text(
+                    subtitle,
+                    style = InkTheme.type.textXs,
+                    color = InkTheme.colors.textTertiary,
+                )
+            }
+        }
+        androidx.compose.material3.Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = androidx.compose.material3.SwitchDefaults.colors(
+                checkedTrackColor = InkTheme.colors.ink,
+                checkedThumbColor = InkTheme.colors.paper,
+            ),
+        )
+    }
+}
+
 /** Agent 标题胶囊（AgentTitlePill）：tint pill 底 + strong 文本。 */
 @Composable
 fun AgentTitlePill(

@@ -23,15 +23,17 @@ import dev.sharpxia.agentreins.ui.components.SandCard
 import dev.sharpxia.agentreins.ui.components.SectionHeader
 import dev.sharpxia.agentreins.ui.components.SandRow
 import dev.sharpxia.agentreins.ui.components.SandDivider
+import dev.sharpxia.agentreins.ui.components.SandToggleRow
 import dev.sharpxia.agentreins.ui.theme.InkTheme
 import dev.sharpxia.agentreins.ui.theme.ThemeMode
 
-/** 设置 tab（M3.1 首版：连接/外观/调试令牌页入口；M3.6 完整化为设置页族）。 */
+/** 设置 tab（M3.1 首版：连接/外观/调试令牌页入口；M3.6 完整化：提示音子页 + 触感开关）。 */
 @Composable
 fun SettingsScreen(
     model: AppModel,
     onOpenConnection: () -> Unit,
     onOpenThemeDemo: () -> Unit,
+    onOpenSounds: () -> Unit,
 ) {
     Column(
         Modifier
@@ -91,32 +93,31 @@ fun SettingsScreen(
                 if (index < ThemeMode.entries.lastIndex) SandDivider(indent = 24)
             }
         }
+        SectionHeader("提示音")
+        SandCard(Modifier.padding(horizontal = 16.dp)) {
+            SandRow(
+                title = "通知音",
+                subtitle = FeedbackPrefs.notificationSound.value?.label ?: "无",
+                onClick = onOpenSounds,
+            )
+        }
+        SectionHeader("触感")
+        SandCard(Modifier.padding(horizontal = 16.dp)) {
+            SandToggleRow(
+                title = "触感反馈",
+                subtitle = "发送、滑动操作与确认时的轻微振动（iOS）",
+                checked = FeedbackPrefs.hapticsEnabled.value,
+                onCheckedChange = { model.toggleHaptics(it) },
+            )
+        }
         SectionHeader("审批")
         SandCard(Modifier.padding(horizontal = 16.dp)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { model.toggleApprovals(!model.approvalsEnabled) }
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("审批面板", style = InkTheme.type.textLg, color = InkTheme.colors.ink)
-                    Text(
-                        "开启后连接会申请 approvals 权限（网关 owner 需重新批准一次设备）",
-                        style = InkTheme.type.textXs,
-                        color = InkTheme.colors.textTertiary,
-                    )
-                }
-                androidx.compose.material3.Switch(
-                    checked = model.approvalsEnabled,
-                    onCheckedChange = { model.toggleApprovals(it) },
-                    colors = androidx.compose.material3.SwitchDefaults.colors(
-                        checkedTrackColor = InkTheme.colors.ink,
-                        checkedThumbColor = InkTheme.colors.paper,
-                    ),
-                )
-            }
+            SandToggleRow(
+                title = "审批面板",
+                subtitle = "开启后连接会申请 approvals 权限（网关 owner 需重新批准一次设备）",
+                checked = model.approvalsEnabled,
+                onCheckedChange = { model.toggleApprovals(it) },
+            )
         }
         SectionHeader("调试")
         SandCard(Modifier.padding(horizontal = 16.dp)) {

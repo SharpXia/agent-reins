@@ -4,6 +4,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -50,6 +51,7 @@ import dev.sharpxia.agentreins.ui.components.ConnectionEmptyState
 import dev.sharpxia.agentreins.ui.components.SectionHeader
 import dev.sharpxia.agentreins.ui.components.SandSheet
 import dev.sharpxia.agentreins.ui.components.UnreadBadge
+import dev.sharpxia.agentreins.ui.components.sandPressFill
 import dev.sharpxia.agentreins.ui.theme.AgentTintName
 import dev.sharpxia.agentreins.ui.theme.AgentTintScope
 import dev.sharpxia.agentreins.ui.theme.InkTheme
@@ -182,7 +184,7 @@ private fun SessionList(
                 Text(
                     "全部已读",
                     style = InkTheme.type.textSm,
-                    color = InkTheme.colors.info.text,
+                    color = InkTheme.colors.ink, // 墨水双色基线（review R2-P1-9：info 蓝是第三种蓝）
                     modifier = Modifier
                         .clickable { haptics.tap(); model.markAllRead() }
                         .padding(horizontal = 10.dp, vertical = 8.dp),
@@ -368,11 +370,18 @@ private fun SessionRowContent(
     AgentTintScope(tintName) {
         val tint = LocalAgentTint.current
         val c = InkTheme.colors
+        val interaction = remember { MutableInteractionSource() }
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .fillMaxWidth()
-                .combinedClickable(onClick = onClick, onLongClick = { menuOpen = true })
+                .sandPressFill(interaction, 0)
+                .combinedClickable(
+                    interactionSource = interaction,
+                    indication = null,
+                    onClick = onClick,
+                    onLongClick = { menuOpen = true },
+                )
                 .padding(horizontal = 16.dp, vertical = 10.dp),
         ) {
             AgentAvatar(tint, session.title ?: session.id)
@@ -404,14 +413,15 @@ private fun SessionRowContent(
                         color = c.ink,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
+                        // weight 占满余量、时间钉右缘（review R2-P1-1）
+                        modifier = Modifier.weight(1f),
                     )
                     formatRelativeTime(session.lastActiveAtMs).takeIf { it.isNotEmpty() }?.let {
                         Text(
                             it,
                             style = InkTheme.type.textXs,
                             color = c.textTertiary,
-                            modifier = Modifier.padding(start = 6.dp),
+                            modifier = Modifier.padding(start = 8.dp),
                         )
                     }
                 }
@@ -422,7 +432,7 @@ private fun SessionRowContent(
                         color = c.textTertiary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
+                        modifier = Modifier.weight(1f),
                     )
                     if (session.unread > 0) {
                         Spacer(Modifier.size(8.dp))

@@ -67,6 +67,16 @@ private sealed class ConnectAuth(val authKey: String, val value: String) {
     data class Device(val token: String) : ConnectAuth("deviceToken", token)
 }
 
+/** sessions.search 命中行（M3.6 服务端搜索）：消息级结果，UI 按 sessionKey 归组。 */
+data class SearchHit(
+    val sessionKey: String,
+    val messageId: String,
+    val role: String,
+    val timestampMs: Long,
+    val snippet: String,
+    val score: Double,
+)
+
 /**
  * OpenClaw 网关客户端（WS 根路径，protocol 4）。
  *
@@ -654,6 +664,35 @@ class OpenClawClient(
             },
         )
         return res.str("key") ?: key
+    }
+
+    // ---- M3.6：服务端全文搜索（探针实锤：{query, limit?} → {results:[…]}） ----
+
+    /**
+     * sessions.search 消息级全文搜索，返回按 score 降序的命中行（带摘要）。
+     * UI 以 sessionKey 归组展示；空 query/无网关由调用方先拦。
+     */
+    suspend fun searchSessions(query: String, limit: Int = 20): List<SearchHit> {
+        val res = rpc(
+            "sessions.search",
+            buildJsonObject {
+                put("query", query)
+                put("limit", limit)
+            },
+        )
+        val arr = res["results"]?.jsonArray ?: return emptyList()
+        return arr.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            val key = o.str("sessionKey") ?: return@mapNotNull null
+            SearchHit(
+                sessionKey = key,
+                messageId = o.str("messageId") ?: "",
+                role = o.str("role") ?: "",
+                timestampMs = o.long("timestamp") ?: 0L,
+                snippet = o.str("snippet") ?: "",
+                score = o.str("score")?.toDoubleOrNull() ?: 0.0,
+            )
+        }
     }
 
     /** 仅供已持有 [mutex] 的调用方使用——kotlinx Mutex 不可重入，嵌套 withLock 自死锁。

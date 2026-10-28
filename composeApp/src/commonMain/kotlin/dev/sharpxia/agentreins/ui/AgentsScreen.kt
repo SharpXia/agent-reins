@@ -168,7 +168,7 @@ fun AgentDetailScreen(
     model: AppModel,
     agentId: String,
     onOpenSession: (String) -> Unit,
-    onOpenConversation: (String) -> Unit = {},
+    onOpenConversation: (convId: String, anchorSessionKey: String?) -> Unit = { _, _ -> },
     onBack: () -> Unit,
 ) {
     val profile = model.agentProfiles[agentId] ?: dev.sharpxia.agentreins.AgentProfile.default(agentId)
@@ -214,12 +214,15 @@ fun AgentDetailScreen(
         LazyColumn(Modifier.fillMaxSize()) {
             items(sessions, key = { it.id }) { s ->
                 AgentSessionRow(s, onClick = {
-                    // M4：主线会话行 → 该 agent 的 conversation（落最新）；派生/系统/未识别
-                    // 行保持 per-session chat（调试与治理用途）
+                    // M4：主线会话行 → conversation 时间线并定位到该分区（P5）；派生/系统/
+                    // 未识别行保持 per-session chat（调试与治理用途）
                     if (dev.sharpxia.agentreins.openclaw.SessionClassifier.classify(s.id) ==
                         dev.sharpxia.agentreins.openclaw.SessionCategory.MAINLINE
                     ) {
-                        onOpenConversation(dev.sharpxia.agentreins.openclaw.ConversationRepository.convId(agentId))
+                        onOpenConversation(
+                            dev.sharpxia.agentreins.openclaw.ConversationRepository.convId(agentId),
+                            s.id,
+                        )
                     } else {
                         model.select(s)
                         onOpenSession(s.id)

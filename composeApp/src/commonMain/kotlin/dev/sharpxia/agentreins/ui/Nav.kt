@@ -71,15 +71,20 @@ object Routes {
     const val TAB_SESSIONS = "tab:sessions"
     const val TAB_SEARCH = "tab:search"
     const val TAB_SETTINGS = "tab:settings"
-    const val CHAT = "chat/{sessionKey}"
-    const val CONVERSATION = "conversation/{convId}"
+    const val CHAT = "chat/{sessionKey}?ro={ro}"
+    const val CONVERSATION = "conversation/{convId}?anchor={anchor}"
     const val AGENT = "agent/{agentId}"
     const val CONNECTION = "connection"
     const val THEME_DEMO = "themeDemo"
     const val SETTINGS_SOUNDS = "settings/sounds"
 
-    fun chat(sessionKey: String) = "chat/${encodeSegment(sessionKey)}"
-    fun conversation(convId: String) = "conversation/${encodeSegment(convId)}"
+    fun chat(sessionKey: String, readOnly: Boolean = false) =
+        "chat/${encodeSegment(sessionKey)}?ro=$readOnly"
+
+    /** [anchorSessionKey] 非 null：进入时间线后滚动定位到该 session 分区（M4 P5）。 */
+    fun conversation(convId: String, anchorSessionKey: String? = null) =
+        "conversation/${encodeSegment(convId)}" + (anchorSessionKey?.let { "?anchor=${encodeSegment(it)}" } ?: "")
+
     fun agent(agentId: String) = "agent/${encodeSegment(agentId)}"
 
     /**
@@ -192,6 +197,7 @@ fun AppRoot(model: AppModel) {
                     onOpenConversation = { convId -> navController.navigate(Routes.conversation(convId)) },
                     onOpenAgent = { agentId -> navController.navigate(Routes.agent(agentId)) },
                     onCreateFor = { agentId -> model.createNewSession(agentId) },
+                    onOpenTask = { key -> navController.navigate(Routes.chat(key, readOnly = true)) },
                 )
             }
             composable(Routes.TAB_SEARCH) {
@@ -216,13 +222,15 @@ fun AppRoot(model: AppModel) {
             }
             composable(Routes.CHAT) { entry ->
                 val key = entry.arguments?.read { getStringOrNull("sessionKey") } ?: ""
-                ChatRoute(model = model, sessionKey = key, onBack = { navController.popBackStack() })
+                val readOnly = entry.arguments?.read { getStringOrNull("ro") } == "true"
+                ChatRoute(model = model, sessionKey = key, readOnly = readOnly, onBack = { navController.popBackStack() })
             }
 
-            // 对话详情（M4 P2：conversation 入口；P2 阶段落当前主 session，P3 换拼接时间线）
+            // 对话详情（M4）：主线 → 拼接时间线；anchor = 进入后定位到指定 session 分区
             composable(Routes.CONVERSATION) { entry ->
                 val convId = entry.arguments?.read { getStringOrNull("convId") } ?: ""
-                ConversationRoute(model = model, convId = convId, onBack = { navController.popBackStack() })
+                val anchor = entry.arguments?.read { getStringOrNull("anchor") }
+                ConversationRoute(model = model, convId = convId, anchorSessionKey = anchor, onBack = { navController.popBackStack() })
             }
 
             composable(Routes.AGENT) { entry ->
@@ -231,7 +239,7 @@ fun AppRoot(model: AppModel) {
                     model = model,
                     agentId = agentId,
                     onOpenSession = { key -> navController.navigate(Routes.chat(key)) },
-                    onOpenConversation = { convId -> navController.navigate(Routes.conversation(convId)) },
+                    onOpenConversation = { convId, anchor -> navController.navigate(Routes.conversation(convId, anchor)) },
                     onBack = { navController.popBackStack() },
                 )
             }
@@ -283,19 +291,20 @@ private fun InkBottomBar(navController: NavHostController, currentRoute: String?
 
 /**
  * 对话详情路由（M4）：主线 conversation → 拼接时间线（多主 session 分区）；渠道线程
- * 保持单 session ChatRoute。时间线生命周期绑路由组合（进开/离清）。
+ * 保持单 session ChatRoute。时间线生命周期绑路由组合（进开/离清）；anchor 定位分区。
  */
 @Composable
-private fun ConversationRoute(model: AppModel, convId: String, onBack: () -> Unit) {
+private fun ConversationRoute(model: AppModel, convId: String, anchorSessionKey: String?, onBack: () -> Unit) {
     val conv = model.conversations.firstOrNull { it.id == convId }
     val targetKey = conv?.sessionKeys?.firstOrNull()
     when {
         conv == null || targetKey == null -> LaunchedEffect(Unit) { onBack() }
         conv.kind == dev.sharpxia.agentreins.openclaw.ConversationKind.CHANNEL ->
-            ChatRoute(model = model, sessionKey = targetKey, onBack = onBack)
+            ChatRoute(model = model, sessionKey = targetKey, readOnly = false, onBack = onBack)
         else -> {
             val agentId = conv.agentId
             androidx.compose.runtime.DisposableEffect(agentId) {
+                model.pendingConvAnchor = anchorSessionKey
                 model.openConversationTimeline(agentId)
                 onDispose { model.closeConversationTimeline() }
             }
@@ -385,9 +394,9 @@ private fun ChatPageScaffold(model: AppModel, onBack: () -> Unit, content: @Comp
     }
 }
 
-/** per-session 对话页（搜索/agent 主页/fork 直达路径；conversation 主路径走 ConversationRoute）。 */
+/** per-session 对话页（搜索/agent 主页/fork/任务详情直达；conversation 主路径走 ConversationRoute）。 */
 @Composable
-private fun ChatRoute(model: AppModel, sessionKey: String, onBack: () -> Unit) {
+private fun ChatRoute(model: AppModel, sessionKey: String, readOnly: Boolean, onBack: () -> Unit) {
     LaunchedEffect(Unit) {
         // 路由参数直达（Agent 域/搜索）：确保模型层选中态与路由一致
         if (model.selectedSession != sessionKey) {
@@ -395,6 +404,6 @@ private fun ChatRoute(model: AppModel, sessionKey: String, onBack: () -> Unit) {
         }
     }
     ChatPageScaffold(model = model, onBack = onBack) {
-        ChatScreen(model, sessionKey, Modifier.fillMaxSize(), onBack = onBack)
+        ChatScreen(model, sessionKey, Modifier.fillMaxSize(), onBack = onBack, readOnly = readOnly)
     }
 }

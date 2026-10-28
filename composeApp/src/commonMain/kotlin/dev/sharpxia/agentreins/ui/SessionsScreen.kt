@@ -85,6 +85,7 @@ fun SessionsScreen(
     onOpenConversation: (String) -> Unit,
     onOpenAgent: (String) -> Unit = {},
     onCreateFor: (String) -> Unit = {},
+    onOpenTask: (String) -> Unit = {},
 ) {
     if (model.conversations.isEmpty()) {
         ConnectionEmptyState(model)
@@ -95,6 +96,7 @@ fun SessionsScreen(
             onOpenConversation = onOpenConversation,
             onOpenAgent = onOpenAgent,
             onCreateFor = onCreateFor,
+            onOpenTask = onOpenTask,
         )
     }
 }
@@ -106,6 +108,7 @@ private fun ConversationList(
     onOpenConversation: (String) -> Unit,
     onOpenAgent: (String) -> Unit,
     onCreateFor: (String) -> Unit,
+    onOpenTask: (String) -> Unit,
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -413,7 +416,7 @@ private fun ConversationList(
                 }
             } else {
                 items(mainConvs, key = { it.id }) { c ->
-                    SwipeRevealRow(model, c, onOpenConversation, haptics, revealed = revealedRowId == c.id, onRevealedChange = { r -> revealedRowId = if (r) c.id else null })
+                    SwipeRevealRow(model, c, onOpenConversation, haptics, revealed = revealedRowId == c.id, onRevealedChange = { r -> revealedRowId = if (r) c.id else null }, onOpenTask = onOpenTask)
                 }
             }
         }
@@ -434,6 +437,7 @@ private fun SwipeRevealRow(
     haptics: HapticPlayer,
     revealed: Boolean,
     onRevealedChange: (Boolean) -> Unit,
+    onOpenTask: (String) -> Unit = {},
 ) {
     val density = androidx.compose.ui.platform.LocalDensity.current
     val revealPx = with(density) { 128.dp.toPx() }
@@ -552,6 +556,7 @@ private fun SwipeRevealRow(
                     if (revealed) onRevealedChange(false) // 展开时点行=先收起，不进对话
                     else onOpenConversation(currentConv.id)
                 },
+                onOpenTask = onOpenTask,
             )
         }
     }
@@ -677,8 +682,11 @@ private fun ConversationRowContent(
     conv: Conversation,
     stash: Boolean,
     onClick: () -> Unit,
+    onOpenTask: (String) -> Unit = {},
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    // 任务详情 Sheet（M4 P5：点「已派发 N」→ 在途子任务清单 → 只读浏览）
+    var taskSheet by remember { mutableStateOf(false) }
     val tintName = model.agentProfiles[conv.agentId]?.tint
         ?: dev.sharpxia.agentreins.ui.theme.agentTintFor(conv.agentId)
     AgentTintScope(tintName) {
@@ -746,14 +754,39 @@ private fun ConversationRowContent(
                     }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        conv.preview ?: conv.id,
-                        style = InkTheme.type.textSm,
-                        color = c.textTertiary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
+                    // 行内执行状态（M4 P5）：TG 语义——执行中替换 preview 行；
+                    // 已派发子任务数（在途 subagent 会话）可点开任务详情
+                    val (running, derived) = model.conversationRunStatus(conv)
+                    if (running && !stash) {
+                        TypingDots()
+                        Spacer(Modifier.size(6.dp))
+                        Text(
+                            if (derived > 0) "执行中 · 已派发 $derived 个子任务" else "执行中",
+                            style = InkTheme.type.textSm,
+                            color = c.awaiting,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        if (derived > 0) {
+                            Spacer(Modifier.size(6.dp))
+                            Text(
+                                "详情",
+                                style = InkTheme.type.textXs,
+                                color = c.info.text,
+                                modifier = Modifier
+                                    .clickable { taskSheet = true }
+                                    .padding(horizontal = 4.dp),
+                            )
+                        }
+                    } else {
+                        Text(
+                            conv.preview ?: conv.id,
+                            style = InkTheme.type.textSm,
+                            color = c.textTertiary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
                     if (conv.unread > 0) {
                         Spacer(Modifier.size(8.dp))
                         UnreadBadge(conv.unread)
@@ -768,6 +801,76 @@ private fun ConversationRowContent(
                 model = model,
             )
         }
+    }
+    if (taskSheet) {
+        TaskDetailSheet(
+            model = model,
+            conv = conv,
+            onDismiss = { taskSheet = false },
+            onOpen = { key -> taskSheet = false; onOpenTask(key) },
+        )
+    }
+}
+
+/** 任务详情（M4 P5 D5）：在途派生会话清单 → 点击只读浏览该 session 的 history（不输入、不计未读）。 */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun TaskDetailSheet(
+    model: AppModel,
+    conv: Conversation,
+    onDismiss: () -> Unit,
+    onOpen: (String) -> Unit,
+) {
+    val tasks = model.activeRunKeys
+        .filter {
+            SessionClassifier.classify(it) == SessionCategory.DERIVED &&
+                dev.sharpxia.agentreins.model.sessionKeyAgentId(it) == conv.agentId
+        }
+        .sorted()
+    SandSheet(onDismiss = onDismiss, title = "派发中的子任务 · ${tasks.size}") {
+        if (tasks.isEmpty()) {
+            Text(
+                "当前没有进行中的子任务",
+                style = InkTheme.type.textMd,
+                color = InkTheme.colors.textTertiary,
+                modifier = Modifier.padding(20.dp),
+            )
+        }
+        tasks.forEach { key ->
+            val interaction = remember { MutableInteractionSource() }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .sandPressFill(interaction, 0)
+                    .clickable(interactionSource = interaction, indication = null, onClick = { onOpen(key) })
+                    .padding(horizontal = 20.dp, vertical = 12.dp),
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "subagent · ${key.substringAfterLast(':').take(13)}…",
+                        style = InkTheme.type.textMd,
+                        color = InkTheme.colors.ink,
+                    )
+                    Text(
+                        "派生的后台任务会话",
+                        style = InkTheme.type.textXs,
+                        color = InkTheme.colors.textTertiary,
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TypingDots()
+                    Spacer(Modifier.size(6.dp))
+                    Text("执行中", style = InkTheme.type.textSm, color = InkTheme.colors.awaiting)
+                }
+            }
+        }
+        Text(
+            "点击进入只读浏览（不发消息、不计未读）",
+            style = InkTheme.type.textXs,
+            color = InkTheme.colors.textTertiary,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+        )
     }
 }
 

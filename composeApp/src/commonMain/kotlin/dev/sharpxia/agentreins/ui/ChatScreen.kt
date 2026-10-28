@@ -97,6 +97,7 @@ import dev.sharpxia.agentreins.ui.theme.AgentTintScope
 import dev.sharpxia.agentreins.ui.theme.InkTheme
 import dev.sharpxia.agentreins.ui.theme.LocalAgentTint
 import dev.sharpxia.agentreins.ui.theme.agentTintFor
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
@@ -115,6 +116,7 @@ internal fun ChatScreen(
     timeline: List<AppModel.ConvSection>? = null,
     convTitle: String? = null,
     convSubtitle: String? = null,
+    readOnly: Boolean = false,
 ) {
     val state = model.conversation
     val listState = rememberLazyListState()
@@ -172,6 +174,21 @@ internal fun ChatScreen(
         }
     } else {
         remember(rowsSignature) { buildChatRows(currentEntries) }
+    }
+    // 分区锚定（M4 P5）：agent 主页 sessions 行点击 → 时间线定位到该 session 分区头
+    val currentRows by rememberUpdatedState(rows)
+    LaunchedEffect(model.pendingConvAnchor) {
+        val anchor = model.pendingConvAnchor ?: return@LaunchedEffect
+        if (timeline == null) {
+            model.pendingConvAnchor = null
+            return@LaunchedEffect
+        }
+        while (currentRows.isEmpty()) delay(100)
+        val idx = currentRows.indexOfFirst { it is ChatRow.Boundary && it.sessionKey == anchor }
+        if (idx >= 0) {
+            listState.scrollToItem(idx)
+            model.pendingConvAnchor = null
+        }
     }
     val pending = model.pendingOutbox
     val contentRowCount = rows.size + pending.size
@@ -411,11 +428,28 @@ internal fun ChatScreen(
             }
         }
 
-        ChatInputBar(
-            model = model,
-            haptics = haptics,
-            modifier = Modifier.windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
-        )
+        if (readOnly) {
+            // 只读浏览（M4 P5 D5：派生任务详情）：无输入面，不产生发送
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .padding(vertical = 10.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "只读浏览 · 派生任务会话",
+                    style = InkTheme.type.textXs,
+                    color = InkTheme.colors.textTertiary,
+                )
+            }
+        } else {
+            ChatInputBar(
+                model = model,
+                haptics = haptics,
+                modifier = Modifier.windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
+            )
+        }
     }
 }
 

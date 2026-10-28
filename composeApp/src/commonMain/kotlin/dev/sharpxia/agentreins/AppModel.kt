@@ -18,6 +18,8 @@ import dev.sharpxia.agentreins.openclaw.ConversationOverlay
 import dev.sharpxia.agentreins.openclaw.ConversationRepository
 import dev.sharpxia.agentreins.openclaw.ConnectionStore
 import dev.sharpxia.agentreins.openclaw.GatewayRpcException
+import dev.sharpxia.agentreins.openclaw.SessionCategory
+import dev.sharpxia.agentreins.openclaw.SessionClassifier
 import dev.sharpxia.agentreins.openclaw.OpenClawClient
 import dev.sharpxia.agentreins.openclaw.Outbox
 import dev.sharpxia.agentreins.openclaw.SearchHit
@@ -163,6 +165,7 @@ class AppModel(
     private var client: OpenClawClient? = null
     private var deviceToken: String? = null
     private var statusJob: Job? = null
+    private var activeRunsJob: Job? = null
     private var sessionsJob: Job? = null
     private var activityJob: Job? = null
     private var outboxJob: Job? = null
@@ -180,6 +183,32 @@ class AppModel(
     private var rawSessions by mutableStateOf<List<Session>>(emptyList())
     /** 本地覆盖层（kv 持久化，跨重启）。 */
     private var sessionOverlay by mutableStateOf(emptyMap<String, SessionOverlay.Entry>())
+
+    // ---- M4 P5：conversation 行内执行状态（operator 全量广播派生） ----
+    /** 全局在途 run 的 sessionKey 集（含派生 subagent 会话）。 */
+    var activeRunKeys by mutableStateOf<Set<String>>(emptySet())
+        private set
+
+    /**
+     * conversation 的行内状态：执行中（该 agent 任一会话有在途 run）+ 已派发子任务数
+     * （在途且 surface 为 subagent:）。纯派生，无独立状态。
+     */
+    fun conversationRunStatus(conv: Conversation): Pair<Boolean, Int> {
+        if (activeRunKeys.isEmpty()) return false to 0
+        val agentKeys = sessions.asSequence()
+            .filter { (it.agentId ?: sessionKeyAgentId(it.id)) == conv.agentId }
+            .mapTo(mutableSetOf()) { it.id }
+        if (agentKeys.isEmpty()) return false to 0
+        val active = activeRunKeys.filterTo(mutableSetOf()) { it in agentKeys }
+        val derived = active.count { SessionClassifier.classify(it) == SessionCategory.DERIVED }
+        return (active.isNotEmpty()) to derived
+    }
+
+    /** 行内「已派发 N」chip 点击 → 任务详情只读页的导航锚（Nav 层消费）。 */
+    var pendingTaskDetail by mutableStateOf<String?>(null)
+
+    /** conversation 时间线进入时的一次性分区锚（agent 主页 sessions 行定位；ChatScreen 消费后清）。 */
+    var pendingConvAnchor by mutableStateOf<String?>(null)
 
     // ---- M4 P3：对话详情拼接时间线（1 conversation = 该 agent 全部主 session） ----
     /** 时间线分区：key + 创建时 label（分区头文案）+ 该 session 的对话流状态。 */
@@ -572,6 +601,8 @@ class AppModel(
         activityJob?.cancel()
         outboxJob?.cancel()
         statusJob = scope.launch { c.status.collect { status = it } }
+        activeRunsJob?.cancel()
+        activeRunsJob = scope.launch { c.activeRuns.collect { activeRunKeys = it } }
         approvalsJob?.cancel()
         approvalsJob = scope.launch {
             c.approvals.collect { req ->

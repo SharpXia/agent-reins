@@ -437,6 +437,7 @@ class OpenClawClient(
         pauseReevalJob?.cancel()
         pauseReevalJob = null
         teardownTransport()
+        _activeRuns.value = emptySet() // 断连即清在途 run（事件源已失，旧行内状态不能挂着）
         _status.value = GatewayStatus.Disconnected
     }
 

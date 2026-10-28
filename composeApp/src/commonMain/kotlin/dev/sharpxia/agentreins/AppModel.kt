@@ -33,6 +33,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
+import kotlinx.datetime.Instant
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toLocalDateTime
 import kotlin.concurrent.Volatile
 
 /**
@@ -830,11 +833,19 @@ class AppModel(
     fun createNewSession(agentId: String) {
         if (creatingSession) return
         val c = client ?: run { lastError = "未连接网关，无法新建会话"; return }
-        val newKey = "agent:$agentId:ar-${epochMs().toString(36)}"
+        val ts = epochMs()
+        val newKey = "agent:$agentId:ar-${ts.toString(36)}"
         creatingSession = true
         scope.launch {
             try {
-                c.createSession(newKey, label = "新会话")
+                try {
+                    c.createSession(newKey, label = newSessionLabel(ts))
+                } catch (e: GatewayRpcException) {
+                    // 网关对会话 label 全表唯一（INVALID_REQUEST "label already in use"）——
+                    // 固定文案第二单起必撞；同一秒二单的残余撞车补毫秒尾重试一次。
+                    if (e.code != "INVALID_REQUEST" || e.message?.contains("label already in use") != true) throw e
+                    c.createSession(newKey, label = "${newSessionLabel(ts)}·${ts % 1000}")
+                }
                 clearQuote()
                 c.refreshSessions()
                 sessions.firstOrNull { it.id == newKey }?.let { select(it) }
@@ -852,6 +863,13 @@ class AppModel(
                 creatingSession = false
             }
         }
+    }
+
+    /** 新会话列表标题 `新会话 MM-dd HH:mm:ss`：网关不自动起标题，缺 label 时列表落到 key 尾段。 */
+    private fun newSessionLabel(ts: Long): String {
+        val t = Instant.fromEpochMilliseconds(ts).toLocalDateTime(TimeZone.currentSystemDefault())
+        fun p(n: Int) = n.toString().padStart(2, '0')
+        return "新会话 ${p(t.monthNumber)}-${p(t.dayOfMonth)} ${p(t.hour)}:${p(t.minute)}:${p(t.second)}"
     }
 
     /**

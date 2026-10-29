@@ -22,6 +22,8 @@ data class AgentProfile(
     /** 显示名（默认 agentId 原文，可改别名）。 */
     val name: String,
     val tint: AgentTintName,
+    /** 头像表情（AgentExpression 枚举名）；"" = 未定制 → avatarExpressionOf 派生。 */
+    val expression: String = "",
 ) {
     companion object {
         fun default(agentId: String) = AgentProfile(
@@ -53,6 +55,8 @@ object AgentRegistry {
         val arr = profiles.values.joinToString(",") { p ->
             buildJsonObject {
                 put("agentId", p.agentId); put("name", p.name); put("tint", p.tint.name)
+                // 仅非空写入：旧版 App 读回新 JSON 靠 ignoreUnknownKeys 忽略新键，旧 JSON 天然无此键
+                if (p.expression.isNotEmpty()) put("expression", p.expression)
             }.toString()
         }
         return "[$arr]"
@@ -62,12 +66,12 @@ object AgentRegistry {
         if (raw.isNullOrBlank()) return emptyMap()
         return runCatching {
             json.decodeFromString<List<Entry>>(raw).associateBy { it.agentId }
-                .mapValues { (_, e) -> AgentProfile(e.agentId, e.name, runCatching { AgentTintName.valueOf(e.tint) }.getOrDefault(AgentTintName.GRAY)) }
+                .mapValues { (_, e) -> AgentProfile(e.agentId, e.name, runCatching { AgentTintName.valueOf(e.tint) }.getOrDefault(AgentTintName.GRAY), e.expression) }
         }.getOrDefault(emptyMap())
     }
 
     @Serializable
-    private data class Entry(val agentId: String, val name: String, val tint: String)
+    private data class Entry(val agentId: String, val name: String, val tint: String, val expression: String = "")
 
     /** 解析注册表 + 会话列表 → 分组摘要（未注册 agent 补默认 profile）。 */
     fun summarize(

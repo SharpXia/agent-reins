@@ -17,6 +17,8 @@ import dev.sharpxia.agentreins.openclaw.SessionCategory
 import dev.sharpxia.agentreins.openclaw.SessionClassifier
 import dev.sharpxia.agentreins.ui.AppSound
 import dev.sharpxia.agentreins.ui.FeedbackPrefs
+import dev.sharpxia.agentreins.ui.avatar.AgentExpression
+import dev.sharpxia.agentreins.ui.avatar.avatarExpressionOf
 import dev.sharpxia.agentreins.ui.theme.AgentTintName
 import dev.sharpxia.agentreins.ui.theme.ThemeMode
 import kotlinx.coroutines.CoroutineScope
@@ -96,6 +98,8 @@ data class BridgeAgent(
     val agentId: String,
     val name: String,
     val tint: String,
+    /** 已解析的表情枚举名（恒非空：定制值或 agentId 散列派生值）。 */
+    val expression: String = "",
     val sessionCount: Int = 0,
     val unreadTotal: Int = 0,
 )
@@ -260,6 +264,7 @@ class AgentBridge(internal val model: AppModel) {
                             agentId = it.profile.agentId,
                             name = it.profile.name,
                             tint = it.profile.tint.name,
+                            expression = avatarExpressionOf(it.profile.agentId, model.agentProfiles).name,
                             sessionCount = it.sessionCount,
                             unreadTotal = it.unreadTotal,
                         )
@@ -452,6 +457,10 @@ Kotlin Multiplatform 让 **业务逻辑** 一份代码多端复用：
     fun setAgentTint(agentId: String, tint: String) {
         val name = runCatching { AgentTintName.valueOf(tint) }.getOrNull() ?: return
         model.setAgentTint(agentId, name)
+    }
+    fun setAgentExpression(agentId: String, expression: String) {
+        val e = runCatching { AgentExpression.valueOf(expression) }.getOrNull() ?: return
+        model.setAgentExpression(agentId, e)
     }
 
     fun openTimeline(agentId: String) = model.openConversationTimeline(agentId)

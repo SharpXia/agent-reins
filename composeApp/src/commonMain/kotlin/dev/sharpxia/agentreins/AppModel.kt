@@ -27,6 +27,7 @@ import dev.sharpxia.agentreins.openclaw.SessionOverlay
 import dev.sharpxia.agentreins.openclaw.StoredConnection
 import dev.sharpxia.agentreins.ui.AppSound
 import dev.sharpxia.agentreins.ui.FeedbackPrefs
+import dev.sharpxia.agentreins.ui.avatar.AgentExpression
 import dev.sharpxia.agentreins.ui.createSoundPlayer
 import dev.sharpxia.agentreins.ui.theme.AgentTintName
 import dev.sharpxia.agentreins.ui.theme.ThemeMode
@@ -392,6 +393,10 @@ class AppModel(
     /** Agent 身份色。 */
     fun setAgentTint(agentId: String, tint: AgentTintName) =
         upsertAgent(agentId) { it.copy(tint = tint) }
+
+    /** Agent 头像表情。 */
+    fun setAgentExpression(agentId: String, expression: AgentExpression) =
+        upsertAgent(agentId) { it.copy(expression = expression.name) }
 
     /** 审批面板开关：重启连接生效（scope 升级会触发一次 owner 批准，属预期）。 */
     fun toggleApprovals(enabled: Boolean) {

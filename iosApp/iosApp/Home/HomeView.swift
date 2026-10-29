@@ -14,20 +14,37 @@ struct HomeView: View {
     @State private var createInFlight = false
 
     var body: some View {
-        Group {
-            if store.lists.conversations.isEmpty {
-                ConnectionEmptyState(conn: store.conn)
-            } else {
-                VStack(spacing: 0) {
-                    header
-                    if let err = store.conn.lastError {
-                        ErrorBanner(message: err) { store.bridge.clearError() }
+        ZStack(alignment: .leading) {
+            Group {
+                if store.lists.conversations.isEmpty {
+                    ConnectionEmptyState(conn: store.conn)
+                } else {
+                    VStack(spacing: 0) {
+                        header
+                        if let err = store.conn.lastError {
+                            ErrorBanner(message: err) { store.bridge.clearError() }
+                        }
+                        list
                     }
-                    list
                 }
             }
+            .background(c.paper)
+
+            // 侧滑抽屉（真机反馈：要侧面抽屉而非底部 sheet）：scrim + leading 面板
+            if showDrawer {
+                Color.black.opacity(0.42)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture { closeDrawer() }
+                    .transition(.opacity)
+                AgentsDrawerPanel(onClose: { closeDrawer() })
+                    .frame(width: 306)
+                    .frame(maxHeight: .infinity)
+                    .background(c.elevated)
+                    .transition(.move(edge: .leading))
+            }
         }
-        .background(c.paper)
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: showDrawer)
         .navigationBarHidden(true)
         // 左缘右滑开抽屉（CMP 版 ModalNavigationDrawer 边缘手势的复刻）
         .overlay(alignment: .leading) {
@@ -39,17 +56,24 @@ struct HomeView: View {
                     DragGesture(minimumDistance: 12)
                         .onEnded { v in
                             if v.translation.width > 48 && abs(v.translation.height) < 60 {
-                                Feedback.hapticTap(enabled: store.misc.hapticsEnabled)
-                                showDrawer = true
+                                openDrawer()
                             }
                         }
                 )
                 .allowsHitTesting(store.lists.conversations.isEmpty == false)
         }
-        .sheet(isPresented: $showDrawer) { AgentsDrawerView() }
         .sheet(item: $taskSheetConv) { conv in
             TaskDetailSheetView(conv: conv)
         }
+    }
+
+    private func openDrawer() {
+        Feedback.hapticTap(enabled: store.misc.hapticsEnabled)
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { showDrawer = true }
+    }
+
+    private func closeDrawer() {
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { showDrawer = false }
     }
 
     // ---- 顶栏 ----
@@ -57,8 +81,7 @@ struct HomeView: View {
     private var header: some View {
         HStack(spacing: 2) {
             Button {
-                Feedback.hapticTap(enabled: store.misc.hapticsEnabled)
-                showDrawer = true
+                openDrawer()
             } label: {
                 Image(systemName: "line.3.horizontal")
                     .font(.system(size: 18, weight: .medium))
@@ -340,11 +363,11 @@ struct ConversationRowView: View {
 
 // MARK: - Agents 抽屉
 
-struct AgentsDrawerView: View {
+struct AgentsDrawerPanel: View {
     @Environment(\.inkColors) private var c
-    @Environment(\.dismiss) private var dismiss
     @State private var store = AppStore.shared
     @Environment(NavCoordinator.self) private var navCoordinator
+    let onClose: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -365,9 +388,8 @@ struct AgentsDrawerView: View {
                 }
             }
         }
-        .presentationDetents([.medium, .large])
-        .presentationBackground(c.elevated)
-        .presentationDragIndicator(.hidden)
+        .padding(.top, 8)
+        .padding(.bottom, 16)
     }
 
     private func drawerRow(_ agent: BridgeAgent) -> some View {
@@ -375,7 +397,7 @@ struct AgentsDrawerView: View {
         return HStack(spacing: 0) {
             Button {
                 Feedback.hapticTap(enabled: store.misc.hapticsEnabled)
-                dismiss()
+                onClose()
                 openAgentConversation(agent)
             } label: {
                 HStack(spacing: 12) {
@@ -397,7 +419,7 @@ struct AgentsDrawerView: View {
             } else {
                 Button {
                     Feedback.hapticTap(enabled: store.misc.hapticsEnabled)
-                    dismiss()
+                    onClose()
                     openAgentConversation(agent)
                 } label: {
                     Text("＋").font(.system(size: 17, weight: .medium)).foregroundColor(c.ink)
@@ -408,7 +430,7 @@ struct AgentsDrawerView: View {
 
             Button {
                 Feedback.hapticTap(enabled: store.misc.hapticsEnabled)
-                dismiss()
+                onClose()
                 navCoordinator.push(.agent(agentId: agent.agentId))
             } label: {
                 Image(systemName: "pencil")

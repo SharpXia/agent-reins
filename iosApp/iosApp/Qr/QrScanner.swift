@@ -1,36 +1,7 @@
 import AVFoundation
-import UIKit
 import SwiftUI
-import composeApp
 
-struct ComposeView: UIViewControllerRepresentable {
-    func makeUIViewController(context: Context) -> UIViewController {
-        MainViewControllerKt.MainViewController()
-    }
-
-    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
-}
-
-struct ContentView: View {
-    @State private var showScanner = false
-    var body: some View {
-        ComposeView()
-            // 全屏铺满（状态栏/Home 指示条/键盘一律交给 Compose 侧 insets 消费）
-            .ignoresSafeArea()
-            // Compose 侧 launchQrScanner 经通知拉起扫码页；结果经 QrScanBridgeKt 回传
-            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("agentreins.qrscan.request"))) { _ in
-                showScanner = true
-            }
-            .sheet(isPresented: $showScanner) {
-                QrScannerView { payload in
-                    showScanner = false
-                    QrScanBridgeKt.onQrScanResult(payload: payload)
-                }
-            }
-    }
-}
-
-/// openclaw qr 配对二维码扫描页（AVFoundation 原生会话）。
+/// openclaw qr 配对二维码扫描页（AVFoundation 原生会话，从 Compose 版 ContentView 移植）。
 /// 识别成功或取消（含下滑关闭）都会回调一次 onResult。
 struct QrScannerView: UIViewControllerRepresentable {
     let onResult: (String?) -> Void
@@ -113,11 +84,10 @@ final class QrScannerController: UIViewController, AVCaptureMetadataOutputObject
         close.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
         view.addSubview(close)
         NSLayoutConstraint.activate([
-            hint.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 24),
-            hint.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            hint.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            close.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
-            close.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
+            hint.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            hint.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -48),
+            close.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            close.topAnchor.constraint(equalTo: hint.bottomAnchor, constant: 16),
         ])
     }
 
@@ -130,24 +100,28 @@ final class QrScannerController: UIViewController, AVCaptureMetadataOutputObject
         previewLayer?.frame = view.bounds
     }
 
-    override func viewWillDisappear(_ animated: Bool) {
-        super.viewWillDisappear(animated)
-        // 下滑关闭 sheet 的取消兜底；finished 幂等防重复回调
-        finish(nil)
-    }
-
-    private func finish(_ value: String?) {
-        guard !finished else { return }
-        finished = true
-        session.stopRunning()
-        onResult(value)
-    }
-
     func metadataOutput(_ output: AVCaptureMetadataOutput,
                         didOutput metadataObjects: [AVMetadataObject],
                         from connection: AVCaptureConnection) {
         guard let obj = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
-              obj.type == .qr, let value = obj.stringValue else { return }
+              obj.type == .qr,
+              let value = obj.stringValue else { return }
         finish(value)
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        if session.isRunning { session.stopRunning() }
+        if !finished {
+            finished = true
+            onResult(nil)
+        }
+    }
+
+    private func finish(_ payload: String?) {
+        guard !finished else { return }
+        finished = true
+        if session.isRunning { session.stopRunning() }
+        onResult(payload)
     }
 }

@@ -19,22 +19,26 @@ kotlin {
         compilerOptions { jvmTarget.set(JvmTarget.JVM_17) }
     }
     // Kotlin 2.4 起 apple framework 不再默认创建，需显式声明（静态库，免动态签名问题）
+    // SwiftUI 壳经 AgentBridge 消费 shared 类型（Session/枚举等），shared 必须 export。
     iosArm64 {
         binaries.framework {
             baseName = "composeApp"
             isStatic = true
+            export(project(":shared"))
         }
     }
     iosSimulatorArm64 {
         binaries.framework {
             baseName = "composeApp"
             isStatic = true
+            export(project(":shared"))
         }
     }
 
     sourceSets {
         commonMain.dependencies {
-            implementation(project(":shared"))
+            // export() 要求 api 依赖（SwiftUI 壳的桥接需要 shared 类型可见）
+            api(project(":shared"))
             implementation(libs.compose.runtime)
             implementation(libs.compose.foundation)
             implementation(libs.compose.material3)

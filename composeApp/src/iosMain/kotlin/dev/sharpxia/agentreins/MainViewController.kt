@@ -8,6 +8,23 @@ import platform.Foundation.NSUTF8StringEncoding
 import platform.Foundation.stringWithContentsOfFile
 import platform.UIKit.UIViewController
 
+/** Dev 自动发消息 prompt（AGENTREINS_DEV_AUTOPROMPT；AgentBridge 启动时消费一次）。 */
+internal object AutoPromptHolder {
+    val value: String? = (NSProcessInfo.processInfo.environment["AGENTREINS_DEV_AUTOPROMPT"] as? String)?.takeIf { it.isNotBlank() }
+}
+
+/**
+ * SwiftUI 壳入口（feature/ios-swiftui 起 iOS 前端原生重写）：构造 AppModel（沿用 dev
+ * 通道语义）并返回 [AgentBridge]。生命周期/网络监听在此安装——Swift 侧不接触这些。
+ * Dev 通道与 [MainViewController] 完全同源：AGENTREINS_DEV_SETUPCODE/URL/KEY/SESSION +
+ * Documents/dev.json，供模拟器/自动化闭环验证。
+ */
+fun AgentReinsBridge(): AgentBridge {
+    installAppForegroundObserver()
+    installNetworkMonitor()
+    return AgentBridge(devPrebuilt() ?: AppModel())
+}
+
 /** iOS 入口：iosApp 壳工程（SwiftUI）经此桥接 Compose UI。 */
 fun MainViewController(): UIViewController {
     installAppForegroundObserver() // 回前台自动重连（AppModel 经 appForegroundEvents 消费）

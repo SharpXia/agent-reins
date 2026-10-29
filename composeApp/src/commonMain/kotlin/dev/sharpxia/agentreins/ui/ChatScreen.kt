@@ -57,11 +57,15 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
-import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -77,6 +81,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.AnnotatedString
@@ -86,6 +91,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Velocity
 import dev.sharpxia.agentreins.AppModel
 import dev.sharpxia.agentreins.model.Message
 import dev.sharpxia.agentreins.model.ThinkingEntry
@@ -210,8 +216,6 @@ internal fun ChatScreen(
     val runActive = state?.activeRunId != null
     // 首页历史是否已到达（真机反馈 bug②）：未到达且无缓存时显示加载态而非空态
     val historyLoaded = state?.historyLoaded == true
-    // 下拉加载（M4 反馈⑤）：per-session=loadingOlder；时间线=任一分区在加载
-    val pullRefreshing = if (timeline != null) model.convSectionLoading != null else model.loadingOlder
     // 气泡左侧小 loading（M4 反馈④）：最后一条用户消息仍是时间线尾部 且 (在途发送 || run 活跃)
     // ——即「我发的消息还没被响应」的完整窗口；agent 开始输出（thinking/工具/回复条目在尾）
     // 后自动熄灭，交给 ThinkingCard/TypingIndicator
@@ -220,6 +224,64 @@ internal fun ChatScreen(
     }
     val showTailSpinner = (sessionKey in model.sendingSessionKeys || runActive) &&
         lastUserEntryIndex >= 0 && lastUserEntryIndex == rows.lastIndex
+
+    // ---- 下拉加载（M4 反馈⑤，第二轮重做）：自研 nestedScroll——material3
+    // PullToRefreshBox 真机松手即回弹不触发。确定性语义：列表在顶时下拉以 0.4 阻尼
+    // 累积 overscroll → 松手过阈值且加载可派发 = 顶部居中 spinner 持续到加载完成；
+    // 不过阈值或派发失败（已到最早）= 平滑回弹不加载。 ----
+    val density = LocalDensity.current
+    val pullThresholdPx = with(density) { 72.dp.toPx() }
+    var pullOffset by remember { mutableFloatStateOf(0f) }
+    var pullLoading by remember { mutableStateOf(false) }
+    val modelPullBusy = if (timeline != null) model.convSectionLoading != null else model.loadingOlder
+    val pullBusyNow by rememberUpdatedState(modelPullBusy)
+    val listAtTop by remember { derivedStateOf { !listState.canScrollBackward } }
+    val pullLoad by rememberUpdatedState {
+        val tl = timeline
+        if (tl != null) tl.lastOrNull()?.let { model.loadSectionHistoryIfNeeded(it.key) } ?: false
+        else model.loadOlderMessages()
+    }
+    val pullConn = remember(pullThresholdPx) {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                val dy = available.y
+                if (dy > 0f && listAtTop) {
+                    // 顶部下拉：阻尼累积，全部消费（列表不再滚动）
+                    pullOffset = (pullOffset + dy * 0.4f).coerceAtMost(pullThresholdPx * 1.8f)
+                    return Offset(0f, dy)
+                }
+                if (pullOffset > 0f && dy < 0f) {
+                    // overscroll 中上推：先回收 overscroll，剩余给列表
+                    val back = dy.coerceAtLeast(-pullOffset)
+                    pullOffset += back
+                    return Offset(0f, back)
+                }
+                return Offset.Zero
+            }
+
+            override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
+                if (pullOffset > 0f) {
+                    if (pullOffset >= pullThresholdPx && !pullBusyNow) {
+                        pullLoading = pullLoad()
+                    }
+                    val from = pullOffset
+                    androidx.compose.animation.core.animate(
+                        initialValue = from,
+                        targetValue = 0f,
+                        animationSpec = tween(220),
+                    ) { v, _ -> pullOffset = v }
+                }
+                return Velocity.Zero
+            }
+        }
+    }
+    // loading 灯熄灭：模型侧加载结束（或派发被拒）后收 spinner
+    LaunchedEffect(pullLoading, modelPullBusy) {
+        if (pullLoading && !modelPullBusy) {
+            delay(250) // 至少闪现一拍，避免闪烁
+            pullLoading = false
+        }
+    }
     val totalRows = contentRowCount +
         (if (state?.hasMoreHistory == true && contentRowCount > 0) 1 else 0) +
         (if (contentRowCount == 0 && !runActive && historyLoaded) 1 else 0) +
@@ -228,9 +290,14 @@ internal fun ChatScreen(
     // 只认真实拖拽（DragInteraction）：程序性 scrollToItem（开局锚底/分区加载）也会置
     // isScrollInProgress，把它当用户手势会误跳过历史到达后的锚底=进入位置随机（真机反馈④根因）
     var userScrolledBeforeLoad by remember { mutableStateOf(false) }
+    // 流式跟随开关（反馈③）：用户上拉离开底部即停钉底，回到底部自动恢复跟随
+    var userPinnedUp by remember { mutableStateOf(false) }
     LaunchedEffect(listState) {
         listState.interactionSource.interactions.collect {
-            if (it is DragInteraction.Start) userScrolledBeforeLoad = true
+            if (it is DragInteraction.Start) {
+                userScrolledBeforeLoad = true
+                userPinnedUp = true
+            }
         }
     }
     LaunchedEffect(historyLoaded) {
@@ -241,16 +308,21 @@ internal fun ChatScreen(
             initialScrollDone = true
         }
     }
-    LaunchedEffect(totalRows, contentRowCount, lastTextLen, runActive) {
+    // 流式跟随（反馈③重做）：打字机增长/换行、思考条目增删、工具卡状态变化——任何
+    // 内容变化只要用户没上拉离开底部，就用 scrollToItem 直接钉底。旧实现
+    // animateScrollToItem 在连续 delta 下每帧重启永远追不上；「lastVisible>=total-3」
+    // 门槛在 thinking→消息切换（行数塌缩）时会失效把用户留在上面。
+    val streamingTail = runActive || (currentEntries.lastOrNull() as? Message)?.streaming == true
+    val userPinnedUpNow by rememberUpdatedState(userPinnedUp)
+    LaunchedEffect(rowsSignature, totalRows, streamingTail) {
         if (contentRowCount == 0) return@LaunchedEffect
         if (!initialScrollDone) {
             listState.scrollToItem(totalRows - 1)
             initialScrollDone = true
             return@LaunchedEffect
         }
-        val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-        if (lastVisible >= totalRows - 3) {
-            listState.animateScrollToItem(totalRows - 1)
+        if (streamingTail && !userPinnedUpNow) {
+            listState.scrollToItem(totalRows - 1)
         }
     }
     LaunchedEffect(listState) {
@@ -258,7 +330,10 @@ internal fun ChatScreen(
             val info = listState.layoutInfo
             val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: Int.MAX_VALUE
             lastVisible < info.totalItemsCount - 2
-        }.collect { showJumpToLatest = it }
+        }.collect { away ->
+            showJumpToLatest = away
+            if (!away) userPinnedUp = false // 回到底部自动恢复跟随
+        }
     }
     // 发送后滚到底（M4 反馈④）：看到刚发的消息。sendSignal 由 AppModel.sendText 递增
     val totalRowsNow by rememberUpdatedState(totalRows)
@@ -343,17 +418,12 @@ internal fun ChatScreen(
                 onDismiss = { showStartFresh = false },
             )
         }
-        PullToRefreshBox(
-            isRefreshing = pullRefreshing,
-            onRefresh = {
-                val tl = timeline
-                if (tl != null) tl.lastOrNull()?.let { model.loadSectionHistoryIfNeeded(it.key) }
-                else model.loadOlderMessages()
-            },
-            modifier = Modifier
+        Box(
+            Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .alpha(if (contentRowCount > 0 && !initialScrollDone) 0f else 1f),
+                .alpha(if (contentRowCount > 0 && !initialScrollDone) 0f else 1f)
+                .nestedScroll(pullConn),
         ) {
             LazyColumn(
                 state = listState,
@@ -419,6 +489,30 @@ internal fun ChatScreen(
                     val thinkingAtTail = currentEntries.lastOrNull() is ThinkingEntry
                     if (!thinkingAtTail) {
                         item(key = "typing") { TypingIndicator() }
+                    }
+                }
+            }
+            // 下拉指示（M4 反馈⑤）：顶部居中；拖拽中按比例显示进度环，加载中转常转 spinner
+            if (pullOffset > 2f || pullLoading) {
+                Box(
+                    Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 6.dp),
+                ) {
+                    if (pullLoading || modelPullBusy) {
+                        androidx.compose.material3.CircularProgressIndicator(
+                            modifier = Modifier.size(24.dp),
+                            strokeWidth = 2.5.dp,
+                            color = InkTheme.colors.ink,
+                        )
+                    } else {
+                        val frac = (pullOffset / pullThresholdPx).coerceIn(0f, 1f)
+                        androidx.compose.material3.CircularProgressIndicator(
+                            progress = { frac },
+                            modifier = Modifier.size(24.dp),
+                            strokeWidth = 2.5.dp,
+                            color = InkTheme.colors.ink,
+                        )
                     }
                 }
             }
@@ -1063,30 +1157,31 @@ private fun ChatInputBar(model: AppModel, haptics: HapticPlayer, modifier: Modif
             // 对话操作（M4 P4）：发送键左侧矢量 icon → 三动作（新开会话/压缩上下文/agent 状态）
             ComposerActions(model = model, haptics = haptics)
             Spacer(Modifier.size(2.dp))
-            // 发送/停止态切换：run 进行中优先停止
+            // 运行中显示终止键（M4 反馈②：点终止本地立即解锁，不再替换发送键——
+            // 网关 Queue: steer 支持运行中继续发消息，不再被卡死无法输入）
             if (runActive) {
                 StopButton(haptics = haptics, onStop = { model.stopRun() })
-            } else {
-                val enabled = model.draft.isNotBlank()
-                Box(
-                    Modifier
-                        .padding(bottom = 6.dp)
-                        .size(34.dp)
-                        .clip(CircleShape)
-                        .background(if (enabled) c.inverse else c.surfaceTertiary)
-                        .clickable(enabled = enabled) {
-                            haptics.tap()
-                            model.send()
-                        },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.Send,
-                        contentDescription = "发送",
-                        tint = if (enabled) c.paper else c.textDisabled,
-                        modifier = Modifier.size(17.dp),
-                    )
-                }
+                Spacer(Modifier.size(4.dp))
+            }
+            val enabled = model.draft.isNotBlank()
+            Box(
+                Modifier
+                    .padding(bottom = 6.dp)
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(if (enabled) c.inverse else c.surfaceTertiary)
+                    .clickable(enabled = enabled) {
+                        haptics.tap()
+                        model.send()
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.Send,
+                    contentDescription = "发送",
+                    tint = if (enabled) c.paper else c.textDisabled,
+                    modifier = Modifier.size(17.dp),
+                )
             }
         }
     }

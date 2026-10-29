@@ -536,12 +536,14 @@ class AppModel(
     }
 
     /** 向上翻到顶时懒加载更早一页历史（hasMoreHistory / 加载中去重）。 */
-    fun loadOlderMessages() {
-        val key = selectedSession ?: return
-        if (loadingOlder) return
-        val c = client ?: return
-        val st = conversation ?: return
-        if (st.entries.isEmpty() || !st.hasMoreHistory) return
+    /** 向上加载更早一页历史（M4 反馈⑤：返回是否真的派发了加载——下拉阈值判定据此决定
+     *  显示 loading 还是直接回弹）。 */
+    fun loadOlderMessages(): Boolean {
+        val key = selectedSession ?: return false
+        if (loadingOlder) return false
+        val c = client ?: return false
+        val st = conversation ?: return false
+        if (st.entries.isEmpty() || !st.hasMoreHistory) return false
         loadingOlder = true
         scope.launch {
             try {
@@ -552,6 +554,7 @@ class AppModel(
                 loadingOlder = false
             }
         }
+        return true
     }
 
     /** 发送信号（M4 反馈④）：每次用户发送 +1，聊天页据此滚到底部看到刚发的消息。 */
@@ -977,10 +980,15 @@ class AppModel(
 
     // ---- M3.4：停止 / 分支 / 从头开始 / 引用 ----
 
-    /** Composer 停止态：中止当前 run（sessions.abort）。 */
+    /** Composer 停止态：中止当前 run（sessions.abort）。M4 反馈②：abort 失败也照常
+     *  本地清 run 状态——用户意图是「不再等待」，杀进程残留的卡死态必须能解锁。 */
     fun stopRun() {
         val key = selectedSession ?: return
-        scope.launch { client?.abort(key) }
+        scope.launch {
+            val c = client ?: return@launch
+            runCatching { c.abort(key) }
+            c.clearActiveRun(key)
+        }
     }
 
     /** 引用消息（MessageActionsSheet「引用」）：Composer 上方 QuoteBar 展示，随下一条消息发出。 */

@@ -155,6 +155,20 @@ class OpenClawClient(
     private val _activeRuns = MutableStateFlow<Set<String>>(emptySet())
     val activeRuns: StateFlow<Set<String>> = _activeRuns.asStateFlow()
 
+    /**
+     * 本地清除在途 run（M4 反馈②）：杀进程重开后 lifecycle start 有、end 永不来的
+     * 卡死态——abort RPC 失败也被静默吞掉，UI 永远停在终止键。用户点终止的意图就是
+     * 「不再等待」：本地状态立即清，真 run 若还活着后续事件照常渲染。
+     */
+    suspend fun clearActiveRun(sessionKey: String) {
+        mutex.withLock {
+            val flow = flowForUnlocked(sessionKey)
+            if (flow.value.activeRunId != null) {
+                flow.value = flow.value.copy(activeRunId = null)
+            }
+        }
+    }
+
     /** 待补发队列条数（PENDING+SENT 未退休）。 */
     private val _outboxPendingCount = MutableStateFlow(0)
     val outboxPendingCount: StateFlow<Int> = _outboxPendingCount.asStateFlow()

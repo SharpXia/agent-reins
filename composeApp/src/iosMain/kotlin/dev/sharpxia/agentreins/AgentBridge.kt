@@ -195,6 +195,17 @@ data class BridgeMisc(
 
 class AgentBridge(internal val model: AppModel) {
 
+    init {
+        // 根因修复（模拟器 A/B 实证,详见 diagnostic/stall-trace 分支）：
+        // AppModel 的 mutableStateOf 写发生在 Dispatchers.Default 线程，而本壳没有
+        // ComposeUIViewController——CMP 壳由其内部自动启动全局快照通知泵，SwiftUI 壳
+        // 没人启动 → 桥的 snapshotFlow 只发首帧，后续状态更新对 Swift 侧间歇性/永久
+        // 不可见（「已连接但会话内容加载不出」的真凶）。此处手动接上通知泵。
+        androidx.compose.runtime.snapshots.Snapshot.registerGlobalWriteObserver {
+            androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+        }
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var started = false
 

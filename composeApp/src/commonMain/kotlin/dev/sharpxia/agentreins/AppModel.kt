@@ -934,6 +934,8 @@ class AppModel(
             } catch (e: GatewayRpcException) {
                 lastError = when (e.code) {
                     "SEND_QUEUED" -> "已进入发送队列，重连后自动补发"
+                    // runtime 不可用如实上抛（M4 反馈：交给用户决策）——消息保留在队列（气泡可重试/放弃）
+                    "RUNTIME_UNAVAILABLE" -> e.message
                     "SEND_TIMEOUT" -> null // 结果未确认：outbox 待确认态展示，不弹错误条（真机反馈 bug①）
                     else -> e.message
                 }
@@ -980,15 +982,24 @@ class AppModel(
 
     // ---- M3.4：停止 / 分支 / 从头开始 / 引用 ----
 
-    /** Composer 停止态：中止当前 run（sessions.abort）。M4 反馈②：abort 失败也照常
-     *  本地清 run 状态——用户意图是「不再等待」，杀进程残留的卡死态必须能解锁。 */
+    /** Composer 终止键（M4 反馈②）：本地立即解锁 → abort → 失败（runtime 不可用等）
+     *  则走命令通道兜底发 /stop。任何情况都不留卡死态。 */
     fun stopRun() {
         val key = selectedSession ?: return
         scope.launch {
             val c = client ?: return@launch
-            runCatching { c.abort(key) }
             c.clearActiveRun(key)
+            val aborted = runCatching { c.abort(key) }.isSuccess
+            if (!aborted) sendText(key, "/stop")
         }
+    }
+
+    /** 终止（命令通道，M4 反馈：runtime 不可用时 abort 无目标——/stop 走网关命令处理器，
+     *  与 /status 同通道）。本地同步解锁。 */
+    fun stopByCommand() {
+        val key = selectedSession ?: return
+        scope.launch { client?.clearActiveRun(key) }
+        sendText(key, "/stop")
     }
 
     /** 引用消息（MessageActionsSheet「引用」）：Composer 上方 QuoteBar 展示，随下一条消息发出。 */

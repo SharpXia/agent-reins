@@ -158,7 +158,8 @@ class OpenClawClient(
     /**
      * 本地清除在途 run（M4 反馈②）：杀进程重开后 lifecycle start 有、end 永不来的
      * 卡死态——abort RPC 失败也被静默吞掉，UI 永远停在终止键。用户点终止的意图就是
-     * 「不再等待」：本地状态立即清，真 run 若还活着后续事件照常渲染。
+     * 「不再等待」：本地状态立即清（含全局 activeRuns，行内「执行中」同步熄灭），
+     * 真 run 若还活着后续事件照常渲染。
      */
     suspend fun clearActiveRun(sessionKey: String) {
         mutex.withLock {
@@ -167,6 +168,7 @@ class OpenClawClient(
                 flow.value = flow.value.copy(activeRunId = null)
             }
         }
+        _activeRuns.value = _activeRuns.value - sessionKey
     }
 
     /** 待补发队列条数（PENDING+SENT 未退休）。 */
@@ -610,6 +612,21 @@ class OpenClawClient(
             throw GatewayRpcException("SEND_TIMEOUT", "发送结果未确认，稍后自动核对（不会重复发送）")
         } catch (e: CancellationException) {
             throw e // 取消（retryPendingNow 重排/断连收尾）不算发送失败，剩余条目留给下一轮
+        } catch (e: GatewayRpcException) {
+            // RPC 明确拒绝：runtime 不可用（额度耗尽/服务未响应，SESSION_MUTATION_TARGET_REQUIRED）
+            // 从普通排队失败中分离——如实上抛交给用户决策，而不是默默进队列假装一切正常
+            if (cacheHasCommand(cmd.idempotencyKey)) {
+                cache.upsertOutbox(Outbox.afterSendAttempt(cmd, ok = false, error = e.message), gatewayId)
+            }
+            refreshOutboxCount()
+            if (e.code == "INVALID_REQUEST" && e.message?.contains("mutation target") == true) {
+                throw GatewayRpcException(
+                    "RUNTIME_UNAVAILABLE",
+                    "Agent 运行时不可用（额度耗尽或服务未响应）：消息已保留，可稍后重试、用 /stop 终止或新开会话",
+                )
+            }
+            scheduleFlush(SEND_RETRY_DELAY_MS)
+            throw GatewayRpcException("SEND_QUEUED", "发送失败，已进入发送队列（重连后自动补发）")
         } catch (e: Exception) {
             if (cacheHasCommand(cmd.idempotencyKey)) {
                 cache.upsertOutbox(Outbox.afterSendAttempt(cmd, ok = false, error = e.message), gatewayId)

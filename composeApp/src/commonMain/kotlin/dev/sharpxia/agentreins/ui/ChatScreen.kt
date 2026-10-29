@@ -44,6 +44,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
@@ -1241,6 +1242,16 @@ private fun ComposerActions(model: AppModel, haptics: HapticPlayer) {
             )
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            // 终止（M4 反馈：runtime 不可用时 abort 无目标——/stop 走网关命令通道，
+            // 与 /status 同路；本地同步解锁不留卡死态）
+            DropdownMenuItem(
+                text = { Text("终止 (/stop)", style = InkTheme.type.textMd, color = c.ink) },
+                leadingIcon = { Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(18.dp), tint = c.textTertiary) },
+                onClick = {
+                    open = false
+                    model.stopByCommand()
+                },
+            )
             DropdownMenuItem(
                 text = { Text("新开会话", style = InkTheme.type.textMd, color = c.ink) },
                 leadingIcon = { Icon(ArIcons.Retry, contentDescription = null, modifier = Modifier.size(18.dp), tint = c.textTertiary) },

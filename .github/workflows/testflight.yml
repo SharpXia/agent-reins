@@ -97,9 +97,9 @@ jobs:
           set -o pipefail
           BUILD=$(date +%s)
           echo "BUILD_NUMBER=$BUILD" >> "$GITHUB_ENV"
-          # 证书已由上一步闸门保证在钥匙串中，allowProvisioningUpdates 仅拉/更新 profile；
-          # 工程不再写死 CODE_SIGN_IDENTITY（已删模板遗留的 Apple Development），
-          # 自动签名自然选择：构建用开发证书、archive 用分发证书
+          # 证书已由上一步闸门保证在钥匙串中。CLI 下自动签名会按"开发模式"评估、强求开发证书
+          # （Xcode GUI 才会自动切分发），故 archive 用 manual 直签分发证书 + 账号既有
+          # "iOS App Store" profile；allowProvisioningUpdates 负责按名下载/续期该 profile
           xcodebuild \
             -project iosApp/iosApp.xcodeproj \
             -scheme iosApp \
@@ -107,6 +107,9 @@ jobs:
             -destination 'generic/platform=iOS' \
             -archivePath build/AgentReins.xcarchive \
             CURRENT_PROJECT_VERSION=$BUILD \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="iOS App Store" \
             -allowProvisioningUpdates \
             -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
             -authenticationKeyID "${{ secrets.ASC_API_KEY_ID }}" \
@@ -125,7 +128,12 @@ jobs:
             <key>teamID</key>
             <string>${{ secrets.APPLE_TEAM_ID }}</string>
             <key>signingStyle</key>
-            <string>automatic</string>
+            <string>manual</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>dev.sharpxia.agentreins</key>
+              <string>iOS App Store</string>
+            </dict>
             <key>uploadSymbols</key>
             <true/>
           </dict>

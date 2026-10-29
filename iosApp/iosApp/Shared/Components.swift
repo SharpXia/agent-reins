@@ -29,6 +29,10 @@ struct AgentAvatar: View {
 
     var body: some View {
         RobotAvatar(palette: tint.name, expression: expression, size: size)
+            // 复审修复②：RobotAvatar 是 Canvas，不产生 accessibility 元素，原首字符 Text
+            // 自带的读屏内容随替换消失——聚合成单元素并补「agent 名 + 表情中文名」标签
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(name)，表情\(expression.zhLabel)")
     }
 }
 

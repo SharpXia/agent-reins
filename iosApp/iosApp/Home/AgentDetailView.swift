@@ -227,66 +227,71 @@ struct AgentEditSheet: View {
 
     var body: some View {
         InkSheet(title: "编辑 Agent") {
-            VStack(alignment: .leading, spacing: 10) {
-                // 实时预览（§10.1）：标题下、显示名输入框上方，64pt，当前 tint × 表情；
-                // 表情经 store.agentExpression（读桥已解析值），未定制时直读原始串会判不出派生表情
-                HStack {
-                    Spacer()
-                    RobotAvatar(palette: store.agentTintName(agentId),
-                                expression: store.agentExpression(agentId),
-                                size: 64)
-                    Spacer()
-                }
-                TextField("显示名", text: $name)
-                    .ink(.textMd)
-                    .foregroundColor(c.ink)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
-                    .background(RoundedRectangle(cornerRadius: InkShape.md).fill(c.surfaceTertiary))
-                    .padding(.horizontal, 20)
-                    .onAppear {
-                        guard !loaded else { return }
-                        loaded = true
-                        name = store.lists.agents.first { $0.agentId == agentId }?.name ?? agentId
+            // 复审修复①：新增预览+表情网格后内容总高约 506pt，超过 InkSheet 固定
+            // [.medium, .large] 的 medium（≈437pt@iPhone 18 Pro、≈333pt@SE），纯 VStack 会把
+            // 底部「取消/保存」与网格下半行裁掉且无法滚动——包 ScrollView 保底可滚达
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    // 实时预览（§10.1）：标题下、显示名输入框上方，64pt，当前 tint × 表情；
+                    // 表情经 store.agentExpression（读桥已解析值），未定制时直读原始串会判不出派生表情
+                    HStack {
+                        Spacer()
+                        RobotAvatar(palette: store.agentTintName(agentId),
+                                    expression: store.agentExpression(agentId),
+                                    size: 64)
+                        Spacer()
                     }
-                Text("身份色").ink(.textSm).foregroundColor(c.textTertiary)
-                    .padding(.horizontal, 20)
-                HStack(spacing: 8) {
-                    ForEach(AgentTintName.allCases, id: \.self) { tintName in
-                        let t = agentTint(tintName, isDark: c.isDark)
-                        let selected = store.lists.agents.first { $0.agentId == agentId }?.tint == tintName.rawValue
-                        Circle()
-                            .fill(t.strong)
-                            .frame(width: 30, height: 30)
-                            .overlay(
-                                Circle().strokeBorder(
-                                    selected ? c.ink : c.borderPrimary,
-                                    lineWidth: selected ? 3 : 1
+                    TextField("显示名", text: $name)
+                        .ink(.textMd)
+                        .foregroundColor(c.ink)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(RoundedRectangle(cornerRadius: InkShape.md).fill(c.surfaceTertiary))
+                        .padding(.horizontal, 20)
+                        .onAppear {
+                            guard !loaded else { return }
+                            loaded = true
+                            name = store.lists.agents.first { $0.agentId == agentId }?.name ?? agentId
+                        }
+                    Text("身份色").ink(.textSm).foregroundColor(c.textTertiary)
+                        .padding(.horizontal, 20)
+                    HStack(spacing: 8) {
+                        ForEach(AgentTintName.allCases, id: \.self) { tintName in
+                            let t = agentTint(tintName, isDark: c.isDark)
+                            let selected = store.lists.agents.first { $0.agentId == agentId }?.tint == tintName.rawValue
+                            Circle()
+                                .fill(t.strong)
+                                .frame(width: 30, height: 30)
+                                .overlay(
+                                    Circle().strokeBorder(
+                                        selected ? c.ink : c.borderPrimary,
+                                        lineWidth: selected ? 3 : 1
+                                    )
                                 )
-                            )
-                            .onTapGesture {
-                                store.bridge.setAgentTint(agentId: agentId, tint: tintName.rawValue)
-                                store.bridge.setAgentName(agentId: agentId, name: name)
-                            }
+                                .onTapGesture {
+                                    store.bridge.setAgentTint(agentId: agentId, tint: tintName.rawValue)
+                                    store.bridge.setAgentName(agentId: agentId, name: name)
+                                }
+                        }
                     }
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 10)
-                Text("表情").ink(.textSm).foregroundColor(c.textTertiary)
                     .padding(.horizontal, 20)
-                expressionGrid
-                HStack {
-                    Spacer()
-                    Button("取消") { dismiss() }
+                    .padding(.vertical, 10)
+                    Text("表情").ink(.textSm).foregroundColor(c.textTertiary)
+                        .padding(.horizontal, 20)
+                    expressionGrid
+                    HStack {
+                        Spacer()
+                        Button("取消") { dismiss() }
+                            .ink(.textLg).foregroundColor(c.ink)
+                        Button("保存") {
+                            store.bridge.setAgentName(agentId: agentId, name: name)
+                            dismiss()
+                        }
                         .ink(.textLg).foregroundColor(c.ink)
-                    Button("保存") {
-                        store.bridge.setAgentName(agentId: agentId, name: name)
-                        dismiss()
                     }
-                    .ink(.textLg).foregroundColor(c.ink)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 12)
             }
         }
     }

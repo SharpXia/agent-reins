@@ -97,10 +97,17 @@ jobs:
         run: |
           set -o pipefail
           BUILD=$(date +%s)
+          # 版本号：beta-* tag 推导（beta-0.2.22 → 0.2.22），dispatch 等无 tag 场景回退 0.1.0。
+          # Info.plist 引用 $(MARKETING_VERSION)/$(CURRENT_PROJECT_VERSION)——写成字面量的话
+          # CI 传的版本进不了包，会以固定号撞历史 build 被 ASC 静默丢弃（2026-10-29 实证）
+          TAG="${GITHUB_REF_NAME#refs/tags/}"
+          MV="${TAG#beta-}"
+          case "$MV" in *.*) ;; *) MV="0.1.0" ;; esac
           echo "BUILD_NUMBER=$BUILD" >> "$GITHUB_ENV"
-          # 证书已由上一步闸门保证在钥匙串中。CLI 下自动签名会按"开发模式"评估、强求开发证书
-          # （Xcode GUI 才会自动切分发），故 archive 用 manual 直签分发证书 + 账号既有
-          # "iOS App Store" profile；allowProvisioningUpdates 负责按名下载/续期该 profile
+          echo "MARKETING_VERSION=$MV" >> "$GITHUB_ENV"
+          # manual 直签分发证书 + agentreins-appstore profile：CLI 下自动签名按"开发模式"
+          # 评估、强求开发证书（Xcode GUI 才会自动切分发），manual 才能让 archive 直签分发；
+          # allowProvisioningUpdates 负责按名下载/续期 profile
           xcodebuild \
             -project iosApp/iosApp.xcodeproj \
             -scheme iosApp \
@@ -108,6 +115,7 @@ jobs:
             -destination 'generic/platform=iOS' \
             -archivePath build/AgentReins.xcarchive \
             CURRENT_PROJECT_VERSION=$BUILD \
+            MARKETING_VERSION=$MV \
             CODE_SIGN_STYLE=Manual \
             CODE_SIGN_IDENTITY="Apple Distribution" \
             PROVISIONING_PROFILE_SPECIFIER="agentreins-appstore" \

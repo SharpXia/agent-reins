@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -118,6 +119,15 @@ private fun rowKeyOf(row: ChatRow): String = when (row) {
     is ChatRow.ToolGroup -> row.key
     is ChatRow.Boundary -> "bnd-${row.sessionKey}"
     is ChatRow.CompactMark -> "cmp-${row.sessionKey}"
+}
+
+/**
+ * 钉到列表绝对底部（M4 反馈②③④统一根因）：scrollToItem(last) 把该条消息的**顶边**
+ * 对齐视口顶——长消息超一屏时「到底」实际停在消息中部上方（进会话不到底/回底键无效/
+ * 打字机不跟随全是它）。大 scrollOffset 会被 LazyList 钳制到列表末尾 = 对齐最后一条底边。
+ */
+private suspend fun LazyListState.snapToAbsoluteBottom(totalRows: Int) {
+    if (totalRows > 0) scrollToItem(totalRows - 1, 100_000)
 }
 
 /**
@@ -305,25 +315,23 @@ internal fun ChatScreen(
         // 历史到达一次性锚底：修复「加载出来突然显示且不一定滑到底部」——整表替换会
         // 使 viewport 索引漂移；用户已在滚动则不打扰
         if (historyLoaded && !userScrolledBeforeLoad && contentRowCount > 0 && !listState.isScrollInProgress) {
-            listState.scrollToItem(totalRows - 1)
+            listState.snapToAbsoluteBottom(totalRows)
             initialScrollDone = true
         }
     }
-    // 流式跟随（反馈③重做）：打字机增长/换行、思考条目增删、工具卡状态变化——任何
-    // 内容变化只要用户没上拉离开底部，就用 scrollToItem 直接钉底。旧实现
-    // animateScrollToItem 在连续 delta 下每帧重启永远追不上；「lastVisible>=total-3」
-    // 门槛在 thinking→消息切换（行数塌缩）时会失效把用户留在上面。
+    // 流式跟随（反馈③）：打字机增长/换行、思考条目增删、工具卡状态变化——任何内容
+    // 变化只要用户没上拉离开底部，就钉到绝对底边（带 offset 钳制，长消息也贴真底）。
     val streamingTail = runActive || (currentEntries.lastOrNull() as? Message)?.streaming == true
     val userPinnedUpNow by rememberUpdatedState(userPinnedUp)
     LaunchedEffect(rowsSignature, totalRows, streamingTail) {
         if (contentRowCount == 0) return@LaunchedEffect
         if (!initialScrollDone) {
-            listState.scrollToItem(totalRows - 1)
+            listState.snapToAbsoluteBottom(totalRows)
             initialScrollDone = true
             return@LaunchedEffect
         }
         if (streamingTail && !userPinnedUpNow) {
-            listState.scrollToItem(totalRows - 1)
+            listState.snapToAbsoluteBottom(totalRows)
         }
     }
     LaunchedEffect(listState) {
@@ -341,7 +349,15 @@ internal fun ChatScreen(
     LaunchedEffect(model.sendSignal) {
         if (model.sendSignal == 0) return@LaunchedEffect
         delay(120) // 乐观回显/待发条目落表
-        if (totalRowsNow > 0) listState.animateScrollToItem(totalRowsNow - 1)
+        listState.snapToAbsoluteBottom(totalRowsNow)
+    }
+    // 软键盘唤起（M4 反馈④）：视口被压缩后重钉底部——用户没上拉才跟随
+    val imeBottom = WindowInsets.ime.getBottom(density)
+    LaunchedEffect(imeBottom) {
+        if (imeBottom > 0 && !userPinnedUpNow && contentRowCount > 0) {
+            delay(60) // 等布局按新 inset 收敛一帧
+            listState.snapToAbsoluteBottom(totalRowsNow)
+        }
     }
     // 分区懒加载（M4 反馈②）：分区头进入视口即加载该区（未拉过→首页；有更多→翻更早一页）。
     // 最旧区交给下拉手势（反馈⑤：标准 IM 阻尼交互），其余区保持视口触发；
@@ -521,7 +537,7 @@ internal fun ChatScreen(
                 Surface(
                     onClick = {
                         haptics.tap()
-                        if (totalRows > 0) scope.launch { listState.animateScrollToItem(totalRows - 1) }
+                        scope.launch { listState.snapToAbsoluteBottom(totalRows) }
                     },
                     shape = CircleShape,
                     color = InkTheme.colors.elevated,
@@ -1158,31 +1174,31 @@ private fun ChatInputBar(model: AppModel, haptics: HapticPlayer, modifier: Modif
             // 对话操作（M4 P4）：发送键左侧矢量 icon → 三动作（新开会话/压缩上下文/agent 状态）
             ComposerActions(model = model, haptics = haptics)
             Spacer(Modifier.size(2.dp))
-            // 运行中显示终止键（M4 反馈②：点终止本地立即解锁，不再替换发送键——
-            // 网关 Queue: steer 支持运行中继续发消息，不再被卡死无法输入）
-            if (runActive) {
+            // 单按钮三态（M4 反馈①）：有内容=发送（运行中也发，网关 Queue: steer 排队）；
+            // 空+运行中=终止（本地立即解锁+/stop 级联）；空+空闲=发送禁用
+            if (runActive && model.draft.isBlank()) {
                 StopButton(haptics = haptics, onStop = { model.stopRun() })
-                Spacer(Modifier.size(4.dp))
-            }
-            val enabled = model.draft.isNotBlank()
-            Box(
-                Modifier
-                    .padding(bottom = 6.dp)
-                    .size(34.dp)
-                    .clip(CircleShape)
-                    .background(if (enabled) c.inverse else c.surfaceTertiary)
-                    .clickable(enabled = enabled) {
-                        haptics.tap()
-                        model.send()
-                    },
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.AutoMirrored.Filled.Send,
-                    contentDescription = "发送",
-                    tint = if (enabled) c.paper else c.textDisabled,
-                    modifier = Modifier.size(17.dp),
-                )
+            } else {
+                val enabled = model.draft.isNotBlank()
+                Box(
+                    Modifier
+                        .padding(bottom = 6.dp)
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(if (enabled) c.inverse else c.surfaceTertiary)
+                        .clickable(enabled = enabled) {
+                            haptics.tap()
+                            model.send()
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Send,
+                        contentDescription = "发送",
+                        tint = if (enabled) c.paper else c.textDisabled,
+                        modifier = Modifier.size(17.dp),
+                    )
+                }
             }
         }
     }

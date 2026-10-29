@@ -3,6 +3,12 @@ import composeApp
 
 @main
 struct AgentReinsApp: App {
+    @Environment(\.scenePhase) private var scenePhase
+
+    init() {
+        BackSwipe.scheduleInstall()
+    }
+
     var body: some Scene {
         WindowGroup {
             RootView()
@@ -22,6 +28,7 @@ enum AppRoute: Hashable {
 
 struct RootView: View {
     @State private var store = AppStore.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         Group {
@@ -33,6 +40,9 @@ struct RootView: View {
         }
         .inkTheme()
         .preferredColorScheme(store.colorSchemeOverride)
+        .onChange(of: scenePhase) { phase in
+            if phase == .active { BackSwipe.attach() }
+        }
         .sheet(item: approvalItem) { req in
             ApprovalSheetView(request: req)
         }
@@ -69,22 +79,23 @@ final class NavCoordinator {
 struct MainTabsView: View {
     @State private var store = AppStore.shared
     @State private var nav = NavCoordinator()
+    @State private var tab = 0
 
     var body: some View {
-        TabView {
-            Tab("会话", systemImage: "house.fill") {
+        TabView(selection: $tab) {
+            Tab("会话", systemImage: "house.fill", value: 0) {
                 NavigationStack(path: $nav.sessionsPath) {
                     HomeView()
                         .navigationDestination(for: AppRoute.self) { route($0) }
                 }
             }
-            Tab("搜索", systemImage: "magnifyingglass") {
+            Tab("搜索", systemImage: "magnifyingglass", value: 1) {
                 NavigationStack(path: $nav.searchPath) {
                     SearchView()
                         .navigationDestination(for: AppRoute.self) { route($0) }
                 }
             }
-            Tab("设置", systemImage: "gearshape.fill") {
+            Tab("设置", systemImage: "gearshape.fill", value: 2) {
                 NavigationStack(path: $nav.settingsPath) {
                     SettingsView()
                         .navigationDestination(for: AppRoute.self) { route($0) }
@@ -92,6 +103,16 @@ struct MainTabsView: View {
             }
         }
         .environment(nav)
+        .task {
+            // Dev 路由直达（无触控注入的自动化走查）：AGENTREINS_DEV_ROUTE=connection
+            if let route = ProcessInfo.processInfo.environment["AGENTREINS_DEV_ROUTE"] {
+                if route == "connection" {
+                    tab = 2
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                    nav.settingsPath.append(AppRoute.connection)
+                }
+            }
+        }
         .onChange(of: store.eventSeq) { _, _ in
             // createNewSession 完成直达（navigationEvents）：切回会话 tab 并 push 会话页
             if let key = store.openSessionEvent {

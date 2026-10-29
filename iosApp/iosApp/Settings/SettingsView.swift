@@ -267,14 +267,26 @@ struct ConnectionView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    field("网关地址", text: $url, placeholder: "ws://<你的网关IP>:18789") {
+                    field("网关地址", text: $url, placeholder: "ws://<你的网关IP>:18789",
+                          echo: { store.conn.url }) {
                         store.bridge.setUrl(url: $0)
                     }
                     field("Fallback 地址（逗号分隔，主地址失败时按序切换）", text: $fallbackRaw,
-                          placeholder: "wss://gw.example.com:443") {
+                          placeholder: "wss://gw.example.com:443",
+                          echo: { store.conn.alternateUrls.joined(separator: ", ") }) {
                         store.bridge.setAlternateUrls(rawList: $0)
                     }
-                    field("API Key", text: $apiKey, placeholder: "", secure: true) {
+                    if store.conn.lastError != nil && store.conn.alternateUrls.isEmpty {
+                        Text("⚠️ 主地址连接失败且未配置 Fallback——请填入可用的远程地址（wss://…），主地址不可达时会自动切换。不填则只试主地址。")
+                            .ink(.textSm)
+                            .foregroundColor(c.warningText)
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(RoundedRectangle(cornerRadius: InkShape.md).fill(c.warningSubtle))
+                            .padding(.horizontal, 16)
+                    }
+                    field("API Key", text: $apiKey, placeholder: "", secure: true,
+                          echo: { store.conn.apiKey }) {
                         store.bridge.setApiKey(apiKey: $0)
                     }
                     if store.conn.hasPairedCredential {
@@ -285,7 +297,8 @@ struct ConnectionView: View {
                     Divider().overlay(c.borderSecondary).padding(.horizontal, 16)
 
                     HStack(spacing: 8) {
-                        field("Setup Code（扫码或粘贴 oc-pair://…）", text: $setupCode, placeholder: "") {
+                        field("Setup Code（扫码或粘贴 oc-pair://…）", text: $setupCode, placeholder: "",
+                              echo: { store.conn.setupCode }) {
                             store.bridge.setSetupCode(code: $0)
                         }
                         Button {
@@ -305,7 +318,9 @@ struct ConnectionView: View {
                     connectButton
                         .padding(.top, 4)
 
-                    if store.conn.kind == "connected", let u = store.conn.connectedUrl {
+                    if store.conn.kind == "connected" {
+                        // connectedUrl 与 Connected 状态分两拍到达，瞬时 nil 回退主地址展示
+                        let u = store.conn.connectedUrl ?? store.conn.url
                         Text("\(connectionSourceLabel(u)) · \(u)")
                             .ink(.textSm).foregroundColor(c.textTertiary)
                             .padding(.horizontal, 16)
@@ -387,38 +402,52 @@ struct ConnectionView: View {
         .background(Capsule().fill(c.surfaceTertiary))
     }
 
+    /// 连接按钮三态（真机反馈：禁用态几乎不可见=「按钮消失」）——
+    /// 忙碌=高对比禁用+spinner；可连=实底；不可连=半透明但清晰可辨。已连接态整颗隐藏（断开键接管）。
+    @ViewBuilder
     private var connectButton: some View {
         let canConnect = !store.conn.setupCode.isEmpty ||
             (!store.conn.url.isEmpty && (!store.conn.apiKey.isEmpty || store.conn.hasPairedCredential))
         let connected = store.conn.kind == "connected"
-        let label: String = {
-            if store.conn.kind == "pairing" { return "等待批准…" }
-            if store.conn.busy { return "连接中…" }
-            if !store.conn.setupCode.isEmpty { return "扫码配对" }
-            return "连接"
-        }()
-        return Button {
-            Feedback.hapticTap(enabled: store.misc.hapticsEnabled)
-            store.bridge.connect()
-        } label: {
-            Text(label)
-                .ink(.textLg)
-                .foregroundColor(c.paper)
+        let connecting = store.conn.busy || store.conn.kind == "connecting" || store.conn.kind == "pairing"
+        if !connected {
+            let label: String = {
+                if store.conn.kind == "pairing" { return "等待批准…" }
+                if connecting { return "连接中…" }
+                if !store.conn.setupCode.isEmpty { return "扫码配对" }
+                return "连接"
+            }()
+            Button {
+                Feedback.hapticTap(enabled: store.misc.hapticsEnabled)
+                store.bridge.connect()
+            } label: {
+                HStack(spacing: 8) {
+                    if connecting {
+                        ProgressView().tint(c.paper)
+                    }
+                    Text(label)
+                        .ink(.textLg)
+                        .foregroundColor(c.paper)
+                }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 13)
                 .background(
                     RoundedRectangle(cornerRadius: InkShape.xl)
-                        .fill(canConnect && !store.conn.busy && !connected && store.conn.kind != "connecting"
-                              ? c.inverse : c.surfaceTertiary)
+                        .fill(c.inverse.opacity(canConnect && !connecting ? 1.0 : (connecting ? 0.65 : 0.35)))
                 )
+            }
+            .buttonStyle(.plain)
+            .disabled(!canConnect || connecting)
+            .padding(.horizontal, 16)
         }
-        .buttonStyle(.plain)
-        .disabled(!canConnect || store.conn.busy || connected || store.conn.kind == "connecting")
-        .padding(.horizontal, 16)
     }
 
+    /// 表单字段：onAppear 装载快照值时 onChange 会立即触发——回写 model 会把显示值
+    /// 污染进候选列表（真机反馈：fallback 未配置却出现幽灵地址）。echoCheck 与模型
+    /// 当前值相等时跳过回写。
     private func field(_ label: String, text: Binding<String>, placeholder: String,
-                       secure: Bool = false, onCommit: @escaping (String) -> Void) -> some View {
+                       secure: Bool = false, echo: @escaping () -> String,
+                       onCommit: @escaping (String) -> Void) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label).ink(.textSm).foregroundColor(c.textTertiary)
                 .padding(.horizontal, 16)
@@ -435,7 +464,10 @@ struct ConnectionView: View {
             .padding(.vertical, 10)
             .background(RoundedRectangle(cornerRadius: InkShape.md).fill(c.surfaceTertiary))
             .padding(.horizontal, 16)
-            .onChange(of: text.wrappedValue) { _, v in onCommit(v) }
+            .onChange(of: text.wrappedValue) { _, v in
+                if v == echo() { return }
+                onCommit(v)
+            }
         }
     }
 }

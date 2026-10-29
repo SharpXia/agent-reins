@@ -19,6 +19,7 @@
 		1A6FBB000000000000000003 /* InkTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000003 /* InkTheme.swift */; };
 		1A6FBB000000000000000004 /* Format.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000004 /* Format.swift */; };
 		1A6FBB000000000000000005 /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000005 /* Components.swift */; };
+		1A6FBB000000000000000011 /* BackSwipe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000011 /* BackSwipe.swift */; };
 		1A6FBB000000000000000006 /* ChatRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000006 /* ChatRows.swift */; };
 		1A6FBB000000000000000007 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000007 /* ChatView.swift */; };
 		1A6FBB000000000000000008 /* MessageRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000008 /* MessageRows.swift */; };
@@ -49,6 +50,7 @@
 		1A6FAA000000000000000003 /* InkTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InkTheme.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000004 /* Format.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Format.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000005 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
+		1A6FAA000000000000000011 /* BackSwipe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipe.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000006 /* ChatRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatRows.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000007 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000008 /* MessageRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageRows.swift; sourceTree = "<group>"; };
@@ -148,6 +150,7 @@
 			children = (
 				1A6FAA000000000000000004 /* Format.swift */,
 				1A6FAA000000000000000005 /* Components.swift */,
+				1A6FAA000000000000000011 /* BackSwipe.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -326,6 +329,7 @@
 				1A6FBB000000000000000003 /* InkTheme.swift in Sources */,
 				1A6FBB000000000000000004 /* Format.swift in Sources */,
 				1A6FBB000000000000000005 /* Components.swift in Sources */,
+				1A6FBB000000000000000011 /* BackSwipe.swift in Sources */,
 				1A6FBB000000000000000006 /* ChatRows.swift in Sources */,
 				1A6FBB000000000000000007 /* ChatView.swift in Sources */,
 				1A6FBB000000000000000008 /* MessageRows.swift in Sources */,

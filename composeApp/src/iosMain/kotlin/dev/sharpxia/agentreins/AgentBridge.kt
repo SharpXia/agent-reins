@@ -212,6 +212,7 @@ class AgentBridge(internal val model: AppModel) {
         scope.launch {
             snapshotFlow {
                 val st = model.status
+                println("AgentReins[connsnap] status=${st::class.simpleName} busy=${model.busy} lastError=${model.lastError}")
                 BridgeConn(
                     kind = when (st) {
                         is GatewayStatus.Connected -> "connected"

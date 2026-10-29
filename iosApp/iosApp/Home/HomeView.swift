@@ -29,6 +29,23 @@ struct HomeView: View {
         }
         .background(c.paper)
         .navigationBarHidden(true)
+        // 左缘右滑开抽屉（CMP 版 ModalNavigationDrawer 边缘手势的复刻）
+        .overlay(alignment: .leading) {
+            Color.clear
+                .frame(width: 26)
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 12)
+                        .onEnded { v in
+                            if v.translation.width > 48 && abs(v.translation.height) < 60 {
+                                Feedback.hapticTap(enabled: store.misc.hapticsEnabled)
+                                showDrawer = true
+                            }
+                        }
+                )
+                .allowsHitTesting(store.lists.conversations.isEmpty == false)
+        }
         .sheet(isPresented: $showDrawer) { AgentsDrawerView() }
         .sheet(item: $taskSheetConv) { conv in
             TaskDetailSheetView(conv: conv)

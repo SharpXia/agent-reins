@@ -38,6 +38,18 @@ struct ChatView: View {
             if let err = store.conn.lastError {
                 ErrorBanner(message: err) { store.bridge.clearError() }
             }
+            if store.isOffline {
+                HStack(spacing: 6) {
+                    Image(systemName: "wifi.slash")
+                        .font(.system(size: 11))
+                    Text("离线 · 显示本地缓存，连接后自动更新")
+                        .ink(.textXs)
+                }
+                .foregroundColor(c.textTertiary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 5)
+                .background(c.surfaceTertiary)
+            }
             chatList
         }
         .background(c.paper)

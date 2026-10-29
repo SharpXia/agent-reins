@@ -98,8 +98,8 @@ jobs:
           BUILD=$(date +%s)
           echo "BUILD_NUMBER=$BUILD" >> "$GITHUB_ENV"
           # 证书已由上一步闸门保证在钥匙串中，allowProvisioningUpdates 仅拉/更新 profile；
-          # 工程模板把 CODE_SIGN_IDENTITY 写死成 Apple Development，这里覆盖为分发身份，
-          # archive 直接用分发证书签（旧链路是开发证书签+export 重签，正是证书 churn 的根源）
+          # 工程不再写死 CODE_SIGN_IDENTITY（已删模板遗留的 Apple Development），
+          # 自动签名自然选择：构建用开发证书、archive 用分发证书
           xcodebuild \
             -project iosApp/iosApp.xcodeproj \
             -scheme iosApp \
@@ -107,7 +107,6 @@ jobs:
             -destination 'generic/platform=iOS' \
             -archivePath build/AgentReins.xcarchive \
             CURRENT_PROJECT_VERSION=$BUILD \
-            CODE_SIGN_IDENTITY="Apple Distribution" \
             -allowProvisioningUpdates \
             -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
             -authenticationKeyID "${{ secrets.ASC_API_KEY_ID }}" \

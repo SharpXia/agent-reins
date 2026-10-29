@@ -1,16 +1,23 @@
 name: TestFlight
 
-# ⚠️ 2026-10-29 停用出包：automatic 签名 + -allowProvisioningUpdates 会在 CI 空钥匙串上
-# 每次新建分发证书，Apple 超限（2 张）自动吊销最老一张，连累本机证书被反复 revoke。
-# 恢复前置（证书固定后）：p12+私钥 入 Secrets → CI 临时 keychain 导入 → manual 签名
-# + 固定 profile → 再放开下面 on: 与签名参数。触发器注释期间 beta-* tag 不会出包。
-# 依赖仓库 Secrets：ASC_API_KEY_P8_BASE64 / ASC_API_KEY_ID / ASC_API_ISSUER_ID / APPLE_TEAM_ID
-# （ASC = App Store Connect，Team API Key；.p8 内容 base64 后入 secrets，绝不入库）。
-# on:
-#   workflow_dispatch:
-#   push:
-#     tags:
-#       - 'beta-*'
+# 远程验收出包——固定分发证书版（2026-10-29 改造）。
+# 背景：此前 automatic 签名在空钥匙串 runner 上每次新建分发证书，Apple 超限（2 张）
+# 自动吊销最老一张，反复吊销用户本机证书。现改为 CI 导入固定 .p12（含私钥），
+# archive 前有身份闸门：证书没进来就中止，xcodebuild 永远不在无证书状态下运行，
+# -allowProvisioningUpdates 只用于拉取/更新 profile，不再新建证书。
+#
+# 待填 Secrets（证书处理完后，在仓库根目录执行）：
+#   base64 -i <导出的.p12> | gh secret set DIST_CERT_P12_BASE64
+#   gh secret set P12_PASSWORD        # 导出 .p12 时设置的密码
+# 注意：.p12 必须含私钥（钥匙串访问"我的证书"里右键导出），证书类型 Apple Distribution。
+# 已有 Secrets（勿动）：ASC_API_KEY_P8_BASE64 / ASC_API_KEY_ID / ASC_API_ISSUER_ID / APPLE_TEAM_ID
+#
+# 启用路径：填完 secrets → 手动 dispatch 跑一次验证 → 全绿后放开下面 push/beta-* 注释。
+on:
+  workflow_dispatch:
+  # push:
+  #   tags:
+  #     - 'beta-*'
 
 concurrency:
   group: ${{ github.workflow }}
@@ -60,13 +67,37 @@ jobs:
           ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
           ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
 
+      - name: Import fixed distribution certificate
+        env:
+          DIST_CERT_P12_BASE64: ${{ secrets.DIST_CERT_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+        run: |
+          if [ -z "$DIST_CERT_P12_BASE64" ]; then
+            echo "::error::Secret DIST_CERT_P12_BASE64 未设置——按文件头说明导出 .p12 并 gh secret set"
+            exit 1
+          fi
+          CERT_PATH="$RUNNER_TEMP/dist.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 16)
+          echo "$DIST_CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" > /dev/null
+          # 闸门：没有可签名的分发身份就中止，绝不让 xcodebuild 再去新建证书
+          COUNT=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -cE 'Apple Distribution|iPhone Distribution' || true)
+          if [ "$COUNT" -lt 1 ]; then
+            echo "::error::keychain 中没有有效的分发签名身份——检查 .p12 是否含私钥、P12_PASSWORD 是否正确"
+            exit 1
+          fi
+
       - name: Archive (App Store signing, build number = epoch seconds)
         run: |
           set -o pipefail
           BUILD=$(date +%s)
           echo "BUILD_NUMBER=$BUILD" >> "$GITHUB_ENV"
-          # 签名参数已摘除（原 -allowProvisioningUpdates + authenticationKey* 会新建证书）；
-          # 证书固定后在此接 manual 签名，见文件头恢复前置。
+          # 证书已由上一步闸门保证在钥匙串中，allowProvisioningUpdates 仅拉/更新 profile
           xcodebuild \
             -project iosApp/iosApp.xcodeproj \
             -scheme iosApp \
@@ -74,6 +105,10 @@ jobs:
             -destination 'generic/platform=iOS' \
             -archivePath build/AgentReins.xcarchive \
             CURRENT_PROJECT_VERSION=$BUILD \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
+            -authenticationKeyID "${{ secrets.ASC_API_KEY_ID }}" \
+            -authenticationKeyIssuerID "${{ secrets.ASC_API_ISSUER_ID }}" \
             archive 2>&1 | tail -40
 
       - name: Export IPA (TestFlight / app-store-connect)
@@ -99,6 +134,10 @@ jobs:
             -archivePath build/AgentReins.xcarchive \
             -exportOptionsPlist build/ExportOptions.plist \
             -exportPath build/ipa \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
+            -authenticationKeyID "${{ secrets.ASC_API_KEY_ID }}" \
+            -authenticationKeyIssuerID "${{ secrets.ASC_API_ISSUER_ID }}" \
             2>&1 | tail -60
 
       - name: Upload to TestFlight
@@ -112,7 +151,8 @@ jobs:
       - name: Cleanup key material
         if: always()
         run: |
-          rm -f "$RUNNER_TEMP/AuthKey.p8" "$RUNNER_TEMP/asc-key.json"
+          security delete-keychain "$RUNNER_TEMP/build.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/AuthKey.p8" "$RUNNER_TEMP/asc-key.json" "$RUNNER_TEMP/dist.p12"
 
       - name: Summary
         run: |

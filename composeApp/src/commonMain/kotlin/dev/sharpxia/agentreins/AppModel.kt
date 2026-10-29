@@ -174,8 +174,10 @@ class AppModel(
     private var draftPersistJob: Job? = null
     /** 用户主动断开时置位，回前台不自动重连；connect() 成功路径清零。 */
     private var explicitDisconnect = false
-    /** 向上翻页加载中去重（防 scroll 事件连发重复请求）。 */
-    private var loadingOlder = false
+
+    /** 向上翻页加载中（M4 反馈⑤：下拉 loading 指示的数据源；防连发重复请求）。 */
+    var loadingOlder by mutableStateOf(false)
+        private set
 
     // ---- 会话列表本地 overlay（M2.6：pinned/archived 本地显式状态，网关同步留 M3+） ----
     // mutableStateOf：collector 在 Default 线程写、UI 线程读写，走 snapshot 保证可见性
@@ -187,6 +189,10 @@ class AppModel(
     // ---- M4 P5：conversation 行内执行状态（operator 全量广播派生） ----
     /** 全局在途 run 的 sessionKey 集（含派生 subagent 会话）。 */
     var activeRunKeys by mutableStateOf<Set<String>>(emptySet())
+        private set
+
+    /** 会话级在途发送（M4 反馈④：气泡左侧小 loading 的数据源）。 */
+    var sendingSessionKeys by mutableStateOf<Set<String>>(emptySet())
         private set
 
     /**
@@ -548,6 +554,10 @@ class AppModel(
         }
     }
 
+    /** 发送信号（M4 反馈④）：每次用户发送 +1，聊天页据此滚到底部看到刚发的消息。 */
+    var sendSignal by mutableStateOf(0)
+        private set
+
     fun connect() {
         if (busy) return
         val code = setupCode.trim()
@@ -603,7 +613,10 @@ class AppModel(
         outboxJob?.cancel()
         statusJob = scope.launch { c.status.collect { status = it } }
         activeRunsJob?.cancel()
-        activeRunsJob = scope.launch { c.activeRuns.collect { activeRunKeys = it } }
+        activeRunsJob = scope.launch {
+            launch { c.activeRuns.collect { activeRunKeys = it } }
+            launch { c.sendingSessions.collect { sendingSessionKeys = it } }
+        }
         approvalsJob?.cancel()
         approvalsJob = scope.launch {
             c.approvals.collect { req ->
@@ -905,6 +918,7 @@ class AppModel(
     }
 
     private fun sendText(sessionKey: String, text: String) {
+        sendSignal++ // 聊天页消费：滚到底部露出刚发的消息（M4 反馈④）
         val c = client
         if (c == null) {
             // 尚无 client（冷启动离线）：直接入缓存队列，连接成功后由 flush 补发

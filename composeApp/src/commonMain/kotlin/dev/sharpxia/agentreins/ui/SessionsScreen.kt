@@ -26,7 +26,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Menu
@@ -120,17 +119,17 @@ private fun ConversationList(
     LaunchedEffect(listState.isScrollInProgress) {
         if (listState.isScrollInProgress) revealedRowId = null
     }
-    // Agent 过滤：null = All；rememberSaveable——进会话再返回不丢筛选
-    var agentFilter by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
-    val filterMatches: (Conversation) -> Boolean = { c -> agentFilter == null || c.agentId == agentFilter }
-    val mainConvs = remember(model.conversations, agentFilter) {
-        model.conversations.filter { !it.hidden && !it.archived }.filter(filterMatches)
+    // M4 反馈③：首页只列当前 app 渠道的 conversation（每 agent 恰一个）；渠道对话
+    // 仅在 agent 编辑页可见。每 (agent × channel) 恰一个 conversation（反馈①）。
+    val isAppConv: (Conversation) -> Boolean = { it.kind == ConversationKind.MAINLINE }
+    val mainConvs = remember(model.conversations) {
+        model.conversations.filter { isAppConv(it) && !it.hidden && !it.archived }
     }
-    val archived = remember(model.conversations, agentFilter) {
-        model.conversations.filter { it.archived && !it.hidden }.filter(filterMatches)
+    val archived = remember(model.conversations) {
+        model.conversations.filter { isAppConv(it) && it.archived && !it.hidden }
     }
-    val hidden = remember(model.conversations, agentFilter) {
-        model.conversations.filter { it.hidden }.filter(filterMatches)
+    val hidden = remember(model.conversations) {
+        model.conversations.filter { isAppConv(it) && it.hidden }
     }
     val summaries = remember(model.sessions, model.agentProfiles) {
         dev.sharpxia.agentreins.AgentRegistry.summarize(model.sessions, model.agentProfiles)
@@ -138,9 +137,6 @@ private fun ConversationList(
     val drawerState = androidx.compose.material3.rememberDrawerState(
         androidx.compose.material3.DrawerValue.Closed,
     )
-    val selectedProfile = agentFilter?.let {
-        model.agentProfiles[it] ?: dev.sharpxia.agentreins.AgentProfile.default(it)
-    }
 
     StatusBarTapEffect {
         if (mainConvs.isNotEmpty()) {
@@ -166,47 +162,29 @@ private fun ConversationList(
                         color = InkTheme.colors.ink,
                         modifier = Modifier.padding(start = 20.dp, top = 24.dp, bottom = 6.dp),
                     )
-                    // All（默认）：显示全部对话
-                    DrawerAgentRow(
-                        name = "All",
-                        subtitle = "全部对话",
-                        tintName = null,
-                        selected = agentFilter == null,
-                        onClick = {
-                            haptics.tap()
-                            agentFilter = null
-                            showStash = false
-                            scope.launch { drawerState.close() }
-                        },
-                    )
+                    // M4 反馈②：点行或点头像同一去处——该 agent 在本 app 的 conversation
                     summaries.forEach { s ->
                         DrawerAgentRow(
                             name = s.profile.name,
                             subtitle = "${s.sessionCount} 个会话",
                             tintName = s.profile.tint,
-                            selected = agentFilter == s.profile.agentId,
                             onClick = {
                                 haptics.tap()
-                                agentFilter = s.profile.agentId
-                                showStash = false
-                                scope.launch { drawerState.close() }
-                            },
-                            // 头像点击 = 进该 agent 的对话（M4 P2：头像即对话入口）
-                            onOpenConversation = {
                                 scope.launch { drawerState.close() }
                                 val convId = model.conversationIdForAgent(s.profile.agentId)
                                 if (convId != null) onOpenConversation(convId) else onCreateFor(s.profile.agentId)
                             },
                             onEdit = {
-                                agentFilter = s.profile.agentId
+                                haptics.tap()
                                 scope.launch { drawerState.close() }
                                 onOpenAgent(s.profile.agentId)
                             },
-                            // ＋ = 进入对话 + 新开主 session（快捷语义；见 M4 需求 R5）
+                            // ＋ = 进入对话（无主线会话则创建首个主 session）
                             onCreate = {
                                 haptics.tap()
                                 scope.launch { drawerState.close() }
-                                onCreateFor(s.profile.agentId)
+                                val convId = model.conversationIdForAgent(s.profile.agentId)
+                                if (convId != null) onOpenConversation(convId) else onCreateFor(s.profile.agentId)
                             },
                             creating = model.creatingSession,
                         )
@@ -230,30 +208,10 @@ private fun ConversationList(
                         tint = InkTheme.colors.ink,
                     )
                 }
-                // Agent 头像：筛选中显示，点击进该 agent 的对话
-                if (agentFilter != null && selectedProfile != null) {
-                    AgentTintScope(selectedProfile.tint) {
-                        Box(
-                            Modifier
-                                .size(34.dp)
-                                .clickable {
-                                    val convId = model.conversationIdForAgent(selectedProfile.agentId)
-                                    if (convId != null) onOpenConversation(convId) else onCreateFor(selectedProfile.agentId)
-                                },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            AgentAvatar(LocalAgentTint.current, selectedProfile.name, size = 34)
-                        }
-                    }
-                    Spacer(Modifier.size(2.dp))
-                }
+                // Agent 头像（筛选区已移除——M4 反馈②：抽屉是唯一 agent 入口）
                 Column(Modifier.weight(1f)) {
                     Text(
-                        when {
-                            showStash -> "收纳"
-                            agentFilter != null -> selectedProfile?.name ?: agentFilter!!
-                            else -> "会话"
-                        },
+                        if (showStash) "收纳" else "会话",
                         style = InkTheme.type.headingMd,
                         color = InkTheme.colors.ink,
                     )
@@ -261,7 +219,6 @@ private fun ConversationList(
                         when {
                             showStash -> "归档 ${archived.size} · 隐藏 ${hidden.size}"
                             offline -> "离线中 · 显示缓存列表"
-                            agentFilter != null -> "${mainConvs.size} 个对话 · 来自 ${selectedProfile?.name ?: agentFilter}"
                             else -> "${mainConvs.size} 个对话"
                         },
                         style = InkTheme.type.textSm,
@@ -309,37 +266,19 @@ private fun ConversationList(
                     onDismissRequest = { pickerOpen = false },
                     containerColor = InkTheme.colors.elevated,
                 ) {
-                    val options = buildList {
-                        agentFilter?.let { cur ->
-                            // 过滤 agent 可能不在 summaries（可见对话全归档）：合成首项保证
-                            // 「进当前 agent 的对话」始终可得
-                            val summary = summaries.firstOrNull { it.profile.agentId == cur }
-                                ?: dev.sharpxia.agentreins.AgentSummary(
-                                    profile = model.agentProfiles[cur]
-                                        ?: dev.sharpxia.agentreins.AgentProfile.default(cur),
-                                    sessionCount = 0,
-                                    unreadTotal = 0,
-                                    lastActiveAtMs = null,
-                                    mainSessionKey = null,
-                                )
-                            add(summary to true)
-                        }
-                        summaries.forEach { s ->
-                            if (agentFilter == null || s.profile.agentId != agentFilter) add(s to false)
-                        }
-                    }
+                    val options = summaries
                     if (options.isEmpty()) {
                         androidx.compose.material3.DropdownMenuItem(
                             text = { Text("尚无 agent", style = InkTheme.type.textMd, color = InkTheme.colors.textTertiary) },
                             onClick = {},
                         )
                     }
-                    options.forEach { (s, first) ->
+                    options.forEach { s ->
                         androidx.compose.material3.DropdownMenuItem(
                             text = {
                                 Column {
                                     Text(
-                                        if (first) "进入「" + s.profile.name + "」的对话" else s.profile.name,
+                                        s.profile.name,
                                         style = InkTheme.type.textLg,
                                         color = InkTheme.colors.ink,
                                     )
@@ -583,15 +522,13 @@ private fun SwipeActionButton(
     }
 }
 
-/** 抽屉行：All/Agent 选择；头像点击 = 进对话；＋ = 新开主 session 并进入；✎ = 编辑进 Agent 域页。 */
+/** 抽屉行（M4 反馈②）：整行点击 = 进该 agent 的 app 对话；＋ 同义；✎ = 编辑页。 */
 @Composable
 private fun DrawerAgentRow(
     name: String,
     subtitle: String,
     tintName: AgentTintName?,
-    selected: Boolean,
     onClick: () -> Unit,
-    onOpenConversation: (() -> Unit)? = null,
     onEdit: (() -> Unit)? = null,
     onCreate: (() -> Unit)? = null,
     creating: Boolean = false,
@@ -623,31 +560,17 @@ private fun DrawerAgentRow(
                 }
             }
             else -> AgentTintScope(tintName) {
-                if (onOpenConversation != null) {
-                    Box(Modifier.clickable(onClick = onOpenConversation)) {
-                        AgentAvatar(LocalAgentTint.current, name)
-                    }
-                } else {
-                    AgentAvatar(LocalAgentTint.current, name)
-                }
+                AgentAvatar(LocalAgentTint.current, name)
             }
         }
         Column(Modifier.weight(1f).padding(horizontal = 12.dp, vertical = 10.dp)) {
             Text(
                 name,
-                style = if (selected) InkTheme.type.headingXs else InkTheme.type.textLg,
-                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                style = InkTheme.type.textLg,
+                fontWeight = FontWeight.Medium,
                 color = InkTheme.colors.ink,
             )
             Text(subtitle, style = InkTheme.type.textXs, color = InkTheme.colors.textTertiary)
-        }
-        if (selected) {
-            Icon(
-                Icons.Filled.Check,
-                contentDescription = "已选",
-                tint = InkTheme.colors.ink,
-                modifier = Modifier.size(16.dp),
-            )
         }
         if (onCreate != null) {
             if (creating) {

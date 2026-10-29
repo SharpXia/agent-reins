@@ -520,6 +520,7 @@ class OpenClawClient(
                 content = content,
             ),
         )
+        scheduleBackfill(sessionId, HISTORY_RELOAD_DELAY) // 受理后兜底回填（同 outbox 路径）
     }
 
     /** 单条补发：成功置 SENT 并乐观回显；结果不明/失败保持 PENDING、重试计数+1。
@@ -529,6 +530,8 @@ class OpenClawClient(
         mutex.withLock {
             sendingKeys += cmd.idempotencyKey
             sendingSnapshot = sendingKeys.toSet()
+            sendingSessionCounts[cmd.sessionKey] = (sendingSessionCounts[cmd.sessionKey] ?: 0) + 1
+            _sendingSessions.value = sendingSessionCounts.keys.toSet()
         }
         try {
             return sendOutboxCommandInner(cmd)
@@ -536,6 +539,9 @@ class OpenClawClient(
             mutex.withLock {
                 sendingKeys -= cmd.idempotencyKey
                 sendingSnapshot = sendingKeys.toSet()
+                val n = (sendingSessionCounts[cmd.sessionKey] ?: 1) - 1
+                if (n <= 0) sendingSessionCounts.remove(cmd.sessionKey) else sendingSessionCounts[cmd.sessionKey] = n
+                _sendingSessions.value = sendingSessionCounts.keys.toSet()
             }
             refreshOutboxCount() // 在途态迁移即时驱动 UI 气泡刷新
         }
@@ -570,6 +576,10 @@ class OpenClawClient(
                 ),
             )
             refreshOutboxCount()
+            // 受理后兜底回填（M4 反馈④实测缺口）：/status 这类网关原生应答不产生 agent
+            // run 事件——终局回填不触发，回复永远不显示。受理即排一次延迟回填，
+            // 与限频窗口合并；正常 run 场景 lifecycle 终局的回填照旧（幂等）。
+            scheduleBackfill(cmd.sessionKey, HISTORY_RELOAD_DELAY)
             true
         } catch (e: TimeoutCancellationException) {
             // 回执超时 ≠ 发送失败（真机反馈 bug①）：agent 忙时网关排队应答，15s 内无回执
@@ -612,6 +622,14 @@ class OpenClawClient(
 
     /** UI 查询：该命令是否在途（在途不显示待发气泡）。 */
     fun isSending(idempotencyKey: String): Boolean = idempotencyKey in sendingSnapshot
+
+    /**
+     * 会话级在途发送（M4 真机反馈④）：气泡左侧小 loading 的数据源——
+     * 在途期间乐观回显尚未落表，按会话计数（同会话多命令并发）。
+     */
+    private val sendingSessionCounts = mutableMapOf<String, Int>()
+    private val _sendingSessions = MutableStateFlow<Set<String>>(emptySet())
+    val sendingSessions: StateFlow<Set<String>> = _sendingSessions.asStateFlow()
 
     /**
      * 重连后补发：PENDING 优先于 SENT，FIFO；断连即停（剩余下轮再补）。

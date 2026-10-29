@@ -57,6 +57,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
@@ -186,7 +187,8 @@ internal fun ChatScreen(
     } else {
         remember(rowsSignature) { buildChatRows(currentEntries) }
     }
-    // 分区锚定（M4 P5）：agent 主页 sessions 行点击 → 时间线定位到该 session 分区头
+    // 分区锚定（M4 P5）：agent 主页 sessions 行点击 → 时间线定位到该 session 分区头，
+    // 并确保该区内容已加载（视口触发只管进入视口的分区头，锚定可能直接落在中段）
     val currentRows by rememberUpdatedState(rows)
     LaunchedEffect(model.pendingConvAnchor) {
         val anchor = model.pendingConvAnchor ?: return@LaunchedEffect
@@ -199,6 +201,7 @@ internal fun ChatScreen(
         if (idx >= 0) {
             listState.scrollToItem(idx)
             model.pendingConvAnchor = null
+            model.loadSectionHistoryIfNeeded(anchor)
         }
     }
     val pending = model.pendingOutbox
@@ -207,10 +210,16 @@ internal fun ChatScreen(
     val runActive = state?.activeRunId != null
     // 首页历史是否已到达（真机反馈 bug②）：未到达且无缓存时显示加载态而非空态
     val historyLoaded = state?.historyLoaded == true
-    // 拼接模式：更早按钮看最旧（最上）区是否还有历史
-    val showLoadingOlder = contentRowCount > 0 &&
-        if (timeline != null) timeline.lastOrNull()?.state?.hasMoreHistory == true
-        else state?.hasMoreHistory == true
+    // 下拉加载（M4 反馈⑤）：per-session=loadingOlder；时间线=任一分区在加载
+    val pullRefreshing = if (timeline != null) model.convSectionLoading != null else model.loadingOlder
+    // 气泡左侧小 loading（M4 反馈④）：最后一条用户消息仍是时间线尾部 且 (在途发送 || run 活跃)
+    // ——即「我发的消息还没被响应」的完整窗口；agent 开始输出（thinking/工具/回复条目在尾）
+    // 后自动熄灭，交给 ThinkingCard/TypingIndicator
+    val lastUserEntryIndex = rows.indexOfLast {
+        it is ChatRow.Entry && it.entry is Message && (it.entry as Message).role == Message.Role.USER
+    }
+    val showTailSpinner = (sessionKey in model.sendingSessionKeys || runActive) &&
+        lastUserEntryIndex >= 0 && lastUserEntryIndex == rows.lastIndex
     val totalRows = contentRowCount +
         (if (state?.hasMoreHistory == true && contentRowCount > 0) 1 else 0) +
         (if (contentRowCount == 0 && !runActive && historyLoaded) 1 else 0) +
@@ -251,15 +260,16 @@ internal fun ChatScreen(
             lastVisible < info.totalItemsCount - 2
         }.collect { showJumpToLatest = it }
     }
-    LaunchedEffect(listState) {
-        snapshotFlow {
-            listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
-        }.collect { atTop -> if (atTop && timeline == null) model.loadOlderMessages() }
+    // 发送后滚到底（M4 反馈④）：看到刚发的消息。sendSignal 由 AppModel.sendText 递增
+    val totalRowsNow by rememberUpdatedState(totalRows)
+    LaunchedEffect(model.sendSignal) {
+        if (model.sendSignal == 0) return@LaunchedEffect
+        delay(120) // 乐观回显/待发条目落表
+        if (totalRowsNow > 0) listState.animateScrollToItem(totalRowsNow - 1)
     }
-    // 拼接时间线的分区懒加载（M4 真机反馈②重做）：分区头进入视口即加载该区（未拉过→
-    // 首页；有更多→翻更早一页），钉在分区头时 convSectionLoading 空闲翻转驱动连续翻页。
-    // 位置保持交给 LazyColumn 的稳定 key 锚定（prepend 不动首可见项）——不做手动回滚，
-    // 手动锚恢复会被无关重组提前消费把视口拽离阅读位（实测反例）。
+    // 分区懒加载（M4 反馈②）：分区头进入视口即加载该区（未拉过→首页；有更多→翻更早一页）。
+    // 最旧区交给下拉手势（反馈⑤：标准 IM 阻尼交互），其余区保持视口触发；
+    // 位置保持交给 LazyColumn 稳定 key 锚定（prepend 不动首可见项）。
     LaunchedEffect(timeline != null) {
         if (timeline == null) return@LaunchedEffect
         snapshotFlow {
@@ -267,6 +277,7 @@ internal fun ChatScreen(
             (first?.key as? String) to (model.convSectionLoading == null)
         }.collect { (firstKey, idle) ->
             if (!idle || firstKey == null || !firstKey.startsWith("bnd-")) return@collect
+            if (firstKey == "bnd-${timeline?.lastOrNull()?.key}") return@collect
             model.loadSectionHistoryIfNeeded(firstKey.removePrefix("bnd-"))
         }
     }
@@ -332,12 +343,14 @@ internal fun ChatScreen(
                 onDismiss = { showStartFresh = false },
             )
         }
-        if (model.queuedCount > 0) {
-            QueuedBanner(count = model.queuedCount, onRetry = { haptics.tap(); model.retryQueuedNow() })
-        }
-
-        Box(
-            Modifier
+        PullToRefreshBox(
+            isRefreshing = pullRefreshing,
+            onRefresh = {
+                val tl = timeline
+                if (tl != null) tl.lastOrNull()?.let { model.loadSectionHistoryIfNeeded(it.key) }
+                else model.loadOlderMessages()
+            },
+            modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
                 .alpha(if (contentRowCount > 0 && !initialScrollDone) 0f else 1f),
@@ -348,16 +361,6 @@ internal fun ChatScreen(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                if (showLoadingOlder) {
-                    item(key = "loading-older") {
-                        Text(
-                            "上拉加载更早消息…",
-                            style = InkTheme.type.textXs,
-                            color = InkTheme.colors.textTertiary,
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                        )
-                    }
-                }
                 if (contentRowCount == 0 && !runActive && historyLoaded) {
                     item(key = "empty") {
                         Text(
@@ -397,6 +400,7 @@ internal fun ChatScreen(
                                     message = entry,
                                     onCopy = { text -> clipboard.setText(AnnotatedString(text)) },
                                     onResend = { text -> haptics.tap(); model.resendText(text) },
+                                    showSendSpinner = index == lastUserEntryIndex && showTailSpinner,
                                 )
                             }
                             is ChatRow.ToolGroup -> ToolGroupCard(row.items)
@@ -543,41 +547,7 @@ private fun ChatTopBar(
                     }
                 }
             }
-            if (runActive) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(start = 52.dp, bottom = 6.dp),
-                ) {
-                    TypingDots()
-                    Spacer(Modifier.size(8.dp))
-                    Text(
-                        "生成中…",
-                        style = InkTheme.type.textXs,
-                        color = InkTheme.colors.textTertiary,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun QueuedBanner(count: Int, onRetry: () -> Unit) {
-    val c = InkTheme.colors
-    Surface(color = c.warning.subtle, modifier = Modifier.fillMaxWidth()) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(start = 16.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
-        ) {
-            Text(
-                "$count 条消息待发送，重连后自动补发",
-                style = InkTheme.type.textSm,
-                color = c.warning.text,
-                modifier = Modifier.weight(1f),
-            )
-            TextButton(onClick = onRetry) {
-                Text("立即重试", style = InkTheme.type.textSm, color = c.warning.text)
-            }
+            // M4 反馈④：生成中的 loading 已移到「发送气泡左侧」小 spinner，顶栏不再重复
         }
     }
 }
@@ -634,6 +604,7 @@ private fun ChatMessageItem(
     message: Message,
     onCopy: (String) -> Unit,
     onResend: (String) -> Unit,
+    showSendSpinner: Boolean = false,
 ) {
     // agent 身份色作用域：会话的 agent tint 派生用户气泡与强调（BotTintScope 等价）
     val session = model.sessions.firstOrNull { it.id == message.sessionId }
@@ -645,7 +616,19 @@ private fun ChatMessageItem(
         // 消息发送时间（M4 真机反馈①）：用户/助手消息右下角；system 过程注不标
         Column(Modifier.fillMaxWidth()) {
             when (message.role) {
-                Message.Role.USER -> UserBubble(model, message, onCopy, onResend)
+                Message.Role.USER -> Row(verticalAlignment = Alignment.Bottom) {
+                    // 气泡左侧小 loading（M4 反馈④）：发送中/待响应期间贴在消息旁
+                    if (showSendSpinner) {
+                        androidx.compose.material3.CircularProgressIndicator(
+                            modifier = Modifier
+                                .padding(end = 6.dp, bottom = 8.dp)
+                                .size(14.dp),
+                            strokeWidth = 2.dp,
+                            color = LocalAgentTint.current.strong,
+                        )
+                    }
+                    UserBubble(model, message, onCopy, onResend)
+                }
                 // 助手消息：墨水平文无气泡；流式中 shimmer，定型后 Markdown v2。
                 // 长按区贴内容（全宽 clickable 吞点击的坑，真机实锤）
                 Message.Role.ASSISTANT -> {

@@ -214,18 +214,26 @@ fun AgentDetailScreen(
         LazyColumn(Modifier.fillMaxSize()) {
             items(sessions, key = { it.id }) { s ->
                 AgentSessionRow(s, onClick = {
-                    // M4：主线会话行 → conversation 时间线并定位到该分区（P5）；派生/系统/
-                    // 未识别行保持 per-session chat（调试与治理用途）
-                    if (dev.sharpxia.agentreins.openclaw.SessionClassifier.classify(s.id) ==
-                        dev.sharpxia.agentreins.openclaw.SessionCategory.MAINLINE
-                    ) {
-                        onOpenConversation(
-                            dev.sharpxia.agentreins.openclaw.ConversationRepository.convId(agentId),
-                            s.id,
-                        )
-                    } else {
-                        model.select(s)
-                        onOpenSession(s.id)
+                    // M4 反馈②③：主线/渠道会话行 → 对应 conversation（编辑页是渠道对话的
+                    // 唯一入口）；派生/系统/未识别行保持 per-session chat（治理用途）
+                    when (dev.sharpxia.agentreins.openclaw.SessionClassifier.classify(s.id)) {
+                        dev.sharpxia.agentreins.openclaw.SessionCategory.MAINLINE ->
+                            onOpenConversation(
+                                dev.sharpxia.agentreins.openclaw.ConversationRepository.convId(agentId),
+                                s.id,
+                            )
+                        dev.sharpxia.agentreins.openclaw.SessionCategory.CHANNEL -> {
+                            val bucket = dev.sharpxia.agentreins.openclaw.SessionClassifier
+                                .channelBucketOf(s.id) ?: "channel"
+                            onOpenConversation(
+                                dev.sharpxia.agentreins.openclaw.ConversationRepository.convId(agentId, bucket),
+                                s.id,
+                            )
+                        }
+                        else -> {
+                            model.select(s)
+                            onOpenSession(s.id)
+                        }
                     }
                 })
             }

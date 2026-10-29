@@ -15,8 +15,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccountCircle
@@ -272,122 +274,132 @@ private fun AgentEditSheet(model: AppModel, agentId: String, onDismiss: () -> Un
     // 直读原始串会渲染不出派生表情、网格会判成全不选中；点击后 agentProfiles 变更即重组刷新
     val expression = avatarExpressionOf(agentId, model.agentProfiles)
     SandSheet(onDismiss = onDismiss, title = "编辑 Agent") {
-        // 实时预览（§10.1）：标题下、显示名输入框上方，64dp，当前选中 tint × 表情
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .padding(vertical = 6.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            RobotAvatar(
-                palette = profile.tint,
-                expression = expression,
-                size = 64,
-                isDark = InkTheme.colors.isDark,
-            )
-        }
-        OutlinedTextField(
-            value = name,
-            onValueChange = { name = it },
-            label = { Text("显示名") },
-            singleLine = true,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 4.dp),
-        )
-        Spacer(Modifier.size(8.dp))
-        Text(
-            "身份色",
-            style = InkTheme.type.textSm,
-            color = InkTheme.colors.textTertiary,
-            modifier = Modifier.padding(horizontal = 20.dp),
-        )
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            AgentTintName.entries.forEach { tintName ->
-                val t = agentTint(tintName, InkTheme.colors.isDark)
-                val selected = profile.tint == tintName
-                Box(
-                    Modifier
-                        .size(30.dp)
-                        .clip(CircleShape)
-                        .background(t.strong)
-                        .border(
-                            if (selected) 3.dp else 1.dp,
-                            if (selected) InkTheme.colors.ink else InkTheme.colors.borderPrimary,
-                            CircleShape,
-                        )
-                        .clickable {
-                            model.setAgentTint(agentId, tintName)
-                            model.setAgentName(agentId, name)
-                        },
-                )
-            }
-        }
-        Spacer(Modifier.size(8.dp))
-        Text(
-            "表情",
-            style = InkTheme.type.textSm,
-            color = InkTheme.colors.textTertiary,
-            modifier = Modifier.padding(horizontal = 20.dp),
-        )
-        // 表情网格（§10.3）：2 行 × 5，顺序 = AgentExpression 声明序；44dp 缩略 ≥ 40 天然完整版；
-        // 选中描边与色点同款（未选 1pt borderPrimary / 选中 3pt ink）；点击即存并同句带动名防丢
+        // 复审修复：预览(64dp)+2×5 表情网格+按钮行总高约 500dp，矮视口（横屏/iPad 分屏/桌面
+        // 窄窗）下超出 M3 ModalBottomSheet 可用高度会被静默裁切且滚不到——SandSheet 内容
+        // Column（SandSheet.kt:54）无纵向滚动，这里只给本 Sheet 内容包一层纵向滚动，
+        // SandSheet 本体不动（不波及既有其余 Sheet）；内部滚动与 sheet 的纵向展开手势嵌套不冲突
         Column(
             Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+                .verticalScroll(rememberScrollState()),
         ) {
-            AgentExpression.entries.chunked(5).forEach { rowEntries ->
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                    rowEntries.forEach { expr ->
-                        val selected = expr == expression
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            modifier = Modifier.clickable {
-                                model.setAgentExpression(agentId, expr)
+            // 实时预览（§10.1）：标题下、显示名输入框上方，64dp，当前选中 tint × 表情
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 6.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                RobotAvatar(
+                    palette = profile.tint,
+                    expression = expression,
+                    size = 64,
+                    isDark = InkTheme.colors.isDark,
+                )
+            }
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("显示名") },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 4.dp),
+            )
+            Spacer(Modifier.size(8.dp))
+            Text(
+                "身份色",
+                style = InkTheme.type.textSm,
+                color = InkTheme.colors.textTertiary,
+                modifier = Modifier.padding(horizontal = 20.dp),
+            )
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                AgentTintName.entries.forEach { tintName ->
+                    val t = agentTint(tintName, InkTheme.colors.isDark)
+                    val selected = profile.tint == tintName
+                    Box(
+                        Modifier
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .background(t.strong)
+                            .border(
+                                if (selected) 3.dp else 1.dp,
+                                if (selected) InkTheme.colors.ink else InkTheme.colors.borderPrimary,
+                                CircleShape,
+                            )
+                            .clickable {
+                                model.setAgentTint(agentId, tintName)
                                 model.setAgentName(agentId, name)
                             },
-                        ) {
-                            Box(
-                                Modifier
-                                    .size(50.dp)
-                                    .border(
-                                        if (selected) 3.dp else 1.dp,
-                                        if (selected) InkTheme.colors.ink else InkTheme.colors.borderPrimary,
-                                        RoundedCornerShape(12.dp),
-                                    )
-                                    .padding(2.dp),
-                                contentAlignment = Alignment.Center,
+                    )
+                }
+            }
+            Spacer(Modifier.size(8.dp))
+            Text(
+                "表情",
+                style = InkTheme.type.textSm,
+                color = InkTheme.colors.textTertiary,
+                modifier = Modifier.padding(horizontal = 20.dp),
+            )
+            // 表情网格（§10.3）：2 行 × 5，顺序 = AgentExpression 声明序；44dp 缩略 ≥ 40 天然完整版；
+            // 选中描边与色点同款（未选 1pt borderPrimary / 选中 3pt ink）；点击即存并同句带动名防丢
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                AgentExpression.entries.chunked(5).forEach { rowEntries ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                        rowEntries.forEach { expr ->
+                            val selected = expr == expression
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier.clickable {
+                                    model.setAgentExpression(agentId, expr)
+                                    model.setAgentName(agentId, name)
+                                },
                             ) {
-                                RobotAvatar(
-                                    palette = profile.tint,
-                                    expression = expr,
-                                    size = 44,
-                                    isDark = InkTheme.colors.isDark,
+                                Box(
+                                    Modifier
+                                        .size(50.dp)
+                                        .border(
+                                            if (selected) 3.dp else 1.dp,
+                                            if (selected) InkTheme.colors.ink else InkTheme.colors.borderPrimary,
+                                            RoundedCornerShape(12.dp),
+                                        )
+                                        .padding(2.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    RobotAvatar(
+                                        palette = profile.tint,
+                                        expression = expr,
+                                        size = 44,
+                                        isDark = InkTheme.colors.isDark,
+                                    )
+                                }
+                                Text(
+                                    expressionLabel(expr),
+                                    style = InkTheme.type.textXs,
+                                    color = InkTheme.colors.textTertiary,
                                 )
                             }
-                            Text(
-                                expressionLabel(expr),
-                                style = InkTheme.type.textXs,
-                                color = InkTheme.colors.textTertiary,
-                            )
                         }
                     }
                 }
             }
-        }
-        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.End) {
-            TextButton(onClick = onDismiss) { Text("取消", color = InkTheme.colors.ink) }
-            TextButton(onClick = {
-                model.setAgentName(agentId, name)
-                onDismiss()
-            }) { Text("保存", color = InkTheme.colors.ink) }
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = onDismiss) { Text("取消", color = InkTheme.colors.ink) }
+                TextButton(onClick = {
+                    model.setAgentName(agentId, name)
+                    onDismiss()
+                }) { Text("保存", color = InkTheme.colors.ink) }
+            }
         }
     }
 }

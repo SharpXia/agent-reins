@@ -19,22 +19,16 @@ struct UnreadBadge: View {
     }
 }
 
-/// agent 头像：tint 圆底 + 首字符。
+/// agent 头像：机器人 Canvas 薄壳（RobotAvatar 渲染，规格 avatar-spec-20261029 §9）。
+/// 首字符圆底旧实现整段删除、不留双轨；name 参数仅为保签名兼容。
 struct AgentAvatar: View {
     let tint: AgentTintColors
     let name: String
     var size: CGFloat = 42
+    var expression: AgentExpression = .calm
 
     var body: some View {
-        Circle()
-            .fill(tint.bubble)
-            .overlay(Circle().strokeBorder(tint.strong.opacity(0.25), lineWidth: 1))
-            .frame(width: size, height: size)
-            .overlay(
-                Text(name.trimmingCharacters(in: .whitespaces).first.map { String($0).uppercased() } ?? "?")
-                    .font(.system(size: size * 0.4, weight: .semibold))
-                    .foregroundColor(tint.strong)
-            )
+        RobotAvatar(palette: tint.name, expression: expression, size: size)
     }
 }
 

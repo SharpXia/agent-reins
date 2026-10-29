@@ -74,6 +74,15 @@ final class AppStore {
         return agentTintFor(agentId)  // returns AgentTintName
     }
 
+    /// agent 表情（规格 avatar-spec-20261029 §9）：读桥已解析的枚举名，miss/非法串落
+    /// `.calm` 常量（正常路径桥已解析，只有列表未就绪的瞬态会命中兜底；此处不做任何 hash）。
+    func agentExpression(_ agentId: String) -> AgentExpression {
+        guard let raw = lists.agents.first(where: { $0.agentId == agentId })?.expression else {
+            return .calm
+        }
+        return AgentExpression(rawValue: raw) ?? .calm
+    }
+
     func tint(_ agentId: String, isDark: Bool) -> AgentTintColors {
         agentTint(agentTintName(agentId), isDark: isDark)
     }

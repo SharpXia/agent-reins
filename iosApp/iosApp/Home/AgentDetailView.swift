@@ -156,7 +156,8 @@ struct AgentDetailView: View {
         let tint = store.tint(agentId, isDark: scheme == .dark)
         let name = agent?.name ?? agentId
         return HStack(spacing: 12) {
-            AgentAvatar(tint: tint, name: name, size: 52)
+            AgentAvatar(tint: tint, name: name, size: 52,
+                        expression: store.agentExpression(agentId))
             VStack(alignment: .leading, spacing: 2) {
                 Text(name).ink(.headingMd).foregroundColor(c.ink)
                 Text(agentId).ink(.textSm).foregroundColor(c.textTertiary)
@@ -215,7 +216,7 @@ struct AgentDetailView: View {
     }
 }
 
-/// 身份定制 Sheet：别名输入 + 10 色选择。
+/// 身份定制 Sheet：实时预览 + 别名输入 + 10 色选择 + 2×5 表情网格（规格 §10，即点即存）。
 struct AgentEditSheet: View {
     @Environment(\.inkColors) private var c
     @Environment(\.dismiss) private var dismiss
@@ -227,6 +228,15 @@ struct AgentEditSheet: View {
     var body: some View {
         InkSheet(title: "编辑 Agent") {
             VStack(alignment: .leading, spacing: 10) {
+                // 实时预览（§10.1）：标题下、显示名输入框上方，64pt，当前 tint × 表情；
+                // 表情经 store.agentExpression（读桥已解析值），未定制时直读原始串会判不出派生表情
+                HStack {
+                    Spacer()
+                    RobotAvatar(palette: store.agentTintName(agentId),
+                                expression: store.agentExpression(agentId),
+                                size: 64)
+                    Spacer()
+                }
                 TextField("显示名", text: $name)
                     .ink(.textMd)
                     .foregroundColor(c.ink)
@@ -262,6 +272,9 @@ struct AgentEditSheet: View {
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 10)
+                Text("表情").ink(.textSm).foregroundColor(c.textTertiary)
+                    .padding(.horizontal, 20)
+                expressionGrid
                 HStack {
                     Spacer()
                     Button("取消") { dismiss() }
@@ -275,6 +288,45 @@ struct AgentEditSheet: View {
                 .padding(.horizontal, 16)
                 .padding(.bottom, 12)
             }
+        }
+    }
+
+    // 表情网格（§10.3）：2 行 × 5，顺序 = AgentExpression 声明序；44pt 缩略 ≥ 40 天然完整版
+    // （RobotAvatar 无 forceFull 类逃生口）；选中描边与色点同款（未选 1pt borderPrimary / 选中 3pt ink）；
+    // 点击即存并同句带动名防丢（与色板行同构，无确定按钮、无二次确认）
+    private var expressionGrid: some View {
+        let rows = stride(from: 0, to: AgentExpression.allCases.count, by: 5).map {
+            Array(AgentExpression.allCases[$0..<min($0 + 5, AgentExpression.allCases.count)])
+        }
+        return VStack(spacing: 6) {
+            ForEach(rows, id: \.self) { row in
+                HStack(spacing: 0) {
+                    ForEach(row, id: \.self) { expr in
+                        expressionCell(expr)
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    private func expressionCell(_ expr: AgentExpression) -> some View {
+        let selected = expr == store.agentExpression(agentId)
+        return VStack(spacing: 4) {
+            RobotAvatar(palette: store.agentTintName(agentId), expression: expr, size: 44)
+                .frame(width: 50, height: 50)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(selected ? c.ink : c.borderPrimary, lineWidth: selected ? 3 : 1)
+                )
+            Text(expr.zhLabel).ink(.textXs).foregroundColor(c.textTertiary)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            store.bridge.setAgentExpression(agentId: agentId, expression: expr.rawValue)
+            store.bridge.setAgentName(agentId: agentId, name: name)
         }
     }
 }

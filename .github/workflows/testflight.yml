@@ -12,12 +12,13 @@ name: TestFlight
 # 注意：.p12 必须含私钥（钥匙串访问"我的证书"里右键导出），证书类型 Apple Distribution。
 # 已有 Secrets（勿动）：ASC_API_KEY_P8_BASE64 / ASC_API_KEY_ID / ASC_API_ISSUER_ID / APPLE_TEAM_ID
 #
-# 启用路径：填完 secrets → 手动 dispatch 跑一次验证 → 全绿后放开下面 push/beta-* 注释。
+# 2026-10-29 固定证书链路已验证全绿（run 40814210285，build 1793245738 上传成功），
+# beta-* tag 触发已放开。
 on:
   workflow_dispatch:
-  # push:
-  #   tags:
-  #     - 'beta-*'
+  push:
+    tags:
+      - 'beta-*'
 
 concurrency:
   group: ${{ github.workflow }}

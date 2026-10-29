@@ -59,6 +59,8 @@ import dev.sharpxia.agentreins.openclaw.ConversationKind
 import dev.sharpxia.agentreins.openclaw.SessionCategory
 import dev.sharpxia.agentreins.openclaw.SessionClassifier
 import kotlin.math.abs
+import dev.sharpxia.agentreins.ui.avatar.AgentExpression
+import dev.sharpxia.agentreins.ui.avatar.avatarExpressionOf
 import dev.sharpxia.agentreins.ui.components.ConnectionEmptyState
 import dev.sharpxia.agentreins.ui.components.SectionHeader
 import dev.sharpxia.agentreins.ui.components.SandSheet
@@ -168,6 +170,7 @@ private fun ConversationList(
                             name = s.profile.name,
                             subtitle = "${s.sessionCount} 个会话",
                             tintName = s.profile.tint,
+                            expression = avatarExpressionOf(s.profile.agentId, model.agentProfiles),
                             onClick = {
                                 haptics.tap()
                                 scope.launch { drawerState.close() }
@@ -291,7 +294,12 @@ private fun ConversationList(
                             },
                             leadingIcon = {
                                 AgentTintScope(s.profile.tint) {
-                                    AgentAvatar(LocalAgentTint.current, s.profile.name, size = 30)
+                                    AgentAvatar(
+                                        LocalAgentTint.current,
+                                        s.profile.name,
+                                        size = 30,
+                                        expression = avatarExpressionOf(s.profile.agentId, model.agentProfiles),
+                                    )
                                 }
                             },
                             onClick = {
@@ -528,6 +536,7 @@ private fun DrawerAgentRow(
     name: String,
     subtitle: String,
     tintName: AgentTintName?,
+    expression: AgentExpression,
     onClick: () -> Unit,
     onEdit: (() -> Unit)? = null,
     onCreate: (() -> Unit)? = null,
@@ -560,7 +569,7 @@ private fun DrawerAgentRow(
                 }
             }
             else -> AgentTintScope(tintName) {
-                AgentAvatar(LocalAgentTint.current, name)
+                AgentAvatar(LocalAgentTint.current, name, expression = expression)
             }
         }
         Column(Modifier.weight(1f).padding(horizontal = 12.dp, vertical = 10.dp)) {
@@ -630,7 +639,7 @@ private fun ConversationRowContent(
                 .padding(horizontal = 16.dp, vertical = 10.dp),
         ) {
             val agentName = model.agentProfiles[conv.agentId]?.name ?: conv.agentId
-            AgentAvatar(tint, agentName)
+            AgentAvatar(tint, agentName, expression = avatarExpressionOf(conv.agentId, model.agentProfiles))
             Spacer(Modifier.size(12.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {

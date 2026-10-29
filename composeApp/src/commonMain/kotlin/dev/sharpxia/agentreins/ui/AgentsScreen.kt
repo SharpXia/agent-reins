@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccountCircle
@@ -42,6 +43,9 @@ import dev.sharpxia.agentreins.AgentSummary
 import dev.sharpxia.agentreins.AppModel
 import dev.sharpxia.agentreins.model.Session
 import dev.sharpxia.agentreins.model.sessionKeyAgentId
+import dev.sharpxia.agentreins.ui.avatar.AgentExpression
+import dev.sharpxia.agentreins.ui.avatar.RobotAvatar
+import dev.sharpxia.agentreins.ui.avatar.avatarExpressionOf
 import dev.sharpxia.agentreins.ui.components.AgentTitlePill
 import dev.sharpxia.agentreins.ui.components.EmptyState
 import dev.sharpxia.agentreins.ui.components.SandCard
@@ -93,14 +97,18 @@ fun AgentsScreen(
         }
         LazyColumn(Modifier.fillMaxSize()) {
             items(summaries, key = { it.profile.agentId }) { s ->
-                AgentSummaryRow(s, onClick = { onOpenAgent(s.profile.agentId) })
+                AgentSummaryRow(
+                    s,
+                    expression = avatarExpressionOf(s.profile.agentId, model.agentProfiles),
+                    onClick = { onOpenAgent(s.profile.agentId) },
+                )
             }
         }
     }
 }
 
 @Composable
-private fun AgentSummaryRow(s: AgentSummary, onClick: () -> Unit) {
+private fun AgentSummaryRow(s: AgentSummary, expression: AgentExpression, onClick: () -> Unit) {
     AgentTintScope(s.profile.tint) {
         val tint = LocalAgentTint.current
         val interaction = remember { MutableInteractionSource() }
@@ -112,7 +120,7 @@ private fun AgentSummaryRow(s: AgentSummary, onClick: () -> Unit) {
                 .clickable(interactionSource = interaction, indication = null, onClick = onClick)
                 .padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
-            AgentAvatar(tint, s.profile.name)
+            AgentAvatar(tint, s.profile.name, expression = expression)
             Spacer(Modifier.size(12.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -143,23 +151,23 @@ private fun AgentSummaryRow(s: AgentSummary, onClick: () -> Unit) {
     }
 }
 
-/** agent 头像：tint 圆底 + 首字符。 */
+/**
+ * agent 头像：机器人 Canvas 薄壳（RobotAvatar 渲染，规格 §8）。
+ * 首字符圆底旧实现整段删除、不留双轨；name 参数仅为保签名兼容。
+ */
 @Composable
-fun AgentAvatar(tint: AgentTintColors, name: String, size: Int = 42) {
-    Box(
-        Modifier
-            .size(size.dp)
-            .clip(CircleShape)
-            .background(tint.bubble)
-            .border(1.dp, tint.strong.copy(alpha = 0.25f), CircleShape),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            name.trim().firstOrNull()?.uppercase() ?: "?",
-            style = InkTheme.type.headingSm,
-            color = tint.strong,
-        )
-    }
+fun AgentAvatar(
+    tint: AgentTintColors,
+    name: String,
+    size: Int = 42,
+    expression: AgentExpression = AgentExpression.CALM,
+) {
+    RobotAvatar(
+        palette = tint.name,
+        expression = expression,
+        size = size,
+        isDark = InkTheme.colors.isDark,
+    )
 }
 
 /** Agent 域页：身份头（改名/选色）+ 该 agent 的会话组（M4：sessions 管理落点）。 */
@@ -195,7 +203,12 @@ fun AgentDetailScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    AgentAvatar(tint, profile.name, size = 52)
+                    AgentAvatar(
+                        tint,
+                        profile.name,
+                        size = 52,
+                        expression = avatarExpressionOf(agentId, model.agentProfiles),
+                    )
                     Column(Modifier.weight(1f)) {
                         Text(profile.name, style = InkTheme.type.headingMd, color = InkTheme.colors.ink)
                         Text(agentId, style = InkTheme.type.textSm, color = InkTheme.colors.textTertiary)
@@ -249,13 +262,30 @@ fun AgentDetailScreen(
     }
 }
 
-/** 身份定制 Sheet：别名输入 + 10 色选择。 */
+/** 身份定制 Sheet：实时预览 + 别名输入 + 10 色选择 + 2×5 表情网格（规格 §10，即点即存）。 */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun AgentEditSheet(model: AppModel, agentId: String, onDismiss: () -> Unit) {
     val profile = model.agentProfiles[agentId] ?: dev.sharpxia.agentreins.AgentProfile.default(agentId)
     var name by remember { mutableStateOf(profile.name) }
+    // 预览/网格选中态一律走解析入口（§10.1/§10.3）：未定制时 profile.expression == ""，
+    // 直读原始串会渲染不出派生表情、网格会判成全不选中；点击后 agentProfiles 变更即重组刷新
+    val expression = avatarExpressionOf(agentId, model.agentProfiles)
     SandSheet(onDismiss = onDismiss, title = "编辑 Agent") {
+        // 实时预览（§10.1）：标题下、显示名输入框上方，64dp，当前选中 tint × 表情
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .padding(vertical = 6.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            RobotAvatar(
+                palette = profile.tint,
+                expression = expression,
+                size = 64,
+                isDark = InkTheme.colors.isDark,
+            )
+        }
         OutlinedTextField(
             value = name,
             onValueChange = { name = it },
@@ -298,6 +328,60 @@ private fun AgentEditSheet(model: AppModel, agentId: String, onDismiss: () -> Un
                 )
             }
         }
+        Spacer(Modifier.size(8.dp))
+        Text(
+            "表情",
+            style = InkTheme.type.textSm,
+            color = InkTheme.colors.textTertiary,
+            modifier = Modifier.padding(horizontal = 20.dp),
+        )
+        // 表情网格（§10.3）：2 行 × 5，顺序 = AgentExpression 声明序；44dp 缩略 ≥ 40 天然完整版；
+        // 选中描边与色点同款（未选 1pt borderPrimary / 选中 3pt ink）；点击即存并同句带动名防丢
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            AgentExpression.entries.chunked(5).forEach { rowEntries ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                    rowEntries.forEach { expr ->
+                        val selected = expr == expression
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier.clickable {
+                                model.setAgentExpression(agentId, expr)
+                                model.setAgentName(agentId, name)
+                            },
+                        ) {
+                            Box(
+                                Modifier
+                                    .size(50.dp)
+                                    .border(
+                                        if (selected) 3.dp else 1.dp,
+                                        if (selected) InkTheme.colors.ink else InkTheme.colors.borderPrimary,
+                                        RoundedCornerShape(12.dp),
+                                    )
+                                    .padding(2.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                RobotAvatar(
+                                    palette = profile.tint,
+                                    expression = expr,
+                                    size = 44,
+                                    isDark = InkTheme.colors.isDark,
+                                )
+                            }
+                            Text(
+                                expressionLabel(expr),
+                                style = InkTheme.type.textXs,
+                                color = InkTheme.colors.textTertiary,
+                            )
+                        }
+                    }
+                }
+            }
+        }
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.End) {
             TextButton(onClick = onDismiss) { Text("取消", color = InkTheme.colors.ink) }
             TextButton(onClick = {
@@ -306,6 +390,20 @@ private fun AgentEditSheet(model: AppModel, agentId: String, onDismiss: () -> Un
             }) { Text("保存", color = InkTheme.colors.ink) }
         }
     }
+}
+
+/** 表情中文名对照（规格 §4，编辑网格 label）。 */
+private fun expressionLabel(e: AgentExpression): String = when (e) {
+    AgentExpression.CALM -> "平静"
+    AgentExpression.HAPPY -> "开心"
+    AgentExpression.EXCITED -> "兴奋"
+    AgentExpression.THINKING -> "思考"
+    AgentExpression.CONFUSED -> "困惑"
+    AgentExpression.SLEEPY -> "犯困"
+    AgentExpression.SAD -> "难过"
+    AgentExpression.SMUG -> "得意"
+    AgentExpression.SURPRISED -> "惊讶"
+    AgentExpression.LOVE -> "喜爱"
 }
 
 /** Agent 域内的会话行（M3.2 会与主列表行统一重绘）。 */

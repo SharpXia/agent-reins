@@ -1,13 +1,16 @@
 name: TestFlight
 
-# 远程验收出包：手动 dispatch 或推 beta-* tag。
+# ⚠️ 2026-10-29 停用出包：automatic 签名 + -allowProvisioningUpdates 会在 CI 空钥匙串上
+# 每次新建分发证书，Apple 超限（2 张）自动吊销最老一张，连累本机证书被反复 revoke。
+# 恢复前置（证书固定后）：p12+私钥 入 Secrets → CI 临时 keychain 导入 → manual 签名
+# + 固定 profile → 再放开下面 on: 与签名参数。触发器注释期间 beta-* tag 不会出包。
 # 依赖仓库 Secrets：ASC_API_KEY_P8_BASE64 / ASC_API_KEY_ID / ASC_API_ISSUER_ID / APPLE_TEAM_ID
 # （ASC = App Store Connect，Team API Key；.p8 内容 base64 后入 secrets，绝不入库）。
-on:
-  workflow_dispatch:
-  push:
-    tags:
-      - 'beta-*'
+# on:
+#   workflow_dispatch:
+#   push:
+#     tags:
+#       - 'beta-*'
 
 concurrency:
   group: ${{ github.workflow }}
@@ -62,6 +65,8 @@ jobs:
           set -o pipefail
           BUILD=$(date +%s)
           echo "BUILD_NUMBER=$BUILD" >> "$GITHUB_ENV"
+          # 签名参数已摘除（原 -allowProvisioningUpdates + authenticationKey* 会新建证书）；
+          # 证书固定后在此接 manual 签名，见文件头恢复前置。
           xcodebuild \
             -project iosApp/iosApp.xcodeproj \
             -scheme iosApp \
@@ -69,10 +74,6 @@ jobs:
             -destination 'generic/platform=iOS' \
             -archivePath build/AgentReins.xcarchive \
             CURRENT_PROJECT_VERSION=$BUILD \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
-            -authenticationKeyID "${{ secrets.ASC_API_KEY_ID }}" \
-            -authenticationKeyIssuerID "${{ secrets.ASC_API_ISSUER_ID }}" \
             archive 2>&1 | tail -40
 
       - name: Export IPA (TestFlight / app-store-connect)
@@ -98,10 +99,6 @@ jobs:
             -archivePath build/AgentReins.xcarchive \
             -exportOptionsPlist build/ExportOptions.plist \
             -exportPath build/ipa \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
-            -authenticationKeyID "${{ secrets.ASC_API_KEY_ID }}" \
-            -authenticationKeyIssuerID "${{ secrets.ASC_API_ISSUER_ID }}" \
             2>&1 | tail -60
 
       - name: Upload to TestFlight

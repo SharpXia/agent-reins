@@ -100,6 +100,8 @@ data class BridgeAgent(
     val tint: String,
     /** 已解析的表情枚举名（恒非空：定制值或 agentId 散列派生值）。 */
     val expression: String = "",
+    /** 黏土脸系数串（12 段两位小数逗号分隔）；"" = 正圆默认（face-sculpt §4）。 */
+    val face: String = "",
     val sessionCount: Int = 0,
     val unreadTotal: Int = 0,
 )
@@ -265,6 +267,7 @@ class AgentBridge(internal val model: AppModel) {
                             name = it.profile.name,
                             tint = it.profile.tint.name,
                             expression = avatarExpressionOf(it.profile.agentId, model.agentProfiles).name,
+                            face = it.profile.face,
                             sessionCount = it.sessionCount,
                             unreadTotal = it.unreadTotal,
                         )
@@ -462,6 +465,8 @@ Kotlin Multiplatform 让 **业务逻辑** 一份代码多端复用：
         val e = runCatching { AgentExpression.valueOf(expression) }.getOrNull() ?: return
         model.setAgentExpression(agentId, e)
     }
+    /** 黏土脸系数串透传（非法串由 AppModel.setAgentFace 静默忽略；"" = 回默认圆）。 */
+    fun setAgentFace(agentId: String, face: String) = model.setAgentFace(agentId, face)
 
     fun openTimeline(agentId: String) = model.openConversationTimeline(agentId)
     fun closeTimeline() = model.closeConversationTimeline()

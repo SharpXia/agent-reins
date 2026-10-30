@@ -29,7 +29,6 @@ struct ChatView: View {
 
     @State private var scroll = ScrollPosition(edge: .bottom)
     @State private var isAtBottom = true
-    @State private var keyboardShowing = false
     @State private var showStartFresh = false
     @State private var anchorConsumed = false
     /// composer 实测高度：回底按钮上移依据（真机反馈③：与发送键重叠）
@@ -74,12 +73,6 @@ struct ChatView: View {
         } message: {
             Text("这个会话的聊天记录将不再出现在新会话里。\n✓ 会保留：Agent 的指令、记忆与技能配置\n✗ 会留在旧会话：本次对话的全部消息")
         }
-        .onReceive(
-            NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)
-        ) { _ in keyboardShowing = true }
-        .onReceive(
-            NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)
-        ) { _ in keyboardShowing = false }
     }
 
     // ---- 顶栏 ----
@@ -169,6 +162,10 @@ struct ChatView: View {
             .padding(.vertical, 8)
         }
         .scrollPosition($scroll)
+        // SW 反馈②：进页概率空白、滑动/回顶才出现——估算型 scrollTo 在 markdown 重内容
+        // 上会落进 LazyVStack 虚高区。底部默认锚由框架在真实布局上定位/跟随内容增长，
+        // 是估算跳转之外的原生稳态；随后的标记锚定与其互补。
+        .defaultScrollAnchor(.bottom)
         .onScrollGeometryChange(for: Bool.self) { geo in
             let maxOffset = geo.contentSize.height - geo.containerSize.height
             return geo.contentOffset.y >= maxOffset - 48
@@ -243,15 +240,13 @@ struct ChatView: View {
         .onChange(of: contentSignature) { _, _ in
             // 内容变化且在底 → 重锚尾部标记（开场渐次到位 + 流式跟随共用；
             // 用户上拉 isAtBottom=false 自动让位）
-            if isAtBottom {
-                scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
-            }
-        }
-        .onChange(of: keyboardShowing) { showing in
-            // 键盘压缩视口后重钉（M4 反馈④原生等价；系统避让为主，这里兜底）
-            guard showing, isAtBottom, hasContent else { return }
+            guard isAtBottom else { return }
+            scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
+            // 布局收敛二次锚定：markdown 结排让真实 frame 晚于估算，250ms 后无新内容
+            // 再补一锚，落在真实 frame 上（真机概率空白的兜底）
             Task {
-                try? await Task.sleep(nanoseconds: 180_000_000)
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard isAtBottom else { return }
                 scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
             }
         }

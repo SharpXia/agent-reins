@@ -525,7 +525,7 @@ class AppModel(
                         st is GatewayStatus.Connecting || st is GatewayStatus.PairingPending
                     if (!connectedLike && url.isNotBlank() && (deviceToken != null || apiKey.isNotBlank())) {
                         resetAutoRetry() // 前台事件 = 网络环境可能变化，退避计数清零重新起算
-                        connect()
+                        connect(restoreLastSuccessful = true)
                     }
                 }
             }
@@ -540,7 +540,7 @@ class AppModel(
                     st is GatewayStatus.Connecting || st is GatewayStatus.PairingPending
                 if (!connectedLike && url.isNotBlank() && (deviceToken != null || apiKey.isNotBlank())) {
                     resetAutoRetry()
-                    connect()
+                    connect(restoreLastSuccessful = true)
                 }
             }
         }
@@ -576,8 +576,19 @@ class AppModel(
     var sendSignal by mutableStateOf(0)
         private set
 
-    fun connect() {
+    /** 恢复性重连（回前台/网络恢复/断线升级重试）= true：候选把上次成功地址提到最前。
+     *  冷启动（connectedUrl=null 自然落回原序）与手动连接（默认 false）仍先主后次
+     *  （SW 真机反馈③：后台断联回来机械式先主后次，在死掉的 LAN 主地址上浪费
+     *  3.5s+30s 才到外网备选）。 */
+    fun connect(restoreLastSuccessful: Boolean = false) {
         if (busy) return
+        // 候选重排：connectedUrl 此刻仍是上次成功值（connect 后段才清空）
+        fun ordered(candidates: List<String>): List<String> {
+            val last = connectedUrl
+            return if (restoreLastSuccessful && !last.isNullOrBlank() && last in candidates) {
+                listOf(last) + candidates.filter { it != last }
+            } else candidates
+        }
         val code = setupCode.trim()
         // 多地址 failover（remote-access-design.md §6）：候选按序 [主地址, *备用地址]，
         // 传输层失败（超时/DNS/TLS）才轮换下一候选；RPC 拒绝说明地址可达，不轮换。
@@ -597,12 +608,12 @@ class AppModel(
                 return
             }
             url.isNotBlank() && apiKey.isNotBlank() -> {
-                candidates = (listOf(url.trim()) + alternateUrls).distinct()
+                candidates = ordered((listOf(url.trim()) + alternateUrls).distinct())
                 bootstrapToken = null
                 apiKeyForConfig = apiKey.trim()
             }
             url.isNotBlank() && deviceToken != null -> {
-                candidates = (listOf(url.trim()) + alternateUrls).distinct()
+                candidates = ordered((listOf(url.trim()) + alternateUrls).distinct())
                 bootstrapToken = null
                 apiKeyForConfig = ""
             }
@@ -817,9 +828,12 @@ class AppModel(
         autoRetryJob = scope.launch {
             delay(delayMs)
             val st = status
-            val retryable = st is GatewayStatus.Disconnected || st is GatewayStatus.Error
+            // Connecting 也要重试：断线升级到点时客户端循环可能还在半路，改为新鲜重连
+            //（connect 自带 busy 守卫与旧连接收尾，重入安全）
+            val retryable = st is GatewayStatus.Disconnected || st is GatewayStatus.Error ||
+                st is GatewayStatus.Connecting
             if (!explicitDisconnect && retryable) {
-                connect()
+                connect(restoreLastSuccessful = true)
             }
         }
     }

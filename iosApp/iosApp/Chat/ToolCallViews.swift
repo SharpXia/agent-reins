@@ -73,6 +73,65 @@ struct ToolCallCardView: View {
     }
 }
 
+/// 回合块（真机反馈③）：思考过程 + 本次工具调用统一收进一个折叠条，摆在对应正式
+/// 输出上方。展开 = 思考全文（斜体弱化）+ 工具卡逐条（复用 ToolCallCardView，
+/// 各自可再展开参数/结果）。
+struct TurnBlockView: View {
+    @Environment(\.inkColors) private var c
+    @State private var expanded = false
+    let thinking: [BridgeEntry]
+    let tools: [BridgeEntry]
+
+    var body: some View {
+        let failed = tools.filter { $0.state == "failed" }.count
+        VStack(alignment: .leading, spacing: 8) {
+            Button { withAnimation(.easeInOut(duration: 0.18)) { expanded.toggle() } } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "brain.head.profile")
+                        .font(.system(size: 12))
+                        .foregroundColor(c.textTertiary)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(headerTitle).ink(.textSm).foregroundColor(c.ink)
+                        if failed > 0 {
+                            Text("\(failed) 次工具失败").ink(.textXs).foregroundColor(c.dangerText)
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 11))
+                        .foregroundColor(c.textTertiary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if expanded {
+                Divider().overlay(c.borderSecondary)
+                ForEach(thinking, id: \.id) { t in
+                    Text(t.text)
+                        .ink(.textSm)
+                        .italic()
+                        .foregroundColor(c.textTertiary)
+                        .lineSpacing(3)
+                }
+                ForEach(tools, id: \.id) { tool in
+                    ToolCallCardView(card: tool)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: InkShape.md).fill(c.elevated))
+    }
+
+    private var headerTitle: String {
+        var parts: [String] = []
+        if !thinking.isEmpty { parts.append("思考过程") }
+        if !tools.isEmpty { parts.append("\(tools.count) 次工具调用") }
+        return parts.isEmpty ? "思考过程" : parts.joined(separator: " · ")
+    }
+}
+
 /// 连续 ≥2 张已完成工具卡的折叠组。
 struct ToolGroupCard: View {
     @Environment(\.inkColors) private var c

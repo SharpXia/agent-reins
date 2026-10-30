@@ -45,6 +45,7 @@ struct ComposerView: View {
 
                 // 对话操作（M3.4）：点击即弹菜单（真机反馈④——onTapGesture 会吃掉点击、
                 // contextMenu 只认长按，只剩触感没有弹框；Menu 是原生点击弹出口）。
+                // 2pt 底距=34pt 钮对 ~38pt 单行输入框的 y 轴光学居中（二轮反馈②）。
                 Menu {
                     composerActions
                 } label: {
@@ -58,6 +59,7 @@ struct ComposerView: View {
                         )
                 }
                 .buttonStyle(.plain)
+                .padding(.bottom, 2)
 
                 actionButton
             }
@@ -68,7 +70,7 @@ struct ComposerView: View {
     }
 
     // 单按钮三态（M4 反馈①）：运行中且空 = 终止；有内容 = 发送（运行中也发，网关排队）；
-    // 空+空闲 = 禁用。
+    // 空+空闲 = 禁用。2pt 底距=与单行输入框 y 轴光学居中（二轮反馈②）。
     @ViewBuilder
     private var actionButton: some View {
         if store.conv.runActive && draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -83,7 +85,7 @@ struct ComposerView: View {
                     .background(Circle().fill(c.dangerText))
             }
             .buttonStyle(.plain)
-            .padding(.bottom, 6)
+            .padding(.bottom, 2)
         } else {
             let enabled = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             Button {
@@ -102,7 +104,7 @@ struct ComposerView: View {
             }
             .buttonStyle(.plain)
             .disabled(!enabled)
-            .padding(.bottom, 6)
+            .padding(.bottom, 2)
         }
     }
 

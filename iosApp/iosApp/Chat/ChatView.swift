@@ -34,6 +34,8 @@ struct ChatView: View {
     @State private var anchorConsumed = false
     /// composer 实测高度：回底按钮上移依据（真机反馈③：与发送键重叠）
     @State private var composerHeight: CGFloat = 66
+    /// 设备安全区底（home indicator）：overlay 底边在屏幕底，上移量须含这段
+    @State private var safeBottom: CGFloat = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -56,6 +58,14 @@ struct ChatView: View {
             chatList
         }
         .background(c.paper)
+        .background(
+            // 外层 VStack 的安全区底=home indicator（chatList 内的 safeAreaInset 会把
+            // composer 高度并进安全区，在那儿读会双重计数）
+            GeometryReader { g in
+                Color.clear.preference(key: SafeBottomKey.self, value: g.safeAreaInsets.bottom)
+            }
+        )
+        .onPreferenceChange(SafeBottomKey.self) { safeBottom = $0 }
         .navigationBarHidden(true)
         .toolbar(.hidden, for: .tabBar)
         .confirmationDialog("从头开始？", isPresented: $showStartFresh, titleVisibility: .visible) {
@@ -183,14 +193,11 @@ struct ChatView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
                     .background(c.paper)
+                    .background(heightProbe)
             } else {
                 ComposerView()
                     .background(c.paper)
-                    .background(
-                        GeometryReader { g in
-                            Color.clear.preference(key: ComposerHeightKey.self, value: g.size.height)
-                        }
-                    )
+                    .background(heightProbe)
             }
         }
         .onPreferenceChange(ComposerHeightKey.self) { composerHeight = $0 }
@@ -210,8 +217,9 @@ struct ChatView: View {
                 }
                 .buttonStyle(.plain)
                 .padding(.trailing, 12)
-                // 真机反馈③：overlay 对齐域含 safeAreaInset 的 composer，直接贴底会压住发送键
-                .padding(.bottom, composerHeight + 10)
+                // 真机反馈③（二轮）：overlay 底边=屏幕底，上移=composer 高度+home indicator+间距，
+                // 让按钮悬在内容区（列表可见底）上方
+                .padding(.bottom, composerHeight + safeBottom + 10)
             }
         }
         // ---- 滚动协同 ----
@@ -372,4 +380,17 @@ enum ChatAnchorTag: Hashable { case bottom }
 private struct ComposerHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { nextValue() }
+}
+
+/// 设备安全区底上抛（overlay 底边在屏幕底，需补偿 home indicator）
+private struct SafeBottomKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { nextValue() }
+}
+
+/// 尺寸探测背景（composer/只读条共用）
+private var heightProbe: some View {
+    GeometryReader { g in
+        Color.clear.preference(key: ComposerHeightKey.self, value: g.size.height)
+    }
 }

@@ -3,13 +3,14 @@ import composeApp
 
 // MARK: - 对话流行模型（ChatRows.kt 移植：日分隔 + 工具组 + id 撞号防御）
 
-/// LazyVStack 的一行：日分隔头、原条目、连续已完成工具组、时间线分区头、压缩标记。
+/// LazyVStack 的一行：日分隔头、原条目、连续已完成工具组、回合块、时间线分区头、压缩标记。
 enum ChatRow: Identifiable {
     var id: String {
         switch self {
         case let .dayHeader(id, _): return id
         case let .entry(id, _): return id
         case let .toolGroup(id, _): return id
+        case let .turnBlock(id, _, _): return id
         case let .boundary(id, _, _): return id
         case let .compactMark(id, _, _): return id
         }
@@ -18,6 +19,8 @@ enum ChatRow: Identifiable {
     case dayHeader(id: String, atMs: Int64)
     case entry(id: String, entry: BridgeEntry)
     case toolGroup(id: String, items: [BridgeEntry])
+    /// 回合块（真机反馈③）：思考 + 已完成工具统一折叠在正式输出上方。
+    case turnBlock(id: String, thinking: [BridgeEntry], tools: [BridgeEntry])
     case boundary(id: String, sessionKey: String, label: String)
     case compactMark(id: String, sessionKey: String, atMs: Int64)
 }
@@ -29,7 +32,12 @@ struct TimelineSection {
     let entries: [BridgeEntry]
 }
 
-/// 条目序列 → 带日分隔的行序列（含 ≥2 连续已完成工具卡折叠组；id 撞号改写兜底）。
+/// 条目序列 → 带日分隔的行序列。
+///
+/// 回合折叠（真机反馈③）：思考条目与**已完成**工具条目进入缓冲，随紧随的助手正式
+/// 输出折叠成单个 turnBlock 摆在其上方（工具 item 收进块内展开查看）；缓冲没有被
+/// 助手消息消费时（流式尾部/用户消息插队/run 进行中）按原样吐出——思考卡与工具组
+/// 保持原有尾态渲染，正式输出一到即折叠。
 func buildChatRows(_ entries: [BridgeEntry]) -> [ChatRow] {
     var rows: [ChatRow] = []
     var lastDay: String? = nil
@@ -52,37 +60,73 @@ func buildChatRows(_ entries: [BridgeEntry]) -> [ChatRow] {
         return id
     }
 
-    func addEntry(_ entry: BridgeEntry) {
-        if entry.kind == "message", entry.timestampMs > 0 {
-            let key = dateKey(entry.timestampMs)
-            if key != lastDay {
-                rows.append(.dayHeader(id: uniqueId("day-\(key)-\(entry.id)"), atMs: entry.timestampMs))
-                lastDay = key
+    func addDayHeader(_ atMs: Int64, _ refId: String) {
+        guard atMs > 0 else { return }
+        let key = dateKey(atMs)
+        if key != lastDay {
+            rows.append(.dayHeader(id: uniqueId("day-\(key)-\(refId)"), atMs: atMs))
+            lastDay = key
+        }
+    }
+
+    var pendThinking: [BridgeEntry] = []
+    var pendTools: [BridgeEntry] = []
+
+    /// 缓冲没等到助手消息：按尾态原样渲染（思考卡 + ≥2 连续已完成工具组）。
+    func flushPendingAsTail() {
+        for t in pendThinking {
+            rows.append(.entry(id: uniqueId(t.id), entry: t))
+        }
+        if pendTools.count >= 2 {
+            rows.append(.toolGroup(id: uniqueId("grp:\(pendTools[0].id):\(pendTools.count)"), items: pendTools))
+        } else {
+            for t in pendTools {
+                rows.append(.entry(id: uniqueId(t.id), entry: t))
             }
         }
+        pendThinking = []
+        pendTools = []
+    }
+
+    func addMessage(_ entry: BridgeEntry) {
+        addDayHeader(entry.timestampMs, entry.id)
         rows.append(.entry(id: uniqueId(entry.id), entry: entry))
     }
 
-    var i = 0
-    while i < entries.count {
-        let entry = entries[i]
-        if entry.kind == "tool", entry.state != "running" {
-            var j = i
-            var run: [BridgeEntry] = []
-            while j < entries.count, entries[j].kind == "tool", entries[j].state != "running" {
-                run.append(entries[j])
-                j += 1
+    for entry in entries {
+        switch entry.kind {
+        case "thinking":
+            pendThinking.append(entry)
+        case "tool":
+            if entry.state == "running" {
+                flushPendingAsTail()
+                rows.append(.entry(id: uniqueId(entry.id), entry: entry))
+            } else {
+                pendTools.append(entry)
             }
-            if run.count >= 2 {
-                let key = uniqueId("grp:\(run[0].id):\(run.count)")
-                rows.append(.toolGroup(id: key, items: run))
-                i = j
-                continue
+        case "message" where entry.role == "assistant":
+            let hasPending = !pendThinking.isEmpty || !pendTools.isEmpty
+            if hasPending {
+                // 日分隔随回合块走（块+正式输出同属消息时刻的一天）
+                addDayHeader(entry.timestampMs, entry.id)
+                rows.append(.turnBlock(
+                    id: uniqueId("turn:\(pendThinking.first?.id ?? pendTools.first?.id ?? entry.id)"),
+                    thinking: pendThinking, tools: pendTools))
+                pendThinking = []
+                pendTools = []
+            }
+            addMessage(entry)
+        default:
+            // 用户消息/系统行等：缓冲原样吐出再放本条
+            flushPendingAsTail()
+            if entry.kind == "message" {
+                addMessage(entry)
+            } else {
+                rows.append(.entry(id: uniqueId(entry.id), entry: entry))
             }
         }
-        addEntry(entry)
-        i += 1
     }
+    flushPendingAsTail()
     return rows
 }
 

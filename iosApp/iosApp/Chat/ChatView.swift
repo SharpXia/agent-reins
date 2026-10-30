@@ -217,9 +217,9 @@ struct ChatView: View {
                 }
                 .buttonStyle(.plain)
                 .padding(.trailing, 12)
-                // 真机反馈③（二轮）：overlay 底边=屏幕底，上移=composer 高度+home indicator+间距，
-                // 让按钮悬在内容区（列表可见底）上方
-                .padding(.bottom, composerHeight + safeBottom + 10)
+                // 真机反馈③（三轮再加大）：上移=composer 高度+home indicator+30pt 间距，
+                // 太贴近 composer 易误触（SW 二轮反馈①）
+                .padding(.bottom, composerHeight + safeBottom + 30)
             }
         }
         // ---- 滚动协同 ----

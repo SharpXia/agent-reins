@@ -353,9 +353,17 @@ class OpenClawClient(
                         auth = ConnectAuth.SharedToken(config.apiKey), holdOpen = true,
                     )
                 }
+            } catch (ce: kotlinx.coroutines.CancellationException) {
+                // 本 job 被取消（failover 掐候选/换候选/显式断开）＝非传输事件，不写状态：
+                // 慢端（Darwin 握手对取消不敏感）的取消清理晚到时，会把已连上的新候选
+                // Connected 打翻成 Error——「fallback 连上后自动断联」的元凶（SW 真机反馈）。
+                if (!hello.isCompleted) hello.completeExceptionally(ce)
+                throw ce
             } catch (e: Exception) {
                 if (!hello.isCompleted) hello.completeExceptionally(e)
-                if (_status.value !is GatewayStatus.Disconnected) {
+                // 身份守卫：换候选后本 job 已不是现任传输，迟到的失败也不许写状态
+                if (wsJob === coroutineContext[kotlinx.coroutines.Job]
+                    && _status.value !is GatewayStatus.Disconnected) {
                     _status.value = GatewayStatus.Error(e.message)
                 }
             }

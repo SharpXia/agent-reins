@@ -617,7 +617,20 @@ class AppModel(
         sessionsJob?.cancel()
         activityJob?.cancel()
         outboxJob?.cancel()
-        statusJob = scope.launch { c.status.collect { status = it } }
+        statusJob = scope.launch { c.status.collect { st ->
+            val prev = status
+            status = st
+            // 进入 Connected 的边清陈旧错误横幅（SW 反馈：fallback 连上后横幅不消失）。
+            // 只在边沿清：连接态中稍后发生的瞬时 RPC 错误（历史加载失败等）不会被误清。
+            if (st is GatewayStatus.Connected) lastError = null
+            // 意外断线升级到上层 connect()（SW 反馈：fallback 到外网慢）：client 重连循环
+            // 只重试上次成功地址、不轮换候选——换网后（家 LAN → 外网）会对死地址空转退避
+            // 直至放弃，只能手动重连才触发轮换。这里升级走完整候选轮换；手动断开不升。
+            // 若 client 重连抢先恢复（同网瞬断），退避到点时见 Connected 自弃。
+            if (prev is GatewayStatus.Connected && st !is GatewayStatus.Connected && !explicitDisconnect) {
+                scheduleAutoRetry()
+            }
+        } }
         activeRunsJob?.cancel()
         activeRunsJob = scope.launch {
             launch { c.activeRuns.collect { activeRunKeys = it } }
@@ -761,8 +774,8 @@ class AppModel(
                     )
                 }
                 setupCode = ""
-                // 恢复上次浏览的会话（重连场景）
-                selectedSession?.let { openConversation(c, it) }
+                // 恢复上次浏览的会话（重连场景）；恢复失败不毒化连接横幅（quiet）
+                selectedSession?.let { openConversation(c, it, quiet = true) }
             } catch (e: GatewayRpcException) {
                 lastError = e.message
                 status = GatewayStatus.Error(e.message)
@@ -885,12 +898,14 @@ class AppModel(
         client?.retryPendingNow()
     }
 
-    private fun openConversation(c: OpenClawClient, sessionKey: String) {
+    private fun openConversation(c: OpenClawClient, sessionKey: String, quiet: Boolean = false) {
         conversationJob?.cancel()
         conversationJob = scope.launch {
             val flow = c.conversation(sessionKey)
             runCatching { c.loadHistory(sessionKey) }
-                .onFailure { lastError = it.message }
+                // quiet=connect 成功后的恢复调用：链路刚切换（fallback 首连）loadHistory
+                // 易超时，恢复失败不该把「已连接」横幅毒化成错误（SW 反馈横幅不消失）
+                .onFailure { if (!quiet) lastError = it.message }
             flow.collect { conversation = it }
         }
     }

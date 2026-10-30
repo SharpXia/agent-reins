@@ -43,18 +43,21 @@ struct ComposerView: View {
                         draft = store.misc.draft
                     }
 
-                Circle()
-                    .fill(c.surfaceTertiary)
-                    .frame(width: 34, height: 34)
-                    .overlay(
-                        Image(systemName: "slider.horizontal.3")
-                            .font(.system(size: 13))
-                            .foregroundColor(c.textSecondary)
-                    )
-                    .onTapGesture {
-                        Feedback.hapticTap(enabled: store.misc.hapticsEnabled)
-                    }
-                    .contextMenu { composerActions }
+                // 对话操作（M3.4）：点击即弹菜单（真机反馈④——onTapGesture 会吃掉点击、
+                // contextMenu 只认长按，只剩触感没有弹框；Menu 是原生点击弹出口）。
+                Menu {
+                    composerActions
+                } label: {
+                    Circle()
+                        .fill(c.surfaceTertiary)
+                        .frame(width: 34, height: 34)
+                        .overlay(
+                            Image(systemName: "slider.horizontal.3")
+                                .font(.system(size: 13))
+                                .foregroundColor(c.textSecondary)
+                        )
+                }
+                .buttonStyle(.plain)
 
                 actionButton
             }

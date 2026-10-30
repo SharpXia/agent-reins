@@ -104,12 +104,18 @@ struct MainTabsView: View {
         }
         .environment(nav)
         .task {
-            // Dev 路由直达（无触控注入的自动化走查）：AGENTREINS_DEV_ROUTE=connection
+            // Dev 路由直达（无触控注入的自动化走查）：AGENTREINS_DEV_ROUTE=connection|conversation
             if let route = ProcessInfo.processInfo.environment["AGENTREINS_DEV_ROUTE"] {
                 if route == "connection" {
                     tab = 2
                     try? await Task.sleep(nanoseconds: 300_000_000)
                     nav.settingsPath.append(AppRoute.connection)
+                } else if route == "conversation" {
+                    // 直达首个主线对话（时间线模式）：未读清零/分区渲染的自动化走查口
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    if let conv = store.mainConvs.first {
+                        nav.sessionsPath.append(AppRoute.conversation(convId: conv.id, anchor: nil))
+                    }
                 }
             }
         }

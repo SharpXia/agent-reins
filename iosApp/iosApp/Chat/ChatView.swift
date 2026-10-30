@@ -4,8 +4,10 @@ import composeApp
 /// 对话页（单 session 与 M4 拼接时间线共用；timeline.agentId 非 nil = 拼接模式）。
 ///
 /// 顽疾原位修复对照（Compose 版 → SwiftUI 原生）：
-/// - 钉底：LazyColumn scrollToItem+大 offset 钳制 hack → ScrollPosition(edge:.bottom)，
-///   长消息超屏天然贴绝对底边（M4 反馈②③④的统一根因在原生侧不存在）。
+/// - 钉底：LazyColumn scrollToItem+大 offset 钳制 hack → 列表尾部标记 item 锚定
+///   （scrollTo(id:anchor:.bottom)）。边缘/偏移型定位在内容高度变化（markdown 结排、
+///   流式增量）时会退化为过期偏移 → 空白页/行错位/滚动闪回（真机反馈②）；item 锚定
+///   由框架在布局变化时保持标记位置，长消息贴绝对底边天然成立。
 /// - 键盘：imePadding 时序+重钉 → safeAreaInset + 系统键盘避让；回前台贴底兜底。
 /// - 下拉加载：自研 nestedScroll 手势机（material3 松手回弹不触发的绕行）→ 系统 .refreshable。
 /// - 边缘返回：自绘视差手势 → 系统 interactivePopGesture（导航栈原生行为）。
@@ -27,10 +29,11 @@ struct ChatView: View {
 
     @State private var scroll = ScrollPosition(edge: .bottom)
     @State private var isAtBottom = true
-    @State private var pinnedOnce = false
     @State private var keyboardShowing = false
     @State private var showStartFresh = false
     @State private var anchorConsumed = false
+    /// composer 实测高度：回底按钮上移依据（真机反馈③：与发送键重叠）
+    @State private var composerHeight: CGFloat = 66
 
     var body: some View {
         VStack(spacing: 0) {
@@ -160,9 +163,6 @@ struct ChatView: View {
             let maxOffset = geo.contentSize.height - geo.containerSize.height
             return geo.contentOffset.y >= maxOffset - 48
         } action: { _, atBottom in
-            if atBottom && !isAtBottom {
-                pinnedOnce = true
-            }
             isAtBottom = atBottom
         }
         .refreshable {
@@ -186,13 +186,19 @@ struct ChatView: View {
             } else {
                 ComposerView()
                     .background(c.paper)
+                    .background(
+                        GeometryReader { g in
+                            Color.clear.preference(key: ComposerHeightKey.self, value: g.size.height)
+                        }
+                    )
             }
         }
+        .onPreferenceChange(ComposerHeightKey.self) { composerHeight = $0 }
         .overlay(alignment: .bottomTrailing) {
             if !isAtBottom && hasContent {
                 Button {
                     Feedback.hapticTap(enabled: store.misc.hapticsEnabled)
-                    scroll.scrollTo(edge: .bottom)
+                    scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
                 } label: {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 15, weight: .medium))
@@ -203,16 +209,19 @@ struct ChatView: View {
                         .shadow(color: .black.opacity(0.12), radius: 4, y: 1)
                 }
                 .buttonStyle(.plain)
-                .padding(12)
+                .padding(.trailing, 12)
+                // 真机反馈③：overlay 对齐域含 safeAreaInset 的 composer，直接贴底会压住发送键
+                .padding(.bottom, composerHeight + 10)
             }
         }
         // ---- 滚动协同 ----
         .task {
-            pinnedOnce = false
             timelineTried = timelineMode && !store.timeline.sections.isEmpty
-            // 开场锚底：ScrollPosition(edge:.bottom) 已声明，这里兜底一发
+            // 开场锚底（无条件）：pinnedOnce 门在空列表期就会把锚定跳掉，位置停在
+            // 边缘/偏移模式上跟懒加载虚高 contentSize 走 → 停进「幻影底部」（真机反馈②
+            // 空白页/闪回的现场）。item 锚定跟标记实际 frame 走，内容渐次到位也贴真实底。
             try? await Task.sleep(nanoseconds: 220_000_000)
-            if !pinnedOnce { scroll.scrollTo(edge: .bottom) }
+            scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
             if timelineMode { timelineTried = true }
         }
         .onChange(of: store.conv.sendSignal) { old, new in
@@ -220,13 +229,14 @@ struct ChatView: View {
             guard new != old, new > 0 else { return }
             Task {
                 try? await Task.sleep(nanoseconds: 120_000_000)
-                scroll.scrollTo(edge: .bottom)
+                scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
             }
         }
         .onChange(of: contentSignature) { _, _ in
-            // 流式跟随：内容增长且用户在底 → 持续贴底（用户上拉即让位）
-            if pinnedOnce && (runActive || streamingTail) && isAtBottom {
-                scroll.scrollTo(edge: .bottom)
+            // 内容变化且在底 → 重锚尾部标记（开场渐次到位 + 流式跟随共用；
+            // 用户上拉 isAtBottom=false 自动让位）
+            if isAtBottom {
+                scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
             }
         }
         .onChange(of: keyboardShowing) { showing in
@@ -234,7 +244,7 @@ struct ChatView: View {
             guard showing, isAtBottom, hasContent else { return }
             Task {
                 try? await Task.sleep(nanoseconds: 180_000_000)
-                scroll.scrollTo(edge: .bottom)
+                scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
             }
         }
     }
@@ -357,3 +367,9 @@ struct ChatView: View {
 }
 
 enum ChatAnchorTag: Hashable { case bottom }
+
+/// composer 高度上抛（回底按钮避让，真机反馈③）
+private struct ComposerHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { nextValue() }
+}

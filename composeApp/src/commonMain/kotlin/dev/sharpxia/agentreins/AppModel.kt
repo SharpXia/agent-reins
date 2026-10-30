@@ -242,6 +242,9 @@ class AppModel(
         convAgentId = agentId
         convLoadedKeys.clear()
         rebuildConvSections(keys)
+        // 时间线把该 agent 全部主线分区一次性摆出=整段已读（SW 真机反馈①）：首页徽标是
+        // Σ分区未读，此前只随 select 清最新分区，旧分区徽标残留成「进了会话不清未读」。
+        sessions.filter { it.id in keys && it.unread > 0 }.forEach { c.clearUnread(it.id) }
         sessions.firstOrNull { it.id == keys.first() }?.let { select(it) }
         convLoadedKeys.add(keys.first())
     }
@@ -657,7 +660,9 @@ class AppModel(
         // 当前会话不计数不出声。
         activityJob = scope.launch {
             c.sessionActivity.collect { key ->
-                if (key != selectedSession) {
+                // 当前会话之外，正在读的 timeline 分区同样在场（SW 真机反馈①）：
+                // 时间线开着时旧分区来事件不该 +1 未读/响铃，否则越读徽标越大。
+                if (key != selectedSession && convSections.none { it.key == key }) {
                     c.incrementUnread(key)
                     FeedbackPrefs.notificationSound.value?.let { sound ->
                         val now = epochMs()

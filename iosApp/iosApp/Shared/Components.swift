@@ -19,16 +19,18 @@ struct UnreadBadge: View {
     }
 }
 
-/// agent 头像：机器人 Canvas 薄壳（RobotAvatar 渲染，规格 avatar-spec-20261029 §9）。
+/// agent 头像：黏土 blob Canvas 薄壳（RobotAvatar 渲染，face-sculpt §1/§2）。
 /// 首字符圆底旧实现整段删除、不留双轨；name 参数仅为保签名兼容。
+/// faceFactors 必须由调用点解析后显式传入（渲染器零解析）。
 struct AgentAvatar: View {
     let tint: AgentTintColors
     let name: String
     var size: CGFloat = 42
     var expression: AgentExpression = .calm
+    var faceFactors: [Double] = ClayFace.defaultFactors
 
     var body: some View {
-        RobotAvatar(palette: tint.name, expression: expression, size: size)
+        RobotAvatar(palette: tint.name, expression: expression, size: size, faceFactors: faceFactors)
             // 复审修复②：RobotAvatar 是 Canvas，不产生 accessibility 元素，原首字符 Text
             // 自带的读屏内容随替换消失——聚合成单元素并补「agent 名 + 表情中文名」标签
             .accessibilityElement(children: .ignore)

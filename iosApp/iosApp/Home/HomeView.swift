@@ -303,7 +303,8 @@ struct ConversationRowView: View {
         let tint = store.tint(conv.agentId, isDark: scheme == .dark)
         return HStack(alignment: .center, spacing: 12) {
             AgentAvatar(tint: tint, name: store.agentName(conv.agentId),
-                        expression: store.agentExpression(conv.agentId))
+                        expression: store.agentExpression(conv.agentId),
+                        faceFactors: store.agentFaceFactors(conv.agentId))
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
                     if conv.pinned && !stash {
@@ -403,7 +404,8 @@ struct AgentsDrawerPanel: View {
             } label: {
                 HStack(spacing: 12) {
                     AgentAvatar(tint: tint, name: agent.name,
-                                expression: store.agentExpression(agent.agentId))
+                                expression: store.agentExpression(agent.agentId),
+                                faceFactors: store.agentFaceFactors(agent.agentId))
                     VStack(alignment: .leading, spacing: 2) {
                         Text(agent.name).ink(.textLg).fontWeight(.medium).foregroundColor(c.ink)
                         Text("\(agent.sessionCount) 个会话").ink(.textXs).foregroundColor(c.textTertiary)

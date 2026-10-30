@@ -157,7 +157,8 @@ struct AgentDetailView: View {
         let name = agent?.name ?? agentId
         return HStack(spacing: 12) {
             AgentAvatar(tint: tint, name: name, size: 52,
-                        expression: store.agentExpression(agentId))
+                        expression: store.agentExpression(agentId),
+                        faceFactors: store.agentFaceFactors(agentId))
             VStack(alignment: .leading, spacing: 2) {
                 Text(name).ink(.headingMd).foregroundColor(c.ink)
                 Text(agentId).ink(.textSm).foregroundColor(c.textTertiary)
@@ -223,6 +224,7 @@ struct AgentEditSheet: View {
     @State private var store = AppStore.shared
     @State private var name = ""
     @State private var loaded = false
+    @State private var showSculpt = false
     let agentId: String
 
     var body: some View {
@@ -232,13 +234,14 @@ struct AgentEditSheet: View {
             // 底部「取消/保存」与网格下半行裁掉且无法滚动——包 ScrollView 保底可滚达
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
-                    // 实时预览（§10.1）：标题下、显示名输入框上方，64pt，当前 tint × 表情；
-                    // 表情经 store.agentExpression（读桥已解析值），未定制时直读原始串会判不出派生表情
+                    // 实时预览（§10.1）：标题下、显示名输入框上方，64pt，当前 tint × 表情 × face；
+                    // 表情/脸均经 store 解析入口（读桥已解析值），未定制时直读原始串会判不出派生值
                     HStack {
                         Spacer()
                         RobotAvatar(palette: store.agentTintName(agentId),
                                     expression: store.agentExpression(agentId),
-                                    size: 64)
+                                    size: 64,
+                                    faceFactors: store.agentFaceFactors(agentId))
                         Spacer()
                     }
                     TextField("显示名", text: $name)
@@ -279,6 +282,14 @@ struct AgentEditSheet: View {
                     Text("表情").ink(.textSm).foregroundColor(c.textTertiary)
                         .padding(.horizontal, 20)
                     expressionGrid
+                    // 捏脸（face-sculpt §5）：独立 large detent sheet，即点即存
+                    HStack {
+                        Spacer()
+                        Button("捏脸") { showSculpt = true }
+                            .ink(.textMd).foregroundColor(c.ink)
+                        Spacer()
+                    }
+                    .padding(.vertical, 4)
                     HStack {
                         Spacer()
                         Button("取消") { dismiss() }
@@ -293,6 +304,9 @@ struct AgentEditSheet: View {
                     .padding(.bottom, 12)
                 }
             }
+        }
+        .sheet(isPresented: $showSculpt) {
+            FaceSculptSheet(agentId: agentId)
         }
     }
 
@@ -320,7 +334,8 @@ struct AgentEditSheet: View {
     private func expressionCell(_ expr: AgentExpression) -> some View {
         let selected = expr == store.agentExpression(agentId)
         return VStack(spacing: 4) {
-            RobotAvatar(palette: store.agentTintName(agentId), expression: expr, size: 44)
+            RobotAvatar(palette: store.agentTintName(agentId), expression: expr, size: 44,
+                        faceFactors: store.agentFaceFactors(agentId))
                 .frame(width: 50, height: 50)
                 .overlay(
                     RoundedRectangle(cornerRadius: 12)
@@ -333,5 +348,121 @@ struct AgentEditSheet: View {
             store.bridge.setAgentExpression(agentId: agentId, expression: expr.rawValue)
             store.bridge.setAgentName(agentId: agentId, name: name)
         }
+    }
+}
+
+/// 捏脸窗口（face-sculpt §5，SwiftUI 侧 = large detent sheet）：
+/// 大号实时预览（当前 tint × 当前表情的 blob 脸）+ 轮廓上 12 个手柄小圆点（位置 = facePoint）。
+/// 拖拽：θ = atan2(dx, −dy)（12 点方向为 0°、顺时针，与 Compose 同口径）→ 最近索引
+/// i = round(θ/30°) mod 12，f_i = clamp(拖距/44, 0.70, 1.10)；黏土手感 = 邻点 i±1
+/// 各向新值靠拢 f_{i±1} += (f_i_new − f_{i±1}) × 0.30 再各自 clamp；拖动中逐帧重绘（§2 样条，
+/// 禁止折线），并经 AppStore.setAgentFace(ClayFace.encode(…)) 即点即存。
+/// 「重置」= face 归位 ""（规范默认正圆，与 Compose 一致）；「完成」= 关闭。
+private struct FaceSculptSheet: View {
+    @Environment(\.inkColors) private var c
+    @Environment(\.dismiss) private var dismiss
+    @State private var store = AppStore.shared
+    let agentId: String
+    // 拖动期间以本地状态逐帧驱动（不等 model 回流），写入与桥同步落库
+    @State private var factors: [Double]
+
+    init(agentId: String) {
+        self.agentId = agentId
+        _factors = State(initialValue: AppStore.shared.agentFaceFactors(agentId))
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("捏脸")
+                .ink(.headingMd)
+                .foregroundColor(c.ink)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+            // 预览区吃满剩余空间；取可用区最小边（留 24pt 边距放手柄），下限 220 保证可拖
+            GeometryReader { geo in
+                let side = max(220, min(geo.size.width, geo.size.height) - 24)
+                previewBox(side: side)
+                    .frame(width: side, height: side)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            Text("拖动轮廓上的手柄调整脸型")
+                .ink(.textXs)
+                .foregroundColor(c.textTertiary)
+                .frame(maxWidth: .infinity)
+                .padding(.bottom, 4)
+            HStack {
+                Spacer()
+                Button("重置") {
+                    factors = ClayFace.defaultFactors
+                    store.setAgentFace(agentId, face: "")
+                }
+                .ink(.textLg).foregroundColor(c.ink)
+                Button("完成") { dismiss() }
+                    .ink(.textLg).foregroundColor(c.ink)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+        .background(c.paper)
+        .presentationDetents([.large])
+    }
+
+    // 大预览 + 手柄叠加层；拖拽手势挂在宿主 ZStack 上（坐标 = 整个 side × side 盒）
+    private func previewBox(side: CGFloat) -> some View {
+        ZStack {
+            RobotAvatar(palette: store.agentTintName(agentId),
+                        expression: store.agentExpression(agentId),
+                        size: side,
+                        faceFactors: factors)
+            handlesOverlay
+                .allowsHitTesting(false)
+        }
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { applyDrag($0.location, side: side) }
+        )
+    }
+
+    /// 12 个手柄小圆点（外圈 ink r4 + 内芯白 r1.8，位置 = facePoint；纯视觉，命中走宿主手势）。
+    private var handlesOverlay: some View {
+        Canvas { ctx, canvasSize in
+            let s = min(canvasSize.width, canvasSize.height) / 100
+            for (i, f) in factors.enumerated() {
+                let p = ClayFace.point(i, f)
+                let center = CGPoint(x: p.x * s, y: p.y * s)
+                ctx.fill(
+                    Path(ellipseIn: CGRect(x: center.x - 4, y: center.y - 4, width: 8, height: 8)),
+                    with: .color(c.ink)
+                )
+                ctx.fill(
+                    Path(ellipseIn: CGRect(x: center.x - 1.8, y: center.y - 1.8, width: 3.6, height: 3.6)),
+                    with: .color(.white)
+                )
+            }
+        }
+    }
+
+    /// 拖点 → 100×100 逻辑坐标 → 方位角命中索引 + 半径系数，黏土手感带邻点，逐帧写库。
+    private func applyDrag(_ pos: CGPoint, side: CGFloat) {
+        guard side > 0 else { return }
+        let scale = side / 100
+        let dx = pos.x / scale - 50
+        let dy = pos.y / scale - 50
+        // 方位角：12 点方向为 0°、顺时针（θ_i = i×30°）→ 最近索引
+        var theta = atan2(dx, -dy) * 180 / .pi
+        if theta < 0 { theta += 360 }
+        let i = Int((theta / 30).rounded()) % ClayFace.pointCount
+        let fNew = min(max((dx * dx + dy * dy).squareRoot() / ClayFace.r, ClayFace.minValue), ClayFace.maxValue)
+        var next = factors
+        next[i] = fNew
+        // 黏土手感：邻点 i±1 各向新值靠拢 ×0.30 再各自 clamp（§5）
+        let left = (i + ClayFace.pointCount - 1) % ClayFace.pointCount
+        let right = (i + 1) % ClayFace.pointCount
+        next[left] = min(max(next[left] + (fNew - next[left]) * 0.30, ClayFace.minValue), ClayFace.maxValue)
+        next[right] = min(max(next[right] + (fNew - next[right]) * 0.30, ClayFace.minValue), ClayFace.maxValue)
+        factors = next
+        store.setAgentFace(agentId, face: ClayFace.encode(next))
     }
 }

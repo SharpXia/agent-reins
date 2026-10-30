@@ -73,14 +73,15 @@ struct ToolCallCardView: View {
     }
 }
 
-/// 回合块（真机反馈③）：思考过程 + 本次工具调用统一收进一个折叠条，摆在对应正式
-/// 输出上方。展开 = 思考全文（斜体弱化）+ 工具卡逐条（复用 ToolCallCardView，
-/// 各自可再展开参数/结果）。
+/// 回合块（真机反馈③）：思考过程 + 过程文本 + 工具调用统一收进一个折叠条，摆在对应
+/// 回合最终输出上方。展开 = 思考全文 → 过程文本（如「让我用网页搜索…」）→ 工具卡逐条
+/// （复用 ToolCallCardView，各自可再展开参数/结果）。
 struct TurnBlockView: View {
     @Environment(\.inkColors) private var c
     @State private var expanded = false
     let thinking: [BridgeEntry]
     let tools: [BridgeEntry]
+    var interim: [BridgeEntry] = []
 
     var body: some View {
         let failed = tools.filter { $0.state == "failed" }.count
@@ -114,6 +115,9 @@ struct TurnBlockView: View {
                         .foregroundColor(c.textTertiary)
                         .lineSpacing(3)
                 }
+                ForEach(interim, id: \.id) { m in
+                    MarkdownView(content: m.content)
+                }
                 ForEach(tools, id: \.id) { tool in
                     ToolCallCardView(card: tool)
                 }
@@ -128,6 +132,7 @@ struct TurnBlockView: View {
         var parts: [String] = []
         if !thinking.isEmpty { parts.append("思考过程") }
         if !tools.isEmpty { parts.append("\(tools.count) 次工具调用") }
+        if !interim.isEmpty { parts.append("\(interim.count) 段过程") }
         return parts.isEmpty ? "思考过程" : parts.joined(separator: " · ")
     }
 }

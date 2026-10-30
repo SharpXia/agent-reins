@@ -18,8 +18,8 @@ struct ChatRowView: View {
                       showSpinner: entry.id == lastUserEntryId && showTailSpinner)
         case let .toolGroup(_, items):
             ToolGroupCard(items: items)
-        case let .turnBlock(_, thinking, tools):
-            TurnBlockView(thinking: thinking, tools: tools)
+        case let .turnBlock(_, thinking, tools, interim):
+            TurnBlockView(thinking: thinking, tools: tools, interim: interim)
         case let .boundary(_, sessionKey, label):
             BoundaryView(label: label).onAppear { onBoundaryAppear(sessionKey) }
         case let .compactMark(_, _, atMs):

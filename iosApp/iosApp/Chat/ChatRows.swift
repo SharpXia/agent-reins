@@ -10,7 +10,7 @@ enum ChatRow: Identifiable {
         case let .dayHeader(id, _): return id
         case let .entry(id, _): return id
         case let .toolGroup(id, _): return id
-        case let .turnBlock(id, _, _): return id
+        case let .turnBlock(id, _, _, _): return id
         case let .boundary(id, _, _): return id
         case let .compactMark(id, _, _): return id
         }
@@ -19,8 +19,8 @@ enum ChatRow: Identifiable {
     case dayHeader(id: String, atMs: Int64)
     case entry(id: String, entry: BridgeEntry)
     case toolGroup(id: String, items: [BridgeEntry])
-    /// 回合块（真机反馈③）：思考 + 已完成工具统一折叠在正式输出上方。
-    case turnBlock(id: String, thinking: [BridgeEntry], tools: [BridgeEntry])
+    /// 回合块（真机反馈③）：思考 + 工具 + 过程文本统一折叠，摆在该回合最终输出上方。
+    case turnBlock(id: String, thinking: [BridgeEntry], tools: [BridgeEntry], interim: [BridgeEntry])
     case boundary(id: String, sessionKey: String, label: String)
     case compactMark(id: String, sessionKey: String, atMs: Int64)
 }
@@ -34,10 +34,11 @@ struct TimelineSection {
 
 /// 条目序列 → 带日分隔的行序列。
 ///
-/// 回合折叠（真机反馈③）：思考条目与**已完成**工具条目进入缓冲，随紧随的助手正式
-/// 输出折叠成单个 turnBlock 摆在其上方（工具 item 收进块内展开查看）；缓冲没有被
-/// 助手消息消费时（流式尾部/用户消息插队/run 进行中）按原样吐出——思考卡与工具组
-/// 保持原有尾态渲染，正式输出一到即折叠。
+/// 回合折叠（真机反馈③，按 mini-x 实证形态重做）：回合 = 用户消息之后、下一条用户
+/// 消息之前的全部思考/工具/过程文本，加上该回合的最终输出。思考与工具进缓冲，过程
+/// 文本（如「让我用网页搜索…」）也进组；回合闭合（下一条用户消息/回合尾）时，折叠成
+/// 单个 turnBlock 摆在最终输出上方。流式中的行（streaming 消息/运行中工具）即时收拢
+/// 已完成回合并原样渲染，不进组——直播可见性优先，重载后即合为单块。
 func buildChatRows(_ entries: [BridgeEntry]) -> [ChatRow] {
     var rows: [ChatRow] = []
     var lastDay: String? = nil
@@ -69,28 +70,47 @@ func buildChatRows(_ entries: [BridgeEntry]) -> [ChatRow] {
         }
     }
 
+    func addEntryRow(_ entry: BridgeEntry) {
+        if entry.kind == "message" { addDayHeader(entry.timestampMs, entry.id) }
+        rows.append(.entry(id: uniqueId(entry.id), entry: entry))
+    }
+
     var pendThinking: [BridgeEntry] = []
     var pendTools: [BridgeEntry] = []
+    var pendInterim: [BridgeEntry] = []  // system 旁白（commentary 过程叙述，live 尾部垫底元凶）
+    var pendMsgs: [BridgeEntry] = []     // 过程文本 + 最终输出（最后一条 = 主内容）
 
-    /// 缓冲没等到助手消息：按尾态原样渲染（思考卡 + ≥2 连续已完成工具组）。
-    func flushPendingAsTail() {
-        for t in pendThinking {
-            rows.append(.entry(id: uniqueId(t.id), entry: t))
-        }
+    /// 活尾（流式中无闭合回合）：思考卡/工具卡/过程文本原样渲染保持现场。
+    func flushTail() {
+        for t in pendThinking { rows.append(.entry(id: uniqueId(t.id), entry: t)) }
         if pendTools.count >= 2 {
             rows.append(.toolGroup(id: uniqueId("grp:\(pendTools[0].id):\(pendTools.count)"), items: pendTools))
         } else {
-            for t in pendTools {
-                rows.append(.entry(id: uniqueId(t.id), entry: t))
-            }
+            for t in pendTools { rows.append(.entry(id: uniqueId(t.id), entry: t)) }
         }
-        pendThinking = []
-        pendTools = []
+        for m in pendInterim { rows.append(.entry(id: uniqueId(m.id), entry: m)) }
+        for m in pendMsgs { addEntryRow(m) }
+        pendThinking = []; pendTools = []; pendInterim = []; pendMsgs = []
     }
 
-    func addMessage(_ entry: BridgeEntry) {
-        addDayHeader(entry.timestampMs, entry.id)
-        rows.append(.entry(id: uniqueId(entry.id), entry: entry))
+    /// 回合闭合：折叠条（思考+工具+过程文本）摆在该回合最终输出上方；无可折叠内容时
+    /// 过程消息直接落行。
+    func flushTurn() {
+        if pendThinking.isEmpty && pendTools.isEmpty {
+            for m in pendInterim { rows.append(.entry(id: uniqueId(m.id), entry: m)) }
+            for m in pendMsgs { addEntryRow(m) }
+            pendInterim = []; pendMsgs = []
+            return
+        }
+        let anchor = pendMsgs.last
+        let interim = pendInterim + pendMsgs.dropLast()
+        addDayHeader(anchor?.timestampMs ?? pendThinking.first?.timestampMs ?? pendTools.first?.timestampMs ?? 0,
+                     anchor?.id ?? pendThinking.first?.id ?? pendTools.first?.id ?? "turn")
+        rows.append(.turnBlock(
+            id: uniqueId("turn:\(pendThinking.first?.id ?? pendTools.first?.id ?? anchor?.id ?? "x")"),
+            thinking: pendThinking, tools: pendTools, interim: interim))
+        if let a = anchor { addEntryRow(a) }
+        pendThinking = []; pendTools = []; pendInterim = []; pendMsgs = []
     }
 
     for entry in entries {
@@ -99,34 +119,27 @@ func buildChatRows(_ entries: [BridgeEntry]) -> [ChatRow] {
             pendThinking.append(entry)
         case "tool":
             if entry.state == "running" {
-                flushPendingAsTail()
-                rows.append(.entry(id: uniqueId(entry.id), entry: entry))
+                // 运行中工具保持现场：已完成回合收拢成块，未闭合（有过程文本）按活尾渲染
+                if pendMsgs.isEmpty { flushTurn() } else { flushTail() }
+                addEntryRow(entry)
             } else {
                 pendTools.append(entry)
             }
+        case "message" where entry.role == "system":
+            // commentary 旁白（agent 过程叙述，live 追加在尾部）= 过程文本进组
+            pendInterim.append(entry)
+        case "message" where entry.role == "assistant" && entry.streaming:
+            // 流式中的输出：先闭合已完成回合（折叠在其上方），流式行原样渲染
+            flushTurn()
+            addEntryRow(entry)
         case "message" where entry.role == "assistant":
-            let hasPending = !pendThinking.isEmpty || !pendTools.isEmpty
-            if hasPending {
-                // 日分隔随回合块走（块+正式输出同属消息时刻的一天）
-                addDayHeader(entry.timestampMs, entry.id)
-                rows.append(.turnBlock(
-                    id: uniqueId("turn:\(pendThinking.first?.id ?? pendTools.first?.id ?? entry.id)"),
-                    thinking: pendThinking, tools: pendTools))
-                pendThinking = []
-                pendTools = []
-            }
-            addMessage(entry)
+            pendMsgs.append(entry)
         default:
-            // 用户消息/系统行等：缓冲原样吐出再放本条
-            flushPendingAsTail()
-            if entry.kind == "message" {
-                addMessage(entry)
-            } else {
-                rows.append(.entry(id: uniqueId(entry.id), entry: entry))
-            }
+            flushTurn()
+            addEntryRow(entry)
         }
     }
-    flushPendingAsTail()
+    if pendMsgs.isEmpty { flushTail() } else { flushTurn() }
     return rows
 }
 

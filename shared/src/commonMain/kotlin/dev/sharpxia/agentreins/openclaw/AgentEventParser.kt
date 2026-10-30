@@ -291,6 +291,18 @@ object AgentEventParser {
                         ?.joinToString("\n")
                         .orEmpty()
                     if (text.isNotBlank()) {
+                        // 思考块入列（SW 真机反馈：思考+工具要收进对应回复上方的折叠条）：
+                        // thinking 嵌在 assistant content 块内，此前被整块丢弃——历史里没有
+                        // 思考条目，折叠只剩工具。id 绑 messageId+序号，跨页稳定可对账。
+                        parts?.forEachIndexed { pi, part ->
+                            val p = part as? JsonObject ?: return@forEachIndexed
+                            if (p.str("type") != "thinking") return@forEachIndexed
+                            val t = p.str("thinking").orEmpty()
+                            if (t.isNotBlank()) entries += ThinkingEntry(
+                                id = "$messageId-think-$pi",
+                                text = t,
+                            )
+                        }
                         entries += Message(
                             id = messageId,
                             sessionId = sessionKey,
@@ -390,7 +402,9 @@ object AgentEventParser {
                             entry.id.removePrefix(LOCAL_ECHO_PREFIX) !in usedEchoRunIds
                     Message.Role.ASSISTANT ->
                         entry.content.isNotBlank() && entry.content !in matchedAssistantTexts
-                    Message.Role.SYSTEM -> true
+                    // commentary 旁白同样不留：无时间锚必垫尾部（M3.6 同款「沉底」，
+                    // SW 真机反馈②）——live 期间已随回合折叠展示，历史重载即退场
+                    Message.Role.SYSTEM -> false
                 }
             }
         }

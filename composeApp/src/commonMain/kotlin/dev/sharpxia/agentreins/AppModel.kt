@@ -246,7 +246,7 @@ class AppModel(
         rebuildConvSections(keys)
         // 时间线把该 agent 全部主线分区一次性摆出=整段已读（SW 真机反馈①）：首页徽标是
         // Σ分区未读，此前只随 select 清最新分区，旧分区徽标残留成「进了会话不清未读」。
-        sessions.filter { it.id in keys && it.unread > 0 }.forEach { c.clearUnread(it.id) }
+        sessions.filter { it.id in keys && it.unread > 0 }.forEach { clearUnreadFrontWins(c, it.id) }
         sessions.firstOrNull { it.id == keys.first() }?.let { select(it) }
         convLoadedKeys.add(keys.first())
     }
@@ -838,6 +838,16 @@ class AppModel(
         connect()
     }
 
+    /** 清未读 = 本地计数归零 + 持久 readMark（SW 真机反馈①：清零后触发重连，未读又回来——
+     *  协议无已读同步 RPC（patch 族要 operator.admin），已读以前端为准：readMark 落
+     *  sessionOverlay（kv 持久化），任何刷新/换 client 后 apply 都会把 readMark 时刻前的
+     *  网关未读强制归零；此后新活动（lastActive > readMark）照常计未读。 */
+    private fun clearUnreadFrontWins(c: OpenClawClient, sessionKey: String) {
+        c.clearUnread(sessionKey)
+        sessionOverlay = SessionOverlay.toggled(sessionOverlay, sessionKey, readMarkMs = epochMs())
+        scheduleOverlayPersist()
+    }
+
     fun select(session: Session?) {
         // 切走前把旧会话在途草稿立即落库（P1：500ms 去抖窗口内切会话不能串草稿/丢草稿）。
         // P3 修复：无条件写入（含空值）——只写非空会让「已发送清空的草稿」写不进去，
@@ -858,7 +868,7 @@ class AppModel(
         refreshPendingOutbox()
         draftState.value = runCatching { cache.kvGet(gatewayId, draftKey(session.id)) }.getOrNull() ?: ""
         val c = client ?: return
-        c.clearUnread(session.id)
+        clearUnreadFrontWins(c, session.id)
         openConversation(c, session.id)
     }
 
@@ -879,7 +889,7 @@ class AppModel(
         refreshPendingOutbox()
         draftState.value = runCatching { cache.kvGet(gatewayId, draftKey(sessionKey)) }.getOrNull() ?: ""
         val c = client ?: return
-        c.clearUnread(sessionKey)
+        clearUnreadFrontWins(c, sessionKey)
         openConversation(c, sessionKey)
     }
 

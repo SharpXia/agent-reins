@@ -74,6 +74,31 @@ final class AppStore {
         return agentTintFor(agentId)  // returns AgentTintName
     }
 
+    /// agent 表情（规格 avatar-spec-20261029 §9）：读桥已解析的枚举名，miss/非法串落
+    /// `.calm` 常量（正常路径桥已解析，只有列表未就绪的瞬态会命中兜底；此处不做任何 hash）。
+    func agentExpression(_ agentId: String) -> AgentExpression {
+        guard let raw = lists.agents.first(where: { $0.agentId == agentId })?.expression else {
+            return .calm
+        }
+        return AgentExpression(rawValue: raw) ?? .calm
+    }
+
+    /// agent 黏土脸系数表（face-sculpt §4）：读桥 `BridgeAgent.face` 原始串，Swift 侧镜像
+    /// 同一套解析规则（12 段逗号分隔 → 逐段 Double → 逐值 clamp [0.70,1.10]；
+    /// 空串/段数 ≠ 12/任一段非数 → 正圆全 1.0）。渲染器零解析——调用点显式传结果。
+    func agentFaceFactors(_ agentId: String) -> [Double] {
+        guard let face = lists.agents.first(where: { $0.agentId == agentId })?.face,
+              !face.isEmpty else {
+            return ClayFace.defaultFactors
+        }
+        return ClayFace.parse(face) ?? ClayFace.defaultFactors
+    }
+
+    /// 黏土脸系数串写库（桥 setAgentFace 透传；"" = 回规范默认正圆，非法串由 Kotlin 侧静默忽略）。
+    func setAgentFace(_ agentId: String, face: String) {
+        bridge.setAgentFace(agentId: agentId, face: face)
+    }
+
     func tint(_ agentId: String, isDark: Bool) -> AgentTintColors {
         agentTint(agentTintName(agentId), isDark: isDark)
     }

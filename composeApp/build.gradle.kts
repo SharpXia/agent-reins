@@ -5,6 +5,11 @@ plugins {
     alias(libs.plugins.androidMultiplatformLibrary)
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
+    // 修复：composeApp 有 @Serializable（AgentRegistry 的 Entry/AgentProfile）但从未应用
+    // 序列化编译插件——注解能编译、运行期 serializer 反射查找必抛 → runCatching 吞掉 →
+    // parse 恒回空表，agent 定制（名/色/表情/捏脸脸型）重启即丢（face-sculpt §4 的 kv 持久化死路）。
+    // 与 shared 模块同款补齐（shared 一直有此 alias，故其 @Serializable 正常）。
+    alias(libs.plugins.kotlinSerialization)
 }
 
 // KMP UI 库：全部界面代码在 commonMain，由 androidApp / desktopApp / iosApp 壳工程消费

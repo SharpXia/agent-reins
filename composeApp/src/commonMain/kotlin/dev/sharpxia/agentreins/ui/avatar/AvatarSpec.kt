@@ -67,3 +67,14 @@ fun encodeFaceFactors(fs: List<Double>): String =
         .joinToString(",") { c ->
             if (c < 100) "0.${c.toString().padStart(2, '0')}" else "1.${(c - 100).toString().padStart(2, '0')}"
         }
+
+/** 正圆系数表（全 1.0）：face 串为空/解析失败时的唯一兜底。 */
+val DefaultFaceFactors: List<Double> = List(FACE_POINT_COUNT) { 1.0 }
+
+/** 统一解析入口（face，镜像 avatarExpressionOf 模式）：空串/非法 → 正圆；
+ *  调用点把结果显式传给渲染器，渲染器零解析（face-sculpt §5）。 */
+fun agentFaceFactorsOf(agentId: String, profiles: Map<String, AgentProfile>): List<Double> =
+    profiles[agentId]?.face
+        ?.takeIf { it.isNotEmpty() }
+        ?.let { parseFaceFactors(it) }
+        ?: DefaultFaceFactors

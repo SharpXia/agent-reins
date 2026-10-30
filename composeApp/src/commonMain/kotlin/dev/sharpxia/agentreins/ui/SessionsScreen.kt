@@ -60,6 +60,7 @@ import dev.sharpxia.agentreins.openclaw.SessionCategory
 import dev.sharpxia.agentreins.openclaw.SessionClassifier
 import kotlin.math.abs
 import dev.sharpxia.agentreins.ui.avatar.AgentExpression
+import dev.sharpxia.agentreins.ui.avatar.agentFaceFactorsOf
 import dev.sharpxia.agentreins.ui.avatar.avatarExpressionOf
 import dev.sharpxia.agentreins.ui.components.ConnectionEmptyState
 import dev.sharpxia.agentreins.ui.components.SectionHeader
@@ -171,6 +172,7 @@ private fun ConversationList(
                             subtitle = "${s.sessionCount} 个会话",
                             tintName = s.profile.tint,
                             expression = avatarExpressionOf(s.profile.agentId, model.agentProfiles),
+                            faceFactors = agentFaceFactorsOf(s.profile.agentId, model.agentProfiles),
                             onClick = {
                                 haptics.tap()
                                 scope.launch { drawerState.close() }
@@ -299,6 +301,7 @@ private fun ConversationList(
                                         s.profile.name,
                                         size = 30,
                                         expression = avatarExpressionOf(s.profile.agentId, model.agentProfiles),
+                                        faceFactors = agentFaceFactorsOf(s.profile.agentId, model.agentProfiles),
                                     )
                                 }
                             },
@@ -537,6 +540,7 @@ private fun DrawerAgentRow(
     subtitle: String,
     tintName: AgentTintName?,
     expression: AgentExpression,
+    faceFactors: List<Double>,
     onClick: () -> Unit,
     onEdit: (() -> Unit)? = null,
     onCreate: (() -> Unit)? = null,
@@ -569,7 +573,7 @@ private fun DrawerAgentRow(
                 }
             }
             else -> AgentTintScope(tintName) {
-                AgentAvatar(LocalAgentTint.current, name, expression = expression)
+                AgentAvatar(LocalAgentTint.current, name, expression = expression, faceFactors = faceFactors)
             }
         }
         Column(Modifier.weight(1f).padding(horizontal = 12.dp, vertical = 10.dp)) {
@@ -639,7 +643,12 @@ private fun ConversationRowContent(
                 .padding(horizontal = 16.dp, vertical = 10.dp),
         ) {
             val agentName = model.agentProfiles[conv.agentId]?.name ?: conv.agentId
-            AgentAvatar(tint, agentName, expression = avatarExpressionOf(conv.agentId, model.agentProfiles))
+            AgentAvatar(
+                tint,
+                agentName,
+                expression = avatarExpressionOf(conv.agentId, model.agentProfiles),
+                faceFactors = agentFaceFactorsOf(conv.agentId, model.agentProfiles),
+            )
             Spacer(Modifier.size(12.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {

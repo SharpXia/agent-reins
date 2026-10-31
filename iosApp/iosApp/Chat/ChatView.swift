@@ -32,11 +32,16 @@ struct ChatView: View {
     private let bottomLockThreshold: CGFloat = 48
     /// 回底按钮的显示阈值要更严格，避免用户已经接近底部时按钮闪出。
     private let jumpButtonThreshold: CGFloat = 96
-    @State private var distanceFromBottom: CGFloat = 0
-    /// Latest user turn's top edge in the scroll coordinate space. This is the app's
-    /// semantic "bottom" for the jump button: assistant output below it belongs to the
-    /// same turn and should not make the button reappear.
-    @State private var latestUserTopInScroll: CGFloat?
+    /// 滚动路径禁止逐帧状态写入（0.4.6 真机教训：CGFloat 距离与 preference 锚值都是
+    /// 每帧连续变化 → body 每帧重估 → 长会话滑动卡顿；布局期高频失效同时是惰性容器
+    /// 滚动崩溃的压力源）。距离只在跨过语义阈值时落盘，各自一个 Bool、翻转才写。
+    @State private var isNearBottom = true
+    @State private var isFarFromBottom = false
+    /// Latest user turn's head is more than 24pt below the viewport top — the user has
+    /// scrolled past the start of the current turn, so the jump button applies. When the
+    /// anchor row is not materialized the preference is absent and this stays false;
+    /// `isFarFromBottom` covers that case.
+    @State private var turnHeadBelowTop = false
     /// 用户主动上拉后暂停流式跟随。仅由真实交互阶段置位，避免 markdown/思考内容
     /// 增长时 contentSize 短暂变大把「仍在底部」误判成用户离底。
     @State private var userPinnedUp = false
@@ -199,7 +204,10 @@ struct ChatView: View {
         }
         .coordinateSpace(name: ChatScrollCoordinateSpace.name)
         .onPreferenceChange(LatestUserTopPreferenceKey.self) { value in
-            latestUserTopInScroll = value.isFinite ? value : nil
+            // 语义化：只有「越过本回合头」这一个布尔值得写入。原始 y 值每帧都变，
+            // 直接落盘会触发逐帧 body 重估（0.4.6 滑动卡顿根因之一）。
+            let below = value.isFinite && value > 24
+            if below != turnHeadBelowTop { turnHeadBelowTop = below }
         }
         .scrollPosition($scroll)
         // SW 反馈②：进页概率空白、滑动/回顶才出现——估算型 scrollTo 在 markdown 重内容
@@ -210,14 +218,17 @@ struct ChatView: View {
             let maxOffset = max(0, geo.contentSize.height - geo.containerSize.height)
             return max(0, maxOffset - geo.contentOffset.y)
         } action: { _, distance in
-            distanceFromBottom = distance
-            let atBottom = distance <= bottomLockThreshold
-            if atBottom {
-                userPinnedUp = false
+            // 距离只在跨阈值时落盘：逐帧写 CGFloat 会让 body 每帧重估（0.4.6 卡顿根因）。
+            let nearBottom = distance <= bottomLockThreshold
+            let farFromBottom = distance > jumpButtonThreshold
+            if nearBottom != isNearBottom { isNearBottom = nearBottom }
+            if farFromBottom != isFarFromBottom { isFarFromBottom = farFromBottom }
+            if nearBottom {
+                if userPinnedUp { userPinnedUp = false }
             } else if scrollPhase == .interacting || scrollPhase == .tracking {
                 // 只有拖拽/跟手阶段才把离底解释为用户意图；内容增长造成的
                 // 瞬时几何变化继续保持自动贴底。
-                userPinnedUp = true
+                if !userPinnedUp { userPinnedUp = true }
             }
         }
         .onScrollPhaseChange { _, phase, context in
@@ -323,7 +334,10 @@ struct ChatView: View {
         .onChange(of: contentSignature) { _, _ in
             // 内容变化且在底 → 重锚尾部标记（开场渐次到位 + 流式跟随共用；
             // 用户上拉后暂停，内容增长导致的短暂离底仍继续跟随。
+            // 拖拽进行中不打断（ScrollPosition 在交互滚动期突变是 iOS 18 滚动异常
+            // 的高危组合）；48pt 内的贴底小拖拽由 250ms 收敛锚兜底。
             guard !userPinnedUp else { return }
+            guard scrollPhase != .interacting, scrollPhase != .tracking else { return }
             followRevision &+= 1
             let revision = followRevision
             scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
@@ -333,6 +347,7 @@ struct ChatView: View {
             Task {
                 try? await Task.sleep(nanoseconds: 250_000_000)
                 guard followRevision == revision, !userPinnedUp else { return }
+                guard scrollPhase != .interacting, scrollPhase != .tracking else { return }
                 scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
             }
         }
@@ -451,10 +466,8 @@ struct ChatView: View {
     /// bottom distance as a conservative fallback while the user is far above it.
     private var shouldShowJumpButton: Bool {
         guard userPinnedUp, hasContent else { return false }
-        if let top = latestUserTopInScroll {
-            return top > 24
-        }
-        return distanceFromBottom > jumpButtonThreshold
+        if turnHeadBelowTop { return true }
+        return isFarFromBottom
     }
 
     @ViewBuilder
@@ -529,9 +542,10 @@ struct ChatView: View {
     }
 
     private var markdownPrewarmSignature: String {
-        let entries = markdownPrewarmEntries
-        return "\(entries.count):\(entries.first?.id ?? "")|"
-            + entries.reversed()
+        // 只反映预热窗口本身（id+长度）：基础 entries 的 count/首 id 会随流式 delta
+        // 逐条抖动（thinking/tool 进出场），导致 .task(id:) 每 delta 重启——任务重启
+        // 本身轻，但每次都重算窗口+全量缓存命中，且打乱进行中的切片节奏。
+        markdownPrewarmEntries.reversed()
             .filter {
                 $0.kind == "message"
                     && $0.role == "assistant"

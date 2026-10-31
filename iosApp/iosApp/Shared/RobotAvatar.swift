@@ -196,14 +196,16 @@ struct RobotAvatar: View {
         // Keep the entrance and idle motion outside Canvas. The face geometry is
         // rendered once per state; only the composited view is transformed while
         // it breathes, so streaming message updates do not trigger a redraw loop.
+        // 入场只留 0.18s 轻淡入：LazyVStack 滚动回收会让 @State 重置、每次物化都
+        // 重播一次——spring+scale 的重播在快速滑动长会话时是可感知的成本（0.4.6
+        // 真机卡顿归因之一），淡入重播几乎无感。
         .opacity(!motionEnabled || reduceMotion || hasAppeared ? 1 : 0)
-        .scaleEffect(!motionEnabled || reduceMotion || hasAppeared ? 1 : 0.86)
         .onAppear {
             guard !hasAppeared else { return }
             if !motionEnabled || reduceMotion {
                 hasAppeared = true
             } else {
-                withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+                withAnimation(.easeOut(duration: 0.18)) {
                     hasAppeared = true
                 }
             }

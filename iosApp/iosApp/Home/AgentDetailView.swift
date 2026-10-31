@@ -366,10 +366,10 @@ struct AgentEditSheet: View {
 
 /// 捏脸窗口（face-sculpt §5，SwiftUI 侧 = large detent sheet）：
 /// 大号实时预览（当前 tint × 当前表情的 blob 脸）+ 轮廓上 12 个手柄小圆点（位置 = facePoint）。
-/// 拖拽：θ = atan2(dx, −dy)（12 点方向为 0°、顺时针，与 Compose 同口径）→ 最近索引
-/// i = round(θ/30°) mod 12，f_i = clamp(拖距/44, 0.70, 1.10)；黏土手感 = 邻点 i±1
-/// 各向新值靠拢 f_{i±1} += (f_i_new − f_{i±1}) × 0.30 再各自 clamp；拖动中逐帧重绘（§2 样条，
-/// 禁止折线），并经 AppStore.setAgentFace(ClayFace.encode(…)) 即点即存。
+/// 拖拽从具体手柄开始并锁定索引：θ = atan2(dx, −dy)（12 点方向为 0°、顺时针，与 Compose
+/// 同口径），f_i = clamp(拖距/44, 0.70, 1.10)。每个控制点独立调整，拖动一个点不会把相邻
+/// 点一起推移；拖动中逐帧重绘（§2 样条，禁止折线），并经 AppStore.setAgentFace(ClayFace.encode(…))
+/// 即点即存。
 /// 「重置」= face 归位 ""（规范默认正圆，与 Compose 一致）；「完成」= 关闭。
 private struct FaceSculptSheet: View {
     @Environment(\.inkColors) private var c
@@ -378,10 +378,13 @@ private struct FaceSculptSheet: View {
     let agentId: String
     // 拖动期间以本地状态逐帧驱动（不等 model 回流），写入与桥同步落库
     @State private var factors: [Double]
+    @State private var activeHandle: Int?
+    @State private var previewScale: CGFloat = 1
 
     init(agentId: String) {
         self.agentId = agentId
         _factors = State(initialValue: AppStore.shared.agentFaceFactors(agentId))
+        _activeHandle = State(initialValue: nil)
     }
 
     var body: some View {
@@ -399,7 +402,7 @@ private struct FaceSculptSheet: View {
                     .frame(width: side, height: side)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            Text("拖动轮廓上的手柄调整脸型")
+            Text("拖动任一手柄独立调整脸型")
                 .ink(.textXs)
                 .foregroundColor(c.textTertiary)
                 .frame(maxWidth: .infinity)
@@ -407,7 +410,12 @@ private struct FaceSculptSheet: View {
             HStack {
                 Spacer()
                 Button("重置") {
-                    factors = ClayFace.defaultFactors
+                    withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.8)) {
+                        factors = ClayFace.defaultFactors
+                        previewScale = 1
+                    }
+                    activeHandle = nil
+                    Feedback.hapticSuccess(enabled: store.misc.hapticsEnabled)
                     store.setAgentFace(agentId, face: "")
                 }
                 .ink(.textLg).foregroundColor(c.ink)
@@ -421,60 +429,101 @@ private struct FaceSculptSheet: View {
         .presentationDetents([.large])
     }
 
-    // 大预览 + 手柄叠加层；拖拽手势挂在宿主 ZStack 上（坐标 = 整个 side × side 盒）
+    // 大预览 + 手柄叠加层。统一手势按按下位置选择最近手柄并锁定索引，命中区半径 34pt；
+    // 不会因手柄的视觉/布局重叠而固定命中后一个点，也不会拖动途中跳到邻点。
     private func previewBox(side: CGFloat) -> some View {
         ZStack {
             RobotAvatar(palette: store.agentTintName(agentId),
                         expression: store.agentExpression(agentId),
                         size: side,
-                        faceFactors: factors)
-            handlesOverlay
-                .allowsHitTesting(false)
+                        faceFactors: factors,
+                        motionEnabled: false)
+                .scaleEffect(previewScale)
+                .animation(.interactiveSpring(response: 0.18, dampingFraction: 0.78), value: previewScale)
+            // Keep the sibling handles in the same transform as the blob. Scaling only
+            // the Canvas makes the visible outline drift away from the drag anchors.
+            handlesOverlay(side: side)
+                .scaleEffect(previewScale)
+                .animation(.interactiveSpring(response: 0.18, dampingFraction: 0.78), value: previewScale)
         }
+        .coordinateSpace(name: "facePreview")
+    }
+
+    /// 12 个手柄：可视点保持 8pt，命中区由统一手势按最近控制点扩大到 34pt；
+    /// 这样相邻手柄的视觉间距再小，也不会因为 SwiftUI 子视图重叠而误命中固定的后一个点。
+    private func handlesOverlay(side: CGFloat) -> some View {
+        ZStack {
+            ForEach(0..<ClayFace.pointCount, id: \.self) { i in
+                let f = i < factors.count ? factors[i] : 1.0
+                let p = ClayFace.point(i, f)
+                let highlighted = activeHandle == i
+                Circle()
+                    .fill(c.ink)
+                    .frame(width: highlighted ? 12 : 8, height: highlighted ? 12 : 8)
+                    .overlay(Circle().fill(.white).frame(width: highlighted ? 5 : 3.6,
+                                                           height: highlighted ? 5 : 3.6))
+                    .frame(width: 44, height: 44)
+                    .position(x: p.x / 100 * side, y: p.y / 100 * side)
+                    .animation(.easeOut(duration: 0.12), value: highlighted)
+            }
+        }
+        .frame(width: side, height: side)
         .contentShape(Rectangle())
         .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { applyDrag($0.location, side: side) }
+            DragGesture(minimumDistance: 0, coordinateSpace: .named("facePreview"))
+                .onChanged { value in
+                    if activeHandle == nil {
+                        activeHandle = nearestHandle(to: value.startLocation, side: side)
+                        guard activeHandle != nil else { return }
+                        Feedback.hapticTap(enabled: store.misc.hapticsEnabled)
+                        withAnimation(.interactiveSpring(response: 0.18, dampingFraction: 0.72)) {
+                            previewScale = 1.012
+                        }
+                    }
+                    guard let index = activeHandle else { return }
+                    applyDrag(value.location, index: index, side: side)
+                }
+                .onEnded { _ in
+                    guard activeHandle != nil else { return }
+                    withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.78)) {
+                        previewScale = 1
+                    }
+                    Feedback.hapticTap(enabled: store.misc.hapticsEnabled)
+                    activeHandle = nil
+                }
         )
     }
 
-    /// 12 个手柄小圆点（外圈 ink r4 + 内芯白 r1.8，位置 = facePoint；纯视觉，命中走宿主手势）。
-    private var handlesOverlay: some View {
-        Canvas { ctx, canvasSize in
-            let s = min(canvasSize.width, canvasSize.height) / 100
-            for (i, f) in factors.enumerated() {
-                let p = ClayFace.point(i, f)
-                let center = CGPoint(x: p.x * s, y: p.y * s)
-                ctx.fill(
-                    Path(ellipseIn: CGRect(x: center.x - 4, y: center.y - 4, width: 8, height: 8)),
-                    with: .color(c.ink)
-                )
-                ctx.fill(
-                    Path(ellipseIn: CGRect(x: center.x - 1.8, y: center.y - 1.8, width: 3.6, height: 3.6)),
-                    with: .color(.white)
-                )
+    private func nearestHandle(to location: CGPoint, side: CGFloat) -> Int? {
+        guard side > 0 else { return nil }
+        let scale = side / 100
+        var nearest: (index: Int, distance: CGFloat)?
+        for i in 0..<ClayFace.pointCount {
+            let factor = i < factors.count ? factors[i] : 1
+            let p = ClayFace.point(i, factor)
+            let center = CGPoint(x: p.x * scale, y: p.y * scale)
+            let dx = location.x - center.x
+            let dy = location.y - center.y
+            let distance = (dx * dx + dy * dy).squareRoot()
+            if nearest == nil || distance < nearest!.distance {
+                nearest = (i, distance)
             }
         }
+        guard let nearest, nearest.distance <= 34 else { return nil }
+        return nearest.index
     }
 
-    /// 拖点 → 100×100 逻辑坐标 → 方位角命中索引 + 半径系数，黏土手感带邻点，逐帧写库。
-    private func applyDrag(_ pos: CGPoint, side: CGFloat) {
+    /// 锁定的拖点 → 100×100 逻辑坐标 → 半径系数，逐帧写库。角度仅用于显示/命中，
+    /// 不再在拖动过程中重新选最近索引，避免拖过分界线时跳到邻点。
+    private func applyDrag(_ pos: CGPoint, index i: Int, side: CGFloat) {
         guard side > 0 else { return }
         let scale = side / 100
         let dx = pos.x / scale - 50
         let dy = pos.y / scale - 50
-        // 方位角：12 点方向为 0°、顺时针（θ_i = i×30°）→ 最近索引
-        var theta = atan2(dx, -dy) * 180 / .pi
-        if theta < 0 { theta += 360 }
-        let i = Int((theta / 30).rounded()) % ClayFace.pointCount
         let fNew = min(max((dx * dx + dy * dy).squareRoot() / ClayFace.r, ClayFace.minValue), ClayFace.maxValue)
         var next = factors
+        guard i < next.count, abs(next[i] - fNew) > 0.001 else { return }
         next[i] = fNew
-        // 黏土手感：邻点 i±1 各向新值靠拢 ×0.30 再各自 clamp（§5）
-        let left = (i + ClayFace.pointCount - 1) % ClayFace.pointCount
-        let right = (i + 1) % ClayFace.pointCount
-        next[left] = min(max(next[left] + (fNew - next[left]) * 0.30, ClayFace.minValue), ClayFace.maxValue)
-        next[right] = min(max(next[right] + (fNew - next[right]) * 0.30, ClayFace.minValue), ClayFace.maxValue)
         factors = next
         store.setAgentFace(agentId, face: ClayFace.encode(next))
     }

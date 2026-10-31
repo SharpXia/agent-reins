@@ -155,20 +155,51 @@ struct RobotAvatar: View {
     let expression: AgentExpression
     var size: CGFloat = 42
     var faceFactors: [Double] = ClayFace.defaultFactors
+    /// Continuous/entrance motion is opt-out for anchored editors (for example the
+    /// face-sculpt handles, which are rendered by a sibling overlay and must stay
+    /// registered to the blob outline).
+    var motionEnabled: Bool = true
     @Environment(\.inkColors) private var c
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var hasAppeared = false
 
     var body: some View {
         let faceFill = agentTint(palette, isDark: c.isDark).strong
-        return Canvas { ctx, canvasSize in
-            let s = min(canvasSize.width, canvasSize.height) / 100
-            let ink = inkForFace(faceFill)
-            if size < 40 {
-                drawCompact(&ctx, expression: expression, faceFill: faceFill, ink: ink, s: s)
-            } else {
-                drawFull(&ctx, expression: expression, faceFill: faceFill, ink: ink, s: s)
+        return ZStack {
+            Canvas { ctx, canvasSize in
+                let s = min(canvasSize.width, canvasSize.height) / 100
+                let ink = inkForFace(faceFill)
+                if size < 40 {
+                    drawCompact(&ctx, expression: expression, faceFill: faceFill, ink: ink, s: s)
+                } else {
+                    drawFull(&ctx, expression: expression, faceFill: faceFill, ink: ink, s: s)
+                }
             }
+            // Canvas does not interpolate enum-driven drawing changes. Giving each
+            // expression its own identity lets the face settle with a tiny fade
+            // instead of snapping when the agent state changes.
+            .id(expression.rawValue)
+            .transition(.opacity)
         }
         .frame(width: size, height: size)
+        .animation(motionEnabled && !reduceMotion ? .easeInOut(duration: 0.18) : nil,
+                   value: expression.rawValue)
+        // Keep the entrance and idle motion outside Canvas. The face geometry is
+        // rendered once per state; only the composited view is transformed while
+        // it breathes, so streaming message updates do not trigger a redraw loop.
+        .opacity(!motionEnabled || reduceMotion || hasAppeared ? 1 : 0)
+        .scaleEffect(!motionEnabled || reduceMotion || hasAppeared ? 1 : 0.86)
+        .onAppear {
+            guard !hasAppeared else { return }
+            if !motionEnabled || reduceMotion {
+                hasAppeared = true
+            } else {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+                    hasAppeared = true
+                }
+            }
+        }
+        .modifier(AvatarIdleMotion(enabled: motionEnabled && !reduceMotion))
     }
 
     // ---------- blob（face-sculpt §2：过 12 点的闭合均匀 Catmull-Rom，标准张力 1/6） ----------
@@ -391,6 +422,41 @@ struct RobotAvatar: View {
             ctx.pStroke(w: 4, s: s, ink) { p in
                 p.move(to: pt(39, 63, s)); p.addQuadCurve(to: pt(61, 63, s), control: pt(50, 74, s))
             }
+        }
+    }
+}
+
+private struct AvatarIdlePhase: Equatable {
+    let scale: CGFloat
+    let offsetY: CGFloat
+    let rotation: Double
+}
+
+/// Subtle periodic micro-motions for agent avatars. Keeping this as view transforms
+/// avoids rebuilding the Canvas path on each phase while giving the face a little life:
+/// settle → breathe → nod → settle.
+private struct AvatarIdleMotion: ViewModifier {
+    let enabled: Bool
+    private static let phases = [
+        AvatarIdlePhase(scale: 1.0, offsetY: 0, rotation: 0),
+        AvatarIdlePhase(scale: 1.018, offsetY: -0.7, rotation: 0.6),
+        AvatarIdlePhase(scale: 1.006, offsetY: 0.5, rotation: -0.45),
+        AvatarIdlePhase(scale: 1.0, offsetY: 0, rotation: 0),
+    ]
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content.phaseAnimator(Self.phases) { view, phase in
+                view
+                    .scaleEffect(phase.scale)
+                    .offset(y: phase.offsetY)
+                    .rotationEffect(.degrees(phase.rotation))
+            } animation: { _ in
+                .easeInOut(duration: 1.25)
+            }
+        } else {
+            content
         }
     }
 }

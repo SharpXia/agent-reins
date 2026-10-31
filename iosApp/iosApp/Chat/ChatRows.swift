@@ -28,6 +28,14 @@ struct TimelineSection {
     let entries: [BridgeEntry]
 }
 
+private enum ChatRowFormatters {
+    static let day: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+}
+
 /// 条目序列 → 带日分隔的行序列。
 ///
 /// 过程物料退场（SW 反馈⑤，取代先前的回合折叠）：已完成回合的思考/工具/旁白不进
@@ -38,10 +46,11 @@ func buildChatRows(_ entries: [BridgeEntry]) -> [ChatRow] {
     var lastDay: String? = nil
     var usedIds = Set<String>()
 
+    // `buildChatRows` is evaluated again whenever the bridge publishes a snapshot. Keep
+    // the formatter outside `dateKey`; constructing DateFormatter for every entry becomes
+    // noticeable on long transcripts and competes with Markdown layout during scrolling.
     func dateKey(_ ms: Int64) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        return f.string(from: Date(timeIntervalSince1970: Double(ms) / 1000))
+        ChatRowFormatters.day.string(from: Date(timeIntervalSince1970: Double(ms) / 1000))
     }
 
     func uniqueId(_ raw: String) -> String {

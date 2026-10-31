@@ -29,6 +29,15 @@ struct ChatView: View {
 
     @State private var scroll = ScrollPosition(edge: .bottom)
     @State private var isAtBottom = true
+    /// 用户主动上拉后暂停流式跟随。仅由真实交互阶段置位，避免 markdown/思考内容
+    /// 增长时 contentSize 短暂变大把「仍在底部」误判成用户离底。
+    @State private var userPinnedUp = false
+    @State private var scrollPhase: ScrollPhase = .idle
+    @State private var followRevision = 0
+    /// Bridge snapshots replace the whole entry array for each delta. Keep the derived row
+    /// list stable until a row-affecting revision changes, so streaming does not rebuild all
+    /// day headers and IDs on every frame.
+    @State private var rowsCache = ChatRowsCache()
     @State private var showStartFresh = false
     @State private var anchorConsumed = false
     @State private var keyboardShowing = false
@@ -74,13 +83,14 @@ struct ChatView: View {
         .onReceive(
             NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)
         ) { _ in keyboardShowing = false }
-        .onChange(of: keyboardShowing) { showing in
+        .onChange(of: keyboardShowing) { _, showing in
             // SW 反馈①（澄清）：在底时呼出键盘，保持底边消息可见——视口压缩后重锚尾部
-            // 标记（底边对齐不变，内容整体上移让出键盘）；非底部不拽（用户可能在读历史）
-            guard showing, isAtBottom else { return }
+            // 标记（底边对齐不变，内容整体上移让出键盘）；非底部不拽（用户可能在读历史）。
+            // 用 userPinnedUp 判断用户意图，避免键盘缩小视口的瞬时 geometry 误判离底。
+            guard showing, !userPinnedUp else { return }
             Task {
                 try? await Task.sleep(nanoseconds: 180_000_000)
-                guard isAtBottom else { return }
+                guard !userPinnedUp else { return }
                 scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
             }
         }
@@ -188,6 +198,22 @@ struct ChatView: View {
             return geo.contentOffset.y >= maxOffset - 48
         } action: { _, atBottom in
             isAtBottom = atBottom
+            if atBottom {
+                userPinnedUp = false
+            } else if scrollPhase == .interacting || scrollPhase == .tracking {
+                // 只有拖拽/跟手阶段才把离底解释为用户意图；内容增长造成的
+                // 瞬时几何变化继续保持自动贴底。
+                userPinnedUp = true
+            }
+        }
+        .onScrollPhaseChange { _, phase, context in
+            scrollPhase = phase
+            guard phase == .interacting || phase == .tracking else { return }
+            let geometry = context.geometry
+            let maxOffset = geometry.contentSize.height - geometry.containerSize.height
+            if geometry.contentOffset.y < maxOffset - 48 {
+                userPinnedUp = true
+            }
         }
         .refreshable {
             if timelineMode {
@@ -219,6 +245,9 @@ struct ChatView: View {
             if !isAtBottom && hasContent {
                 Button {
                     Feedback.hapticTap(enabled: store.misc.hapticsEnabled)
+                    // Returning to the latest turn also resumes automatic following for
+                    // the next thinking/streaming delta.
+                    userPinnedUp = false
                     scrollToLatestUserTop()
                 } label: {
                     Image(systemName: "chevron.down")
@@ -264,14 +293,17 @@ struct ChatView: View {
         }
         .onChange(of: contentSignature) { _, _ in
             // 内容变化且在底 → 重锚尾部标记（开场渐次到位 + 流式跟随共用；
-            // 用户上拉 isAtBottom=false 自动让位）
-            guard isAtBottom else { return }
+            // 用户上拉后暂停，内容增长导致的短暂离底仍继续跟随。
+            guard !userPinnedUp else { return }
+            followRevision &+= 1
+            let revision = followRevision
             scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
             // 布局收敛二次锚定：markdown 结排让真实 frame 晚于估算，250ms 后无新内容
-            // 再补一锚，落在真实 frame 上（真机概率空白的兜底）
+            // 再补一锚，落在真实 frame 上（真机概率空白的兜底）。新 delta 到达时
+            // 旧任务失效，避免多个延迟 scrollTo 叠加造成轻微抖动。
             Task {
                 try? await Task.sleep(nanoseconds: 250_000_000)
-                guard isAtBottom else { return }
+                guard followRevision == revision, !userPinnedUp else { return }
                 scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
             }
         }
@@ -285,7 +317,13 @@ struct ChatView: View {
         let sections = store.timeline.sections.map {
             TimelineSection(key: $0.key, label: $0.label, entries: $0.entries)
         }
-        let rows = buildConversationRows(sections: sections, compactMarks: marks)
+        let rows = rowsCache.timelineRows(
+            agentId: store.timeline.agentId,
+            structureSignature: rowsStructureSignature,
+            contentSignature: contentSignature,
+            sections: sections,
+            compactMarks: marks
+        )
         ForEach(rows) { row in
             ChatRowView(
                 row: row,
@@ -307,7 +345,12 @@ struct ChatView: View {
 
     @ViewBuilder
     private var sessionRows: some View {
-        let rows = buildChatRows(store.conv.entries)
+        let rows = rowsCache.sessionRows(
+            sessionKey: sessionKey,
+            structureSignature: rowsStructureSignature,
+            contentSignature: contentSignature,
+            entries: store.conv.entries
+        )
         if rows.isEmpty && !runActive && store.conv.historyLoaded {
             Text("暂无消息，发一条开始对话")
                 .ink(.textSm).foregroundColor(c.textTertiary)
@@ -331,7 +374,7 @@ struct ChatView: View {
     private func consumeAnchorIfNeeded(rows: [ChatRow]) {
         guard !anchorConsumed, let anchor = anchorSession, !rows.isEmpty else { return }
         guard let target = rows.first(where: {
-            if case let .boundary(id, key, _) = $0 { return key == anchor }
+            if case let .boundary(_, key, _) = $0 { return key == anchor }
             return false
         }) else { return }
         anchorConsumed = true
@@ -348,6 +391,7 @@ struct ChatView: View {
     /// SW 反馈⑥：回底按钮/发送/回合完成的定位语义 = 最新一条用户消息恰好作为内容区
     /// 第一条 item（Grok 式回合头），不再贴控件内容绝对底边。找不到时退回贴底。
     private func scrollToLatestUserTop() {
+        userPinnedUp = false
         let entries = timelineMode
             ? (store.timeline.sections.first?.entries ?? [])
             : store.conv.entries
@@ -385,13 +429,67 @@ struct ChatView: View {
             : !store.conv.entries.isEmpty
     }
 
+    /// Row membership and day grouping only depend on these stable fields. Text lengths
+    /// live in contentSignature so a streaming tail can update in place without rebuilding
+    /// every row in the transcript.
+    private var rowsStructureSignature: String {
+        func entrySignature(_ entry: BridgeEntry) -> String {
+            "\(entry.id):\(entry.kind):\(entry.role):\(entry.state):\(entry.timestampMs)"
+        }
+
+        if timelineMode {
+            let sections = store.timeline.sections.map { section in
+                "\(section.key)#\(section.label ?? ""):"
+                    + section.entries.map(entrySignature).joined(separator: ",")
+            }
+            return sections.joined(separator: "|")
+                + store.timeline.marks.sorted { $0.key < $1.key }
+                    .map { "+mark:\($0.key):\($0.value)" }
+                    .joined()
+        }
+        return store.conv.entries.map(entrySignature).joined(separator: ",")
+    }
+
     private var contentSignature: String {
         if timelineMode {
-            return store.timeline.sections.map { "\($0.key)#\($0.entries.count):\($0.entries.last?.id ?? "")" }
-                .joined(separator: "|")
+            let sections = store.timeline.sections.map { section in
+                let last = section.entries.last
+                var signature = "\(section.key)#\(section.label ?? "")#\(section.entries.count):\(last?.id ?? ""):"
+                    + "\(last?.kind ?? ""):\(last?.content.count ?? 0):\(last?.text.count ?? 0):"
+                    + "\(last?.streaming == true):\(last?.state ?? "")"
+                for entry in section.entries {
+                    switch entry.kind {
+                    case "thinking":
+                        signature += ":t:\(entry.id):\(entry.text.count)"
+                    case "tool":
+                        signature += ":x:\(entry.id):\(entry.state):\(entry.durationMs):\(entry.resultJson?.count ?? 0)"
+                    default:
+                        break
+                    }
+                }
+                return signature
+            }
+            return sections.joined(separator: "|")
                 + (store.timeline.sectionLoading == nil ? "" : "+loading")
+                + store.timeline.marks.sorted { $0.key < $1.key }
+                    .map { "+mark:\($0.key):\($0.value)" }
+                    .joined()
         }
-        return "\(store.conv.entries.count):\(store.conv.entries.first?.id ?? ""):\(store.conv.entries.last?.id ?? "")"
+        let last = store.conv.entries.last
+        var signature = "\(store.conv.entries.count):\(store.conv.entries.first?.id ?? ""):"
+            + "\(last?.id ?? ""):\(last?.kind ?? ""):\(last?.content.count ?? 0):"
+            + "\(last?.text.count ?? 0):\(last?.streaming == true):\(last?.state ?? "")"
+        for entry in store.conv.entries {
+            switch entry.kind {
+            case "thinking":
+                signature += ":t:\(entry.id):\(entry.text.count)"
+            case "tool":
+                signature += ":x:\(entry.id):\(entry.state):\(entry.durationMs):\(entry.resultJson?.count ?? 0)"
+            default:
+                break
+            }
+        }
+        return signature
     }
 
     private var lastUserEntryId: String? {
@@ -413,6 +511,79 @@ struct ChatView: View {
         let key = sessionId ?? sessionKey
         let agentId = store.session(key)?.agentId ?? sessionKeyAgentId(key) ?? "main"
         return store.tint(agentId, isDark: scheme == .dark)
+    }
+}
+
+/// Memoizes the derived row sequence across bridge snapshots. The cache is deliberately a
+/// reference type held by @State: updating it does not trigger another body pass, while the
+/// current pass still receives the freshly built rows when the revision changes.
+private final class ChatRowsCache {
+    private var sessionKey = ""
+    private var sessionStructureSignature = ""
+    private var sessionContentSignature = ""
+    private var cachedSessionRows: [ChatRow] = []
+
+    private var timelineAgentId: String?
+    private var timelineStructureSignature = ""
+    private var timelineContentSignature = ""
+    private var cachedTimelineRows: [ChatRow] = []
+
+    func sessionRows(
+        sessionKey: String,
+        structureSignature: String,
+        contentSignature: String,
+        entries: [BridgeEntry]
+    ) -> [ChatRow] {
+        if self.sessionKey != sessionKey || sessionStructureSignature != structureSignature {
+            self.sessionKey = sessionKey
+            sessionStructureSignature = structureSignature
+            sessionContentSignature = contentSignature
+            cachedSessionRows = buildChatRows(entries)
+        } else if sessionContentSignature != contentSignature {
+            sessionContentSignature = contentSignature
+            cachedSessionRows = replacingEntries(in: cachedSessionRows, with: entries)
+        }
+        return cachedSessionRows
+    }
+
+    func timelineRows(
+        agentId: String?,
+        structureSignature: String,
+        contentSignature: String,
+        sections: [TimelineSection],
+        compactMarks: [String: Int64]
+    ) -> [ChatRow] {
+        if timelineAgentId != agentId || timelineStructureSignature != structureSignature {
+            timelineAgentId = agentId
+            timelineStructureSignature = structureSignature
+            timelineContentSignature = contentSignature
+            cachedTimelineRows = buildConversationRows(
+                sections: sections,
+                compactMarks: compactMarks
+            )
+        } else if timelineContentSignature != contentSignature {
+            timelineContentSignature = contentSignature
+            cachedTimelineRows = replacingEntries(
+                in: cachedTimelineRows,
+                with: sections.flatMap(\.entries)
+            )
+        }
+        return cachedTimelineRows
+    }
+
+    private func replacingEntries(in rows: [ChatRow], with entries: [BridgeEntry]) -> [ChatRow] {
+        var byId: [String: BridgeEntry] = [:]
+        byId.reserveCapacity(entries.count)
+        for entry in entries {
+            byId[entry.id] = entry
+        }
+        return rows.map { row in
+            guard case let .entry(id, oldEntry) = row,
+                  let updated = byId[oldEntry.id] else {
+                return row
+            }
+            return .entry(id: id, entry: updated)
+        }
     }
 }
 

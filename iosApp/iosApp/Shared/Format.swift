@@ -5,6 +5,22 @@ import composeApp
 
 // MARK: - 格式化工具（Format.kt 移植）
 
+/// DateFormatter construction is relatively expensive and these helpers are called for
+/// every visible message row. Keep the formatters alive for the lifetime of the app so a
+/// bridge snapshot or a scroll pass does not allocate one per row.
+private enum ChatDateFormatters {
+    static let time = make("HH:mm")
+    static let crossDayTime = make("M-d HH:mm")
+    static let day = make("M月d日")
+    static let dayWithYear = make("yyyy年M月d日")
+
+    private static func make(_ format: String) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.dateFormat = format
+        return formatter
+    }
+}
+
 /// 耗时：485ms / 3.2s / 1m12s；无数据显示 —。
 func formatDuration(_ ms: Int64) -> String {
     if ms < 0 { return "—" }
@@ -31,13 +47,8 @@ func formatMessageTime(_ epochMs: Int64) -> String {
     if epochMs <= 0 { return "" }
     let date = Date(timeIntervalSince1970: Double(epochMs) / 1000)
     let cal = Calendar.current
-    let fmt: (String) -> String = { template in
-        let f = DateFormatter()
-        f.dateFormat = template
-        return f.string(from: date)
-    }
-    if cal.isDateInToday(date) { return fmt("HH:mm") }
-    return fmt("M-d HH:mm")
+    if cal.isDateInToday(date) { return ChatDateFormatters.time.string(from: date) }
+    return ChatDateFormatters.crossDayTime.string(from: date)
 }
 
 /// 日分隔文案：今天 / 昨天 / M月d日（跨年补年份）。
@@ -46,14 +57,11 @@ func dayHeaderLabel(_ atMs: Int64) -> String {
     let cal = Calendar.current
     if cal.isDateInToday(date) { return "今天" }
     if cal.isDateInYesterday(date) { return "昨天" }
-    let fmt: (String) -> String = { template in
-        let f = DateFormatter()
-        f.dateFormat = template
-        return f.string(from: date)
-    }
     let year = cal.component(.year, from: date)
     let thisYear = cal.component(.year, from: Date())
-    return year != thisYear ? fmt("yyyy年M月d日") : fmt("M月d日")
+    return year != thisYear
+        ? ChatDateFormatters.dayWithYear.string(from: date)
+        : ChatDateFormatters.day.string(from: date)
 }
 
 // MARK: - 会话 surface 判别（SessionClassifier 移植）

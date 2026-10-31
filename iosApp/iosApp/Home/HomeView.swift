@@ -400,7 +400,8 @@ struct AgentsDrawerPanel: View {
             Button {
                 Feedback.hapticTap(enabled: store.misc.hapticsEnabled)
                 onClose()
-                openAgentConversation(agent)
+                // SW 反馈④：点 agent 行默认进 agent 主页（会话直达交给右侧「＋」）
+                navCoordinator.push(.agent(agentId: agent.agentId))
             } label: {
                 HStack(spacing: 12) {
                     AgentAvatar(tint: tint, name: agent.name,
@@ -431,18 +432,6 @@ struct AgentsDrawerPanel: View {
                 }
                 .buttonStyle(.plain)
             }
-
-            Button {
-                Feedback.hapticTap(enabled: store.misc.hapticsEnabled)
-                onClose()
-                navCoordinator.push(.agent(agentId: agent.agentId))
-            } label: {
-                Image(systemName: "pencil")
-                    .font(.system(size: 13))
-                    .foregroundColor(c.textTertiary)
-                    .frame(width: 32, height: 32)
-            }
-            .buttonStyle(.plain)
         }
         .padding(.trailing, 8)
     }

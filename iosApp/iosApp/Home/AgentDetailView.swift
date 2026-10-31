@@ -122,8 +122,6 @@ struct AgentDetailView: View {
             .padding(.horizontal, 8)
 
             identityHeader
-                .contentShape(Rectangle())
-                .onTapGesture { showEdit = true }
 
             Text("会话 · \(sessions.count)")
                 .ink(.textSm)
@@ -147,6 +145,13 @@ struct AgentDetailView: View {
         }
         .background(c.paper)
         .navigationBarHidden(true)
+        .onAppear {
+            // SW 反馈③④走查：AGENTREINS_DEV_SHEET=edit|sculpt 自动弹身份/捏脸 sheet
+            if let v = ProcessInfo.processInfo.environment["AGENTREINS_DEV_SHEET"],
+               v == "edit" || v == "sculpt" {
+                showEdit = true
+            }
+        }
         .sheet(isPresented: $showEdit) {
             AgentEditSheet(agentId: agentId)
         }
@@ -159,9 +164,13 @@ struct AgentDetailView: View {
             AgentAvatar(tint: tint, name: name, size: 52,
                         expression: store.agentExpression(agentId),
                         faceFactors: store.agentFaceFactors(agentId))
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(name).ink(.headingMd).foregroundColor(c.ink)
-                Text(agentId).ink(.textSm).foregroundColor(c.textTertiary)
+                // pill 与 agentId 内联一行（SW 反馈③：原 overlay 绝对定位压住文字=视觉重叠）
+                HStack(spacing: 6) {
+                    AgentTitlePill(name: "agent", tint: tint.strong, pillFill: tint.pill)
+                    Text(agentId).ink(.textSm).foregroundColor(c.textTertiary).lineLimit(1)
+                }
             }
             Spacer()
             Image(systemName: "pencil")
@@ -169,13 +178,9 @@ struct AgentDetailView: View {
                 .foregroundColor(c.textTertiary)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .overlay(alignment: .bottomLeading) {
-            AgentTitlePill(name: "agent", tint: tint.strong, pillFill: tint.pill)
-                .padding(.leading, 80)
-                .padding(.bottom, 2)
-        }
-        .padding(.bottom, 20)
+        .padding(.vertical, 12)
+        .contentShape(Rectangle())
+        .onTapGesture { showEdit = true }
     }
 
     private func sessionRow(_ s: BridgeSession) -> some View {
@@ -232,7 +237,8 @@ struct AgentEditSheet: View {
             // 复审修复①：新增预览+表情网格后内容总高约 506pt，超过 InkSheet 固定
             // [.medium, .large] 的 medium（≈437pt@iPhone 18 Pro、≈333pt@SE），纯 VStack 会把
             // 底部「取消/保存」与网格下半行裁掉且无法滚动——包 ScrollView 保底可滚达
-            ScrollView {
+            VStack(spacing: 0) {
+                ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     // 实时预览（§10.1）：标题下、显示名输入框上方，64pt，当前 tint × 表情 × face；
                     // 表情/脸均经 store 解析入口（读桥已解析值），未定制时直读原始串会判不出派生值
@@ -255,6 +261,9 @@ struct AgentEditSheet: View {
                             guard !loaded else { return }
                             loaded = true
                             name = store.lists.agents.first { $0.agentId == agentId }?.name ?? agentId
+                            if ProcessInfo.processInfo.environment["AGENTREINS_DEV_SHEET"] == "sculpt" {
+                                showSculpt = true
+                            }
                         }
                     Text("身份色").ink(.textSm).foregroundColor(c.textTertiary)
                         .padding(.horizontal, 20)
@@ -290,19 +299,23 @@ struct AgentEditSheet: View {
                         Spacer()
                     }
                     .padding(.vertical, 4)
-                    HStack {
-                        Spacer()
-                        Button("取消") { dismiss() }
-                            .ink(.textLg).foregroundColor(c.ink)
-                        Button("保存") {
-                            store.bridge.setAgentName(agentId: agentId, name: name)
-                            dismiss()
-                        }
-                        .ink(.textLg).foregroundColor(c.ink)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 12)
+                    .padding(.bottom, 8)
                 }
+                }
+                Divider().overlay(c.borderSecondary)
+                // 取消/保存固定底栏（不随内容滚动，矮视口也永远可见）
+                HStack {
+                    Spacer()
+                    Button("取消") { dismiss() }
+                        .ink(.textLg).foregroundColor(c.ink)
+                    Button("保存") {
+                        store.bridge.setAgentName(agentId: agentId, name: name)
+                        dismiss()
+                    }
+                    .ink(.textLg).foregroundColor(c.ink)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
             }
         }
         .sheet(isPresented: $showSculpt) {
@@ -381,7 +394,7 @@ private struct FaceSculptSheet: View {
                 .padding(.vertical, 12)
             // 预览区吃满剩余空间；取可用区最小边（留 24pt 边距放手柄），下限 220 保证可拖
             GeometryReader { geo in
-                let side = max(220, min(geo.size.width, geo.size.height) - 24)
+                let side = max(220, min(420, min(geo.size.width, geo.size.height) - 24))
                 previewBox(side: side)
                     .frame(width: side, height: side)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

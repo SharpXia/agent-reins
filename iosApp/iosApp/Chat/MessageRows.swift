@@ -16,10 +16,6 @@ struct ChatRowView: View {
         case let .entry(_, entry):
             EntryView(entry: entry, tintFor: tintFor, isLastUser: entry.id == lastUserEntryId,
                       showSpinner: entry.id == lastUserEntryId && showTailSpinner)
-        case let .toolGroup(_, items):
-            ToolGroupCard(items: items)
-        case let .turnBlock(_, thinking, tools, interim):
-            TurnBlockView(thinking: thinking, tools: tools, interim: interim)
         case let .boundary(_, sessionKey, label):
             BoundaryView(label: label).onAppear { onBoundaryAppear(sessionKey) }
         case let .compactMark(_, _, atMs):

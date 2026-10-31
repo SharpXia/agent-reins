@@ -31,6 +31,7 @@ struct ChatView: View {
     @State private var isAtBottom = true
     @State private var showStartFresh = false
     @State private var anchorConsumed = false
+    @State private var keyboardShowing = false
     /// composer 实测高度：回底按钮上移依据（真机反馈③：与发送键重叠）
     @State private var composerHeight: CGFloat = 66
     /// 设备安全区底（home indicator）：overlay 底边在屏幕底，上移量须含这段
@@ -67,6 +68,22 @@ struct ChatView: View {
         .onPreferenceChange(SafeBottomKey.self) { safeBottom = $0 }
         .navigationBarHidden(true)
         .toolbar(.hidden, for: .tabBar)
+        .onReceive(
+            NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)
+        ) { _ in keyboardShowing = true }
+        .onReceive(
+            NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)
+        ) { _ in keyboardShowing = false }
+        .onChange(of: keyboardShowing) { showing in
+            // SW 反馈①（澄清）：在底时呼出键盘，保持底边消息可见——视口压缩后重锚尾部
+            // 标记（底边对齐不变，内容整体上移让出键盘）；非底部不拽（用户可能在读历史）
+            guard showing, isAtBottom else { return }
+            Task {
+                try? await Task.sleep(nanoseconds: 180_000_000)
+                guard isAtBottom else { return }
+                scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
+            }
+        }
         .confirmationDialog("从头开始？", isPresented: $showStartFresh, titleVisibility: .visible) {
             Button("开新会话") { store.bridge.startFresh() }
             Button("取消", role: .cancel) {}
@@ -202,7 +219,7 @@ struct ChatView: View {
             if !isAtBottom && hasContent {
                 Button {
                     Feedback.hapticTap(enabled: store.misc.hapticsEnabled)
-                    scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
+                    scrollToLatestUserTop()
                 } label: {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 15, weight: .medium))
@@ -230,11 +247,19 @@ struct ChatView: View {
             if timelineMode { timelineTried = true }
         }
         .onChange(of: store.conv.sendSignal) { old, new in
-            // 发送后滚到底露出刚发的消息（M4 反馈④；Kotlin 侧发信号计数）
+            // 发送后定位到刚发的消息为视口首条（SW 反馈⑥；Kotlin 侧发信号计数）
             guard new != old, new > 0 else { return }
             Task {
                 try? await Task.sleep(nanoseconds: 120_000_000)
-                scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
+                scrollToLatestUserTop()
+            }
+        }
+        .onChange(of: runActive) { was, now in
+            // 回合完成（SW 反馈⑥）：定位最新用户消息为内容区第一条，不再贴绝对底边
+            guard was, !now else { return }
+            Task {
+                try? await Task.sleep(nanoseconds: 120_000_000)
+                scrollToLatestUserTop()
             }
         }
         .onChange(of: contentSignature) { _, _ in
@@ -319,6 +344,28 @@ struct ChatView: View {
     // ---- 派生 ----
 
     private var runActive: Bool { store.conv.runActive }
+
+    /// SW 反馈⑥：回底按钮/发送/回合完成的定位语义 = 最新一条用户消息恰好作为内容区
+    /// 第一条 item（Grok 式回合头），不再贴控件内容绝对底边。找不到时退回贴底。
+    private func scrollToLatestUserTop() {
+        let entries = timelineMode
+            ? (store.timeline.sections.first?.entries ?? [])
+            : store.conv.entries
+        guard let uid = entries.last(where: { $0.kind == "message" && $0.role == "user" })?.id else {
+            scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
+            return
+        }
+        let rows = buildChatRows(entries)
+        let rowId = rows.last(where: {
+            if case let .entry(_, e) = $0 { return e.id == uid }
+            return false
+        })?.id
+        if let rowId {
+            scroll.scrollTo(id: rowId, anchor: .top)
+        } else {
+            scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
+        }
+    }
 
     private var streamingTail: Bool {
         let entries = timelineMode ? (store.timeline.sections.first?.entries ?? []) : store.conv.entries

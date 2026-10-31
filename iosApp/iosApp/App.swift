@@ -116,6 +116,13 @@ struct MainTabsView: View {
                     if let conv = store.mainConvs.first {
                         nav.sessionsPath.append(AppRoute.conversation(convId: conv.id, anchor: nil))
                     }
+                } else if route == "agent" {
+                    // 直达 agent 主页（SW 反馈③④走查）：AGENTREINS_DEV_AGENT 选 agent，
+                    // 配合 AGENTREINS_DEV_SHEET=edit|sculpt 自动弹身份/捏脸 sheet
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    let agentId = ProcessInfo.processInfo.environment["AGENTREINS_DEV_AGENT"]
+                        ?? store.lists.agents.first?.agentId ?? "main"
+                    nav.sessionsPath.append(AppRoute.agent(agentId: agentId))
                 }
             }
         }

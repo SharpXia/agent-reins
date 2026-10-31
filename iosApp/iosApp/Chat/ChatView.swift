@@ -28,12 +28,21 @@ struct ChatView: View {
     private var timelineMode: Bool { store.timeline.agentId != nil }
 
     @State private var scroll = ScrollPosition(edge: .bottom)
-    @State private var isAtBottom = true
+    /// 自动跟随的容差；小于此距离仍视为贴底。
+    private let bottomLockThreshold: CGFloat = 48
+    /// 回底按钮的显示阈值要更严格，避免用户已经接近底部时按钮闪出。
+    private let jumpButtonThreshold: CGFloat = 96
+    @State private var distanceFromBottom: CGFloat = 0
+    /// Latest user turn's top edge in the scroll coordinate space. This is the app's
+    /// semantic "bottom" for the jump button: assistant output below it belongs to the
+    /// same turn and should not make the button reappear.
+    @State private var latestUserTopInScroll: CGFloat?
     /// 用户主动上拉后暂停流式跟随。仅由真实交互阶段置位，避免 markdown/思考内容
     /// 增长时 contentSize 短暂变大把「仍在底部」误判成用户离底。
     @State private var userPinnedUp = false
     @State private var scrollPhase: ScrollPhase = .idle
     @State private var followRevision = 0
+    @State private var initialPresentationReady = false
     /// Bridge snapshots replace the whole entry array for each delta. Keep the derived row
     /// list stable until a row-affecting revision changes, so streaming does not rebuild all
     /// day headers and IDs on every frame.
@@ -188,16 +197,21 @@ struct ChatView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
         }
+        .coordinateSpace(name: ChatScrollCoordinateSpace.name)
+        .onPreferenceChange(LatestUserTopPreferenceKey.self) { value in
+            latestUserTopInScroll = value.isFinite ? value : nil
+        }
         .scrollPosition($scroll)
         // SW 反馈②：进页概率空白、滑动/回顶才出现——估算型 scrollTo 在 markdown 重内容
         // 上会落进 LazyVStack 虚高区。底部默认锚由框架在真实布局上定位/跟随内容增长，
         // 是估算跳转之外的原生稳态；随后的标记锚定与其互补。
         .defaultScrollAnchor(.bottom)
-        .onScrollGeometryChange(for: Bool.self) { geo in
-            let maxOffset = geo.contentSize.height - geo.containerSize.height
-            return geo.contentOffset.y >= maxOffset - 48
-        } action: { _, atBottom in
-            isAtBottom = atBottom
+        .onScrollGeometryChange(for: CGFloat.self) { geo in
+            let maxOffset = max(0, geo.contentSize.height - geo.containerSize.height)
+            return max(0, maxOffset - geo.contentOffset.y)
+        } action: { _, distance in
+            distanceFromBottom = distance
+            let atBottom = distance <= bottomLockThreshold
             if atBottom {
                 userPinnedUp = false
             } else if scrollPhase == .interacting || scrollPhase == .tracking {
@@ -210,8 +224,8 @@ struct ChatView: View {
             scrollPhase = phase
             guard phase == .interacting || phase == .tracking else { return }
             let geometry = context.geometry
-            let maxOffset = geometry.contentSize.height - geometry.containerSize.height
-            if geometry.contentOffset.y < maxOffset - 48 {
+            let maxOffset = max(0, geometry.contentSize.height - geometry.containerSize.height)
+            if maxOffset - geometry.contentOffset.y > bottomLockThreshold {
                 userPinnedUp = true
             }
         }
@@ -242,12 +256,11 @@ struct ChatView: View {
         }
         .onPreferenceChange(ComposerHeightKey.self) { composerHeight = $0 }
         .overlay(alignment: .bottomTrailing) {
-            if !isAtBottom && hasContent {
+            if shouldShowJumpButton {
                 Button {
                     Feedback.hapticTap(enabled: store.misc.hapticsEnabled)
-                    // Returning to the latest turn also resumes automatic following for
-                    // the next thinking/streaming delta.
-                    userPinnedUp = false
+                    // The app's "bottom" is the latest user turn at the top of the
+                    // viewport. Keep this action aligned with send/turn-complete behavior.
                     scrollToLatestUserTop()
                 } label: {
                     Image(systemName: "chevron.down")
@@ -266,14 +279,30 @@ struct ChatView: View {
             }
         }
         // ---- 滚动协同 ----
-        .task {
+        .task(id: initialPresentationKey) {
+            initialPresentationReady = false
             timelineTried = timelineMode && !store.timeline.sections.isEmpty
             // 开场锚底（无条件）：pinnedOnce 门在空列表期就会把锚定跳掉，位置停在
             // 边缘/偏移模式上跟懒加载虚高 contentSize 走 → 停进「幻影底部」（真机反馈②
             // 空白页/闪回的现场）。item 锚定跟标记实际 frame 走，内容渐次到位也贴真实底。
-            try? await Task.sleep(nanoseconds: 220_000_000)
+            // Prewarming moves Markdown parsing ahead of scrolling. Give the initial
+            // layout a little more time as the warm set grows, then fade the list in
+            // after the first anchor has settled so rows do not flash or jump.
+            let warmCount = min(markdownPrewarmContents.count, 32)
+            let settleNs = UInt64(220_000_000 + min(warmCount * 12_000_000, 360_000_000))
+            try? await Task.sleep(nanoseconds: settleNs)
             scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            withAnimation(.easeOut(duration: 0.28)) {
+                initialPresentationReady = true
+            }
             if timelineMode { timelineTried = true }
+        }
+        .task(id: markdownPrewarmSignature) {
+            // Parse the newest static assistant messages in small main-actor slices while
+            // the initial list settles. This moves the first cmark hit before the user
+            // scrolls into a long message, without sending MarkdownContent across actors.
+            await prewarmMarkdown(markdownPrewarmContents)
         }
         .onChange(of: store.conv.sendSignal) { old, new in
             // 发送后定位到刚发的消息为视口首条（SW 反馈⑥；Kotlin 侧发信号计数）
@@ -307,6 +336,8 @@ struct ChatView: View {
                 scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
             }
         }
+        .opacity(initialPresentationReady || !hasContent ? 1 : 0)
+        .animation(.easeOut(duration: 0.28), value: initialPresentationReady)
     }
 
     // ---- 行序列 ----
@@ -337,6 +368,7 @@ struct ChatView: View {
                     _ = store.bridge.loadSection(key: key)
                 }
             )
+            .background(latestUserAnchor(for: row))
             .onAppear {
                 consumeAnchorIfNeeded(rows: rows)
             }
@@ -365,6 +397,7 @@ struct ChatView: View {
                 showTailSpinner: showTailSpinner,
                 onBoundaryAppear: { _ in }
             )
+            .background(latestUserAnchor(for: row))
         }
         ForEach(store.conv.pendingOutbox, id: \.idempotencyKey) { cmd in
             PendingOutboxItem(cmd: cmd)
@@ -388,10 +421,11 @@ struct ChatView: View {
 
     private var runActive: Bool { store.conv.runActive }
 
-    /// SW 反馈⑥：回底按钮/发送/回合完成的定位语义 = 最新一条用户消息恰好作为内容区
-    /// 第一条 item（Grok 式回合头），不再贴控件内容绝对底边。找不到时退回贴底。
+    /// SW 反馈⑥：发送/回合完成和回底按钮都定位到最新用户消息为内容区第一条 item
+    /// （Grok 式回合头）。不再把助手长回复的真实尾部当作按钮语义上的底部。
     private func scrollToLatestUserTop() {
         userPinnedUp = false
+        followRevision &+= 1
         let entries = timelineMode
             ? (store.timeline.sections.first?.entries ?? [])
             : store.conv.entries
@@ -411,6 +445,40 @@ struct ChatView: View {
         }
     }
 
+    /// The jump button follows the same semantic anchor as send/turn completion: the
+    /// latest user message is at the top of the viewport. If that row is currently
+    /// materialized, its measured position is authoritative; otherwise use the real
+    /// bottom distance as a conservative fallback while the user is far above it.
+    private var shouldShowJumpButton: Bool {
+        guard userPinnedUp, hasContent else { return false }
+        if let top = latestUserTopInScroll {
+            return top > 24
+        }
+        return distanceFromBottom > jumpButtonThreshold
+    }
+
+    @ViewBuilder
+    private func latestUserAnchor(for row: ChatRow) -> some View {
+        if isLatestUserRow(row) {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: LatestUserTopPreferenceKey.self,
+                    value: proxy.frame(in: .named(ChatScrollCoordinateSpace.name)).minY
+                )
+            }
+        } else {
+            Color.clear
+        }
+    }
+
+    private func isLatestUserRow(_ row: ChatRow) -> Bool {
+        guard let lastUserEntryId else { return false }
+        if case let .entry(_, entry) = row {
+            return entry.id == lastUserEntryId
+        }
+        return false
+    }
+
     private var streamingTail: Bool {
         let entries = timelineMode ? (store.timeline.sections.first?.entries ?? []) : store.conv.entries
         return entries.last?.kind == "message" && entries.last?.streaming == true
@@ -427,6 +495,52 @@ struct ChatView: View {
         timelineMode
             ? store.timeline.sections.contains { !$0.entries.isEmpty }
             : !store.conv.entries.isEmpty
+    }
+
+    private var initialPresentationKey: String {
+        let loaded = timelineMode
+            ? !store.timeline.sections.isEmpty
+            : store.conv.historyLoaded
+        let sectionCount = timelineMode ? store.timeline.sections.count : 0
+        return "\(timelineMode)#\(loaded)#\(hasContent)#\(sectionCount)"
+    }
+
+    /// The first viewport is anchored at the newest turn, so warm a bounded tail rather
+    /// than parsing the entire history in one burst. Include a small head window as well,
+    /// so a newly loaded older page is ready when the user scrolls upward.
+    private var markdownPrewarmEntries: [BridgeEntry] {
+        let entries = timelineMode
+            ? (store.timeline.sections.first?.entries ?? [])
+            : store.conv.entries
+        guard entries.count > 24 else { return entries }
+        return Array(entries.prefix(8)) + Array(entries.suffix(24))
+    }
+
+    private var markdownPrewarmContents: [String] {
+        markdownPrewarmEntries.reversed()
+            .filter {
+                $0.kind == "message"
+                    && $0.role == "assistant"
+                    && !$0.streaming
+                    && $0.content.utf8.count >= markdownCacheMinimumLength
+            }
+            .prefix(32)
+            .map(\.content)
+    }
+
+    private var markdownPrewarmSignature: String {
+        let entries = markdownPrewarmEntries
+        return "\(entries.count):\(entries.first?.id ?? "")|"
+            + entries.reversed()
+            .filter {
+                $0.kind == "message"
+                    && $0.role == "assistant"
+                    && !$0.streaming
+                    && $0.content.utf8.count >= markdownCacheMinimumLength
+            }
+            .prefix(32)
+            .map { "\($0.id):\($0.content.utf8.count)" }
+            .joined(separator: "|")
     }
 
     /// Row membership and day grouping only depend on these stable fields. Text lengths
@@ -588,6 +702,19 @@ private final class ChatRowsCache {
 }
 
 enum ChatAnchorTag: Hashable { case bottom }
+
+private enum ChatScrollCoordinateSpace {
+    static let name = "agentreins.chat.scroll"
+}
+
+private struct LatestUserTopPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = .nan
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let next = nextValue()
+        if next.isFinite { value = next }
+    }
+}
 
 /// composer 高度上抛（回底按钮避让，真机反馈③）
 private struct ComposerHeightKey: PreferenceKey {

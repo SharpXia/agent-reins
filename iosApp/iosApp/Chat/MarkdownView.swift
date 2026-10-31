@@ -1,6 +1,8 @@
 import SwiftUI
 import MarkdownUI
 
+let markdownCacheMinimumLength = 120
+
 /// Markdown v2 渲染（表格/嵌套列表/代码块/引用，cmark-gfm 全量）。
 /// Compose 版 mikepenz 渲染器的 iOS lazy-list 滚动重绘问题（issue #512）在原生侧不存在。
 struct MarkdownView: View {
@@ -58,11 +60,41 @@ private enum MarkdownParseCache {
     }
 
     static func content(_ raw: String) -> MarkdownContent {
-        guard raw.count >= 120 else { return MarkdownContent(raw) }
+        guard raw.utf8.count >= markdownCacheMinimumLength else { return MarkdownContent(raw) }
         let key = raw as NSString
         if let hit = cache.object(forKey: key) { return hit.value }
         let parsed = MarkdownContent(raw)
         cache.setObject(Box(parsed), forKey: key, cost: min(raw.utf8.count, Int.max))
         return parsed
     }
+
+    /// Warm the cache incrementally on the main actor before a long message enters the
+    /// viewport. MarkdownContent's AST is not Sendable, so this deliberately avoids a
+    /// detached task; yielding between messages keeps the first visible frame responsive
+    /// without crossing actor boundaries with the parsed tree.
+    @MainActor
+    static func prewarm(_ rawContents: [String]) async {
+        var seen = Set<String>()
+        seen.reserveCapacity(rawContents.count)
+        for raw in rawContents {
+            guard !Task.isCancelled else { return }
+            guard raw.utf8.count >= markdownCacheMinimumLength,
+                  seen.insert(raw).inserted else { continue }
+
+            autoreleasepool {
+                _ = content(raw)
+            }
+            // Let scrolling/layout run between cmark parses. A tiny delay also prevents
+            // a large history page from monopolizing the main actor for one long burst.
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+    }
+}
+
+/// Internal bridge used by ChatView's incremental prewarm task. Keeping the cache private
+/// prevents view callers from depending on its storage policy while still allowing the list
+/// to schedule parsing from already available message data.
+@MainActor
+func prewarmMarkdown(_ contents: [String]) async {
+    await MarkdownParseCache.prewarm(contents)
 }

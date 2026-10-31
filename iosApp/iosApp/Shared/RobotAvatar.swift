@@ -176,10 +176,19 @@ struct RobotAvatar: View {
                 }
             }
             // Canvas does not interpolate enum-driven drawing changes. Giving each
-            // expression its own identity lets the face settle with a tiny fade
-            // instead of snapping when the agent state changes.
+            // expression its own identity lets the eyes and mouth cross-fade into
+            // their new geometry instead of snapping or only scaling the whole face.
             .id(expression.rawValue)
-            .transition(.opacity)
+            .transition(
+                .asymmetric(
+                    insertion: .opacity
+                        .combined(with: .offset(y: 3))
+                        .combined(with: .scale(scale: 0.82)),
+                    removal: .opacity
+                        .combined(with: .offset(y: -3))
+                        .combined(with: .scale(scale: 1.08))
+                )
+            )
         }
         .frame(width: size, height: size)
         .animation(motionEnabled && !reduceMotion ? .easeInOut(duration: 0.18) : nil,

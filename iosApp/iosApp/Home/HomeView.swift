@@ -304,7 +304,8 @@ struct ConversationRowView: View {
         return HStack(alignment: .center, spacing: 12) {
             AgentAvatar(tint: tint, name: store.agentName(conv.agentId),
                         expression: store.agentExpression(conv.agentId),
-                        faceFactors: store.agentFaceFactors(conv.agentId))
+                        faceFactors: store.agentFaceFactors(conv.agentId),
+                        status: avatarStatus)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
                     if conv.pinned && !stash {
@@ -360,6 +361,18 @@ struct ConversationRowView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .contentShape(Rectangle())
+    }
+
+    /// Keep transient session state local to the row. The configured expression is
+    /// still used when there is no session signal, while active/error states make
+    /// the face communicate what the row is doing at a glance.
+    private var avatarStatus: AgentAvatarStatus {
+        if store.conn.lastError != nil { return .error }
+        if store.isOffline { return .offline }
+        if conv.lastActiveAtMs <= 0 { return .initial }
+        if conv.running { return .running }
+        if conv.unread > 0 { return .unread }
+        return .idle
     }
 }
 

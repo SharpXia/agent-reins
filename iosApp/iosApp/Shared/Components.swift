@@ -22,19 +22,62 @@ struct UnreadBadge: View {
 /// agent 头像：黏土 blob Canvas 薄壳（RobotAvatar 渲染，face-sculpt §1/§2）。
 /// 首字符圆底旧实现整段删除、不留双轨；name 参数仅为保签名兼容。
 /// faceFactors 必须由调用点解析后显式传入（渲染器零解析）。
+enum AgentAvatarStatus: Equatable {
+    /// Use the agent's configured expression. Editing surfaces use this state so
+    /// a user-selected face is never replaced by a transient session state.
+    case configured
+    case initial
+    case running
+    case idle
+    case unread
+    case error
+    case offline
+
+    var expressionOverride: AgentExpression? {
+        switch self {
+        case .configured: return nil
+        case .initial: return .happy
+        case .running: return .thinking
+        // A quiet session should feel like the agent is wondering what happened,
+        // rather than simply disappearing into a neutral face.
+        case .idle: return .confused
+        case .unread: return .love
+        case .error: return .confused
+        case .offline: return .sad
+        }
+    }
+
+    var statusLabel: String? {
+        switch self {
+        case .configured: return nil
+        case .initial: return "刚刚开始"
+        case .running: return "思考中"
+        case .idle: return "有点困惑"
+        case .unread: return "有新消息"
+        case .error: return "连接异常"
+        case .offline: return "离线"
+        }
+    }
+}
+
 struct AgentAvatar: View {
     let tint: AgentTintColors
     let name: String
     var size: CGFloat = 42
     var expression: AgentExpression = .calm
     var faceFactors: [Double] = ClayFace.defaultFactors
+    var status: AgentAvatarStatus = .configured
 
     var body: some View {
-        RobotAvatar(palette: tint.name, expression: expression, size: size, faceFactors: faceFactors)
+        let shownExpression = status.expressionOverride ?? expression
+        RobotAvatar(palette: tint.name, expression: shownExpression, size: size, faceFactors: faceFactors)
             // 复审修复②：RobotAvatar 是 Canvas，不产生 accessibility 元素，原首字符 Text
             // 自带的读屏内容随替换消失——聚合成单元素并补「agent 名 + 表情中文名」标签
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("\(name)，表情\(expression.zhLabel)")
+            .accessibilityLabel(
+                status.statusLabel.map { "\(name)，\($0)，表情\(shownExpression.zhLabel)" }
+                    ?? "\(name)，表情\(shownExpression.zhLabel)"
+            )
     }
 }
 

@@ -1,0 +1,29 @@
+name: pbxproj-guard
+
+# 守卫：pbxproj 里不许出现写死的 DEVELOPMENT_TEAM。
+# 背景：Xcode GUI 的 Signing 页操作会把本机 Team 写回 pbxproj（已发生过一次，
+# a4ea0be 连带提交、9440d67 清除）。Team 应经 gitignored 的 Config.local.xcconfig
+# （本机）或工作流的 Write Config.local.xcconfig 步骤（CI）注入，见
+# iosApp/Configuration/Config.xcconfig 的 TEAM_ID 空槽。
+# 撞线即报红：出现于任何 push（分支/tag）与 PR。
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  no-hardcoded-development-team:
+    name: pbxproj 无写死 DEVELOPMENT_TEAM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Grep guard
+        run: |
+          if grep -rnE 'DEVELOPMENT_TEAM[[:space:]]*=[[:space:]]*[A-Za-z0-9]' --include='*.pbxproj' .; then
+            echo "::error::pbxproj 里出现了写死的 DEVELOPMENT_TEAM——多半是 Xcode GUI Signing 页写回的。请 revert 该行；不要提交，Team 由 Config.local.xcconfig（本机）/工作流注入（CI）提供。"
+            exit 1
+          fi
+          echo "OK：pbxproj 无写死的 DEVELOPMENT_TEAM"

@@ -61,6 +61,7 @@ struct ChatView: View {
     @State private var safeBottom: CGFloat = 0
 
     var body: some View {
+        let _ = ScrollBench.shared.count(.chatBody)
         VStack(spacing: 0) {
             topBar
             if let err = store.conn.lastError {
@@ -203,7 +204,9 @@ struct ChatView: View {
             .padding(.vertical, 8)
         }
         .coordinateSpace(name: ChatScrollCoordinateSpace.name)
+        .onAppear { ScrollBench.shared.armIfNeeded() }
         .onPreferenceChange(LatestUserTopPreferenceKey.self) { value in
+            ScrollBench.shared.note("pref.latestUserTop")
             // 语义化：只有「越过本回合头」这一个布尔值得写入。原始 y 值每帧都变，
             // 直接落盘会触发逐帧 body 重估（0.4.6 滑动卡顿根因之一）。
             let below = value.isFinite && value > 24
@@ -363,19 +366,24 @@ struct ChatView: View {
         let sections = store.timeline.sections.map {
             TimelineSection(key: $0.key, label: $0.label, entries: $0.entries)
         }
-        let rows = rowsCache.timelineRows(
+        let rows = ScrollBench.shared.time("rows.timeline") { rowsCache.timelineRows(
             agentId: store.timeline.agentId,
             structureSignature: rowsStructureSignature,
             contentSignature: contentSignature,
             sections: sections,
             compactMarks: marks
-        )
+        ) }
+        // 行闭包在 LazyVStack 物化时才执行（滚动中逐行触发）：每行要用的派生量在这里
+        // 一次算好，避免每物化一行都把 Kotlin 桥接数组从头扫一遍（实测约 3% 主线程）。
+        let lastUserId = lastUserEntryId
+        let tailSpinner = showTailSpinner
+        let tints = makeTintMemo()
         ForEach(rows) { row in
             ChatRowView(
                 row: row,
-                tintFor: tintForSession,
-                lastUserEntryId: lastUserEntryId,
-                showTailSpinner: showTailSpinner,
+                tintFor: tints.tint,
+                lastUserEntryId: lastUserId,
+                showTailSpinner: tailSpinner,
                 onBoundaryAppear: { key in
                     // 分区懒加载（M4 反馈②）：分区头进入视口即拉首页/翻更早页；最旧区交给下拉
                     guard key != store.timeline.sections.last?.key,
@@ -383,7 +391,7 @@ struct ChatView: View {
                     _ = store.bridge.loadSection(key: key)
                 }
             )
-            .background(latestUserAnchor(for: row))
+            .background(latestUserAnchor(for: row, lastUserId: lastUserId))
             .onAppear {
                 consumeAnchorIfNeeded(rows: rows)
             }
@@ -392,27 +400,30 @@ struct ChatView: View {
 
     @ViewBuilder
     private var sessionRows: some View {
-        let rows = rowsCache.sessionRows(
+        let rows = ScrollBench.shared.time("rows.session") { rowsCache.sessionRows(
             sessionKey: sessionKey,
             structureSignature: rowsStructureSignature,
             contentSignature: contentSignature,
             entries: store.conv.entries
-        )
+        ) }
         if rows.isEmpty && !runActive && store.conv.historyLoaded {
             Text("暂无消息，发一条开始对话")
                 .ink(.textSm).foregroundColor(c.textTertiary)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 24)
         }
+        let lastUserId = lastUserEntryId
+        let tailSpinner = showTailSpinner
+        let tints = makeTintMemo()
         ForEach(rows) { row in
             ChatRowView(
                 row: row,
-                tintFor: tintForSession,
-                lastUserEntryId: lastUserEntryId,
-                showTailSpinner: showTailSpinner,
+                tintFor: tints.tint,
+                lastUserEntryId: lastUserId,
+                showTailSpinner: tailSpinner,
                 onBoundaryAppear: { _ in }
             )
-            .background(latestUserAnchor(for: row))
+            .background(latestUserAnchor(for: row, lastUserId: lastUserId))
         }
         ForEach(store.conv.pendingOutbox, id: \.idempotencyKey) { cmd in
             PendingOutboxItem(cmd: cmd)
@@ -471,8 +482,8 @@ struct ChatView: View {
     }
 
     @ViewBuilder
-    private func latestUserAnchor(for row: ChatRow) -> some View {
-        if isLatestUserRow(row) {
+    private func latestUserAnchor(for row: ChatRow, lastUserId: String?) -> some View {
+        if isLatestUserRow(row, lastUserId: lastUserId) {
             GeometryReader { proxy in
                 Color.clear.preference(
                     key: LatestUserTopPreferenceKey.self,
@@ -484,10 +495,10 @@ struct ChatView: View {
         }
     }
 
-    private func isLatestUserRow(_ row: ChatRow) -> Bool {
-        guard let lastUserEntryId else { return false }
+    private func isLatestUserRow(_ row: ChatRow, lastUserId: String?) -> Bool {
+        guard let lastUserId else { return false }
         if case let .entry(_, entry) = row {
-            return entry.id == lastUserEntryId
+            return entry.id == lastUserId
         }
         return false
     }
@@ -559,10 +570,21 @@ struct ChatView: View {
 
     /// Row membership and day grouping only depend on these stable fields. Text lengths
     /// live in contentSignature so a streaming tail can update in place without rebuilding
-    /// every row in the transcript.
+    /// every row in the transcript. Exception: completed long assistant messages are sliced
+    /// into rows by their text (`sliceLongMessage`), so their length is structural — the
+    /// streaming tail is never sliced, so this does not rebuild rows per delta.
     private var rowsStructureSignature: String {
+        ScrollBench.shared.time("sig.structure") { computeRowsStructureSignature() }
+    }
+
+    private func computeRowsStructureSignature() -> String {
         func entrySignature(_ entry: BridgeEntry) -> String {
-            "\(entry.id):\(entry.kind):\(entry.role):\(entry.state):\(entry.timestampMs)"
+            var signature = "\(entry.id):\(entry.kind):\(entry.role):\(entry.state):\(entry.timestampMs)"
+            if entry.kind == "message", entry.role == "assistant", !entry.streaming,
+               entry.content.utf8.count >= sliceMinimumBytes {
+                signature += ":L\(entry.content.utf8.count)"
+            }
+            return signature
         }
 
         if timelineMode {
@@ -579,6 +601,10 @@ struct ChatView: View {
     }
 
     private var contentSignature: String {
+        ScrollBench.shared.time("sig.content") { computeContentSignature() }
+    }
+
+    private func computeContentSignature() -> String {
         if timelineMode {
             let sections = store.timeline.sections.map { section in
                 let last = section.entries.last
@@ -639,6 +665,35 @@ struct ChatView: View {
         let key = sessionId ?? sessionKey
         let agentId = store.session(key)?.agentId ?? sessionKeyAgentId(key) ?? "main"
         return store.tint(agentId, isDark: scheme == .dark)
+    }
+
+    /// 每次 body 求值建一个：同一会话的 tint 只查一次 sessions 列表（Kotlin 桥接数组）。
+    private func makeTintMemo() -> TintMemo {
+        TintMemo { sessionId in tintForSession(sessionId) }
+    }
+}
+
+/// session → 气泡 tint 的单次 body 内记忆化（行在滚动中逐个物化，闭包复用同一份）。
+private final class TintMemo {
+    private var cache: [String: AgentTintColors] = [:]
+    private var fallback: AgentTintColors?
+    private let resolve: (String?) -> AgentTintColors
+
+    init(resolve: @escaping (String?) -> AgentTintColors) {
+        self.resolve = resolve
+    }
+
+    func tint(_ sessionId: String?) -> AgentTintColors {
+        guard let sessionId else {
+            if let fallback { return fallback }
+            let value = resolve(nil)
+            fallback = value
+            return value
+        }
+        if let hit = cache[sessionId] { return hit }
+        let value = resolve(sessionId)
+        cache[sessionId] = value
+        return value
     }
 }
 
@@ -706,11 +761,17 @@ private final class ChatRowsCache {
             byId[entry.id] = entry
         }
         return rows.map { row in
-            guard case let .entry(id, oldEntry) = row,
-                  let updated = byId[oldEntry.id] else {
+            switch row {
+            case let .entry(id, oldEntry):
+                guard let updated = byId[oldEntry.id] else { return row }
+                return .entry(id: id, entry: updated)
+            case let .entrySlice(id, oldEntry, slice):
+                // 切片文本随结构签名重建（长消息长度在结构签名里），这里只换 payload
+                guard let updated = byId[oldEntry.id] else { return row }
+                return .entrySlice(id: id, entry: updated, slice: slice)
+            default:
                 return row
             }
-            return .entry(id: id, entry: updated)
         }
     }
 }

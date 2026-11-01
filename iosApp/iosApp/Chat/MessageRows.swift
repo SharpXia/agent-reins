@@ -10,12 +10,19 @@ struct ChatRowView: View {
     let onBoundaryAppear: (String) -> Void
 
     var body: some View {
+        let _ = ScrollBench.shared.count(.rowBody)
         switch row {
         case let .dayHeader(_, atMs):
             DayHeaderView(atMs: atMs)
         case let .entry(_, entry):
             EntryView(entry: entry, tintFor: tintFor, isLastUser: entry.id == lastUserEntryId,
                       showSpinner: entry.id == lastUserEntryId && showTailSpinner)
+        case let .entrySlice(_, entry, slice):
+            // 长消息切片：只有助手消息会被切，用户气泡/发送转圈不涉及
+            MessageItemView(entry: entry, tint: tintFor(entry.sessionId),
+                            isLastUser: false, showSpinner: false,
+                            contentOverride: slice.text, showTimestamp: slice.isLast)
+                .padding(.top, slice.topAdjust)
         case let .boundary(_, sessionKey, label):
             BoundaryView(label: label).onAppear { onBoundaryAppear(sessionKey) }
         case let .compactMark(_, _, atMs):
@@ -75,13 +82,13 @@ struct CompactMarkView: View {
 /// 条目分发：消息 / 思考卡。
 struct EntryView: View {
     @Environment(\.inkColors) private var c
-    @State private var store = AppStore.shared
     let entry: BridgeEntry
     let tintFor: (String?) -> AgentTintColors
     let isLastUser: Bool
     let showSpinner: Bool
 
     var body: some View {
+        let _ = ScrollBench.shared.count(.entryBody)
         switch entry.kind {
         case "message":
             MessageItemView(entry: entry, tint: tintFor(entry.sessionId),
@@ -99,13 +106,19 @@ struct EntryView: View {
 /// 消息（用户 tint 气泡 / 助手墨水平文 / 系统行内注）+ 右下角发送时间 + 长按操作。
 struct MessageItemView: View {
     @Environment(\.inkColors) private var c
-    @State private var store = AppStore.shared
+    /// 单例直取，不占每行一份 @State 存储（只用于长按菜单动作）
+    private var store: AppStore { AppStore.shared }
     let entry: BridgeEntry
     let tint: AgentTintColors
     let isLastUser: Bool
     let showSpinner: Bool
+    /// 长消息切片时的本片源码（nil = 整条 entry.content）
+    var contentOverride: String? = nil
+    /// 切片只在最后一片显示发送时间
+    var showTimestamp: Bool = true
 
     var body: some View {
+        let _ = ScrollBench.shared.count(.messageBody)
         VStack(alignment: .leading, spacing: 1) {
             switch entry.role {
             case "user":
@@ -129,7 +142,7 @@ struct MessageItemView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 2)
             }
-            if entry.role != "system" {
+            if entry.role != "system" && showTimestamp {
                 Text(formatMessageTime(entry.timestampMs))
                     .ink(.textXs)
                     .foregroundColor(c.textTertiary)
@@ -155,11 +168,12 @@ struct MessageItemView: View {
 
     @ViewBuilder
     private var assistantBody: some View {
+        let content = contentOverride ?? entry.content
         Group {
             if entry.streaming {
-                ShimmerText(content: entry.content)
-            } else if !entry.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                MarkdownView(content: entry.content)
+                ShimmerText(content: content)
+            } else if !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                MarkdownView(content: content)
             }
         }
         .contextMenu { actions }

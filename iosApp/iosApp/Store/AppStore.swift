@@ -26,11 +26,12 @@ final class AppStore {
     private init() {
         bridge = MainViewControllerKt.AgentReinsBridge()
         bridge.start(
-            onConn: { [weak self] snap in self?.conn = snap },
-            onLists: { [weak self] snap in self?.lists = snap },
-            onConv: { [weak self] snap in self?.conv = snap },
-            onTimeline: { [weak self] snap in self?.timeline = snap },
+            onConn: { [weak self] snap in ScrollBench.shared.count(.snapConn); self?.conn = snap },
+            onLists: { [weak self] snap in ScrollBench.shared.count(.snapLists); self?.lists = snap },
+            onConv: { [weak self] snap in ScrollBench.shared.count(.snapConv); self?.conv = snap },
+            onTimeline: { [weak self] snap in ScrollBench.shared.count(.snapTimeline); self?.timeline = snap },
             onMisc: { [weak self] snap in
+                ScrollBench.shared.count(.snapMisc)
                 guard let self else { return }
                 self.misc = snap
                 self.eventSeq += 1

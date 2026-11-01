@@ -28,14 +28,22 @@ enum AppRoute: Hashable {
 
 struct RootView: View {
     @State private var store = AppStore.shared
+    @State private var hub = HubStore.shared
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         Group {
-            if store.conn.showOnboarding {
-                OnboardingView()
+            if hub.isLoggedIn {
+                // Hub 账号就绪；网关直连面（Onboarding/MainTabs）由 P2/P3 逐步换数据源，分支级并存到 P4
+                if store.conn.showOnboarding {
+                    OnboardingView()
+                } else {
+                    MainTabsView()
+                }
+            } else if hub.isRestoring {
+                ProgressView("正在恢复 Hub 登录…")
             } else {
-                MainTabsView()
+                LoginView()
             }
         }
         .inkTheme()

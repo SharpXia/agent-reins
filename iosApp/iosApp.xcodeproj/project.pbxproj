@@ -33,6 +33,8 @@
 		1A6FBB00000000000000000F /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA00000000000000000F /* SettingsView.swift */; };
 		1A6FBB000000000000000010 /* QrScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000010 /* QrScanner.swift */; };
 		1A6FBB000000000000000013 /* ScrollBench.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000013 /* ScrollBench.swift */; };
+		1A6FBB000000000000000014 /* HubStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000014 /* HubStore.swift */; };
+		1A6FBB000000000000000015 /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000015 /* LoginView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -47,6 +49,8 @@
 		1A5FC0022026102800000004 /* sfx_chimea.wav */ = {isa = PBXFileReference; lastKnownFileType = audio.wav; path = sfx_chimea.wav; sourceTree = "<group>"; };
 		1A5FC0022026102800000005 /* sfx_chimeb.wav */ = {isa = PBXFileReference; lastKnownFileType = audio.wav; path = sfx_chimeb.wav; sourceTree = "<group>"; };
 		1A6FAA000000000000000001 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
+		1A6FAA000000000000000014 /* HubStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HubStore.swift; sourceTree = "<group>"; };
+		1A6FAA000000000000000015 /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000002 /* AppStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStore.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000003 /* InkTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InkTheme.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000004 /* Format.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Format.swift; sourceTree = "<group>"; };
@@ -116,6 +120,7 @@
 			children = (
 				1A6FAA000000000000000001 /* App.swift */,
 				1A6FCC000000000000000001 /* Store */,
+				1A6FCC000000000000000009 /* Auth */,
 				1A6FCC000000000000000002 /* Theme */,
 				1A6FCC000000000000000003 /* Shared */,
 				1A6FCC000000000000000004 /* Chat */,
@@ -135,8 +140,17 @@
 			isa = PBXGroup;
 			children = (
 				1A6FAA000000000000000002 /* AppStore.swift */,
+				1A6FAA000000000000000014 /* HubStore.swift */,
 			);
 			path = Store;
+			sourceTree = "<group>";
+		};
+		1A6FCC000000000000000009 /* Auth */ = {
+			isa = PBXGroup;
+			children = (
+				1A6FAA000000000000000015 /* LoginView.swift */,
+			);
+			path = Auth;
 			sourceTree = "<group>";
 		};
 		1A6FCC000000000000000002 /* Theme */ = {
@@ -328,6 +342,8 @@
 			files = (
 				1A6FBB000000000000000001 /* App.swift in Sources */,
 				1A6FBB000000000000000002 /* AppStore.swift in Sources */,
+				1A6FBB000000000000000014 /* HubStore.swift in Sources */,
+				1A6FBB000000000000000015 /* LoginView.swift in Sources */,
 				1A6FBB000000000000000003 /* InkTheme.swift in Sources */,
 				1A6FBB000000000000000004 /* Format.swift in Sources */,
 				1A6FBB000000000000000005 /* Components.swift in Sources */,

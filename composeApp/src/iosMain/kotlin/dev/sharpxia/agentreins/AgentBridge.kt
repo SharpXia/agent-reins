@@ -9,6 +9,8 @@ import dev.sharpxia.agentreins.model.Session
 import dev.sharpxia.agentreins.model.ThinkingEntry
 import dev.sharpxia.agentreins.model.ToolCallEvent
 import dev.sharpxia.agentreins.model.sessionKeyAgentId
+import dev.sharpxia.agentreins.hub.HubAuthState
+import dev.sharpxia.agentreins.hub.HubRuntime
 import dev.sharpxia.agentreins.openclaw.Conversation
 import dev.sharpxia.agentreins.openclaw.ConversationKind
 import dev.sharpxia.agentreins.openclaw.Outbox
@@ -213,6 +215,39 @@ class AgentBridge(internal val model: AppModel) {
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+    // ---------- Hub 账号（P1 认证面；与网关直连分支级并存到 P4 一次性删，方案 §7-R1/R2） ----------
+
+    private val hubRuntime = HubRuntime(scope)
+
+    /**
+     * Hub 账号态订阅（主线程回调）：kind = idle/working/needsLogin/loggedIn；
+     * message = NeedsLogin.reason；user = LoggedIn.userDisplay；deviceId = LoggedIn.deviceId。
+     */
+    fun hubObserve(onState: (kind: String, message: String?, user: String?, deviceId: String?) -> Unit) {
+        scope.launch {
+            hubRuntime.state.collect { st ->
+                when (st) {
+                    HubAuthState.Idle -> onState("idle", null, null, null)
+                    HubAuthState.Working -> onState("working", null, null, null)
+                    is HubAuthState.NeedsLogin -> onState("needsLogin", st.reason, null, null)
+                    is HubAuthState.LoggedIn -> onState("loggedIn", null, st.userDisplay, st.deviceId)
+                }
+            }
+        }
+    }
+
+    /** 启动恢复：Keychain 有 refreshToken 则静默刷新进 loggedIn，否则 needsLogin。 */
+    fun hubRestore(baseUrl: String) = hubRuntime.restore(baseUrl)
+
+    fun hubLogin(baseUrl: String, username: String, password: String, deviceName: String) =
+        hubRuntime.login(baseUrl, username, password, deviceName)
+
+    /** 登出 = 撤销当前设备 + 清 Keychain 凭据。 */
+    fun hubLogout() = hubRuntime.logout()
+
+    /** 最近一次登录的 AUTH-006 契约预检判定（验收取证）。 */
+    fun hubAuth006Verdict(): String? = hubRuntime.auth006Verdict
     private var started = false
 
     /** Swift 端启动观测；幂等（重复调用忽略）。 */

@@ -39,7 +39,32 @@ final class HubStore {
             isRestoring = true
             bridge.hubRestore(baseUrl: baseUrl)
         }
+        #if DEBUG
+        // Dev 通道（与网关时代 Documents/dev.json 同模式）：沙盒 Documents/hub-dev.json
+        // {"baseUrl","username","password"} 存在即自动登录一次，供模拟器无触控注入的自动化验收。
+        // 读取后立即删除文件，口令不滞留沙盒；Release 包不编译此段。
+        if let dev = Self.loadDevLogin() {
+            try? FileManager.default.removeItem(at: dev.url)
+            login(baseUrl: dev.baseUrl, username: dev.username, password: dev.password)
+        }
+        #endif
     }
+
+    #if DEBUG
+    private struct DevLogin: Decodable {
+        let baseUrl: String
+        let username: String
+        let password: String
+    }
+
+    private static func loadDevLogin() -> (url: URL, baseUrl: String, username: String, password: String)? {
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
+        let url = docs.appendingPathComponent("hub-dev.json")
+        guard let data = try? Data(contentsOf: url),
+              let d = try? JSONDecoder().decode(DevLogin.self, from: data) else { return nil }
+        return (url, d.baseUrl, d.username, d.password)
+    }
+    #endif
 
     var isLoggedIn: Bool { kind == "loggedIn" }
 

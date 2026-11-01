@@ -52,10 +52,7 @@ val HubJson: Json = Json {
 class DefaultHubApi(
     private val config: HubConfig,
     private val accessTokenProvider: () -> String?,
-    private val http: HttpClient = HttpClient {
-        install(ContentNegotiation) { json(HubJson) }
-        expectSuccess = false
-    },
+    private val http: HttpClient = hubHttpClient(HubJson),
 ) : HubApi {
 
     override suspend fun login(req: LoginRequest): LoginOk = post("/auth/login", req, auth = false)

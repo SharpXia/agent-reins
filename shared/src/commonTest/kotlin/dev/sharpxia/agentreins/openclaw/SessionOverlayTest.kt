@@ -3,6 +3,7 @@ package dev.sharpxia.agentreins.openclaw
 import dev.sharpxia.agentreins.model.Session
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /** SessionOverlay：本地 pinned/archived 覆盖层的解析、叠加与更新（M2.6）。 */
@@ -84,9 +85,12 @@ class SessionOverlayTest {
         assertEquals(1, unarchived.size)
     }
 
-    @Test(expected = IllegalArgumentException::class)
+    @Test
     fun toggledRequiresAtLeastOneField() {
-        SessionOverlay.toggled(emptyMap(), "a")
+        // kotlin.test 的 @Test 没有 expected 参数（那是 JUnit4 的写法），用 assertFailsWith
+        assertFailsWith<IllegalArgumentException> {
+            SessionOverlay.toggled(emptyMap(), "a")
+        }
     }
 
     @Test

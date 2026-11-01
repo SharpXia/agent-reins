@@ -15,7 +15,8 @@ private fun hex(s: String): ByteArray = ByteArray(s.length / 2) {
     ((hexDigit(s[2 * it]) shl 4) + hexDigit(s[2 * it + 1])).toByte()
 }
 
-private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
+// "%02x".format 是 JVM 专属 API，commonTest 要过 iOS 编译，用纯 common 写法
+private fun ByteArray.toHex(): String = joinToString("") { (it.toInt() and 0xFF).toString(16).padStart(2, '0') }
 
 class CryptoVectorTest {
 
@@ -23,7 +24,7 @@ class CryptoVectorTest {
     fun sha256Vectors() {
         assertEquals(
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-            sha256("abc".toByteArray()).toHex(),
+            sha256("abc".encodeToByteArray()).toHex(),
         )
         assertEquals(
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -36,7 +37,7 @@ class CryptoVectorTest {
         assertEquals(
             "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a" +
                 "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
-            sha512("abc".toByteArray()).toHex(),
+            sha512("abc".encodeToByteArray()).toHex(),
         )
     }
 

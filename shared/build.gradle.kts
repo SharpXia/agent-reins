@@ -25,6 +25,9 @@ kotlin {
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kotlinx.serialization.json)
             implementation(libs.ktor.client.core)
+            // Hub REST 客户端（hub/ 包，P1 起填充）：JSON 编解码 + Bearer 注入
+            implementation(libs.ktor.client.content.negotiation)
+            implementation(libs.ktor.serialization.kotlinx.json)
             implementation(libs.ktor.client.websockets)
         }
         androidMain.dependencies {
@@ -46,6 +49,16 @@ kotlin {
             }
         }
         val iosSimulatorArm64Main by getting {
+            dependencies {
+                implementation(libs.ktor.client.darwin)
+                implementation(libs.sqldelight.native.driver)
+            }
+        }
+        // iOS 专属依赖同时挂到 iosMain 中间层：叶子编译（Xcode 框架链路）一直可用，
+        // 但 compileIosMainKotlinMetadata 走 iosMain 类路径——main（c817869）上
+        // :shared:build 因此从未全绿（2026-11-01 A/B 实证：同样报 NativeSqliteDriver
+        // unresolved）。hub 化期间 :shared:build 作为出厂闸门，故补齐；运行行为零变化。
+        matching { it.name == "iosMain" }.configureEach {
             dependencies {
                 implementation(libs.ktor.client.darwin)
                 implementation(libs.sqldelight.native.driver)

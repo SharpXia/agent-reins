@@ -48,3 +48,22 @@ enum class HubErrorCode(val wire: String, val http: Int?) {
         fun fromWire(code: String): HubErrorCode? = byWire[code]
     }
 }
+
+/**
+ * Hub 调用失败：非 2xx 响应（载荷按契约错误形状解析）或客户端本地前置失败。
+ * [code] 为 null 表示非契约码（HTTP 裸状态 / 客户端本地码），分支时按 [payload].code 字符串兜底。
+ * [requestId] 来自响应头 x-request-id，排障必须引用（08 §1.1）。
+ */
+class HubException(
+    val payload: HubErrorPayload,
+    val httpStatus: Int?,
+    val requestId: String?,
+) : Exception("[${payload.code}] ${payload.message}" + (requestId?.let { " (x-request-id=$it)" } ?: "")) {
+    val code: HubErrorCode? get() = HubErrorCode.fromWire(payload.code)
+
+    companion object {
+        /** 本地前置失败：内存无 accessToken 且安全存储无 refreshToken——引导登录，不是契约错误。 */
+        fun notLoggedIn(): HubException =
+            HubException(HubErrorPayload(code = "CLIENT-NOT-LOGGED-IN", message = "未登录：无可用凭据"), null, null)
+    }
+}

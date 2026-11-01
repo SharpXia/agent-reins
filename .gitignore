@@ -1,6 +1,9 @@
 # agent 本地目录（官方 Android skills 等，不入库）
 .agents/
 
+# ZCode mimosa 安全扫描插件工作数据（会话基线快照/扫描报告，不入库）
+.mimosa/
+
 # 构建产物
 build/
 .gradle/

@@ -92,19 +92,25 @@ data class MessagesPage(
 )
 
 /**
- * 事件信封（REST 增量与 WSS event 帧完全同构，同一 events 表行）。
+ * 事件信封（REST 增量与 WSS event 帧完全同构，同一 events 表行；hub-wss-frames-v1.schema.json
+ * EventEnvelopeBase：required = id/type/gatewayId/ts/data）。
  * 幂等去重键 = id（INV-1）；**未知 type：忽略内容但必须照常推进游标**（06 §12.2 义务 2）。
- * data 统一用 JsonElement 承载——宽松解析，各域载荷按 type 分发解析（P2）。
+ * data 统一用 JsonElement 承载——宽松解析，各域载荷按 type 分发解析。
+ * 可省字段（06 §2.2 矩阵）：seq（gateway/read/command 域）、sessionKey（gateway/read/command 域无）、
+ * runId（仅 run/tool/approval 域必带）。conversationId 不是信封字段（read.updated 载荷才有）。
  */
 @Serializable
 data class EventEnvelope(
     /** 全局事件 ULID：去重键 + 游标推进依据（06 §2.1）。 */
     val id: String,
+    /** 会话内事件序号：eventlog 单调整数、跨化身连续；与消息投影 sessionSeq 是两条独立序列。 */
+    val seq: Long? = null,
     val type: String,
-    val conversationId: String? = null,
-    /** run/tool 域信封必带（06 §2.2）。 */
+    val gatewayId: String,
+    val sessionKey: String? = null,
     val runId: String? = null,
-    val data: JsonElement? = null,
+    val ts: String,
+    val data: JsonElement,
 ) {
     companion object {
         // 21 类事件类型（06 §3 注册表镜像，唯一注册清单；新类型只增不改义）。
@@ -142,7 +148,7 @@ data class EventsPage(
     val currentWatermark: String,
 )
 
-/** 全量快照（08 §4.9）：不含 approvals 与 run 明细（两者只能从事件流累积，交接包 §5.4 边界）。 */
+/** 全量快照（08 §4.9 / yaml SnapshotResponse：六字段全 required）：不含 approvals 与 run 明细（只能从事件流累积）。 */
 @Serializable
 data class SnapshotResponse(
     /** 空系统为 26 个 0 的零值 ULID；落定后 cursor = 此值。 */
@@ -151,10 +157,10 @@ data class SnapshotResponse(
     /** 冷启动网关列表来源：offline 网关在此即可见（不依赖事件）。 */
     val gateways: List<GatewaySummary> = emptyList(),
     val conversations: List<ConversationRow> = emptyList(),
-    /** 每会话尾页 50 行；键为 conversationId（P2 对 yaml 校对定形）。 */
-    val messages: Map<String, List<MessageRow>>? = null,
-    /** readCursors 结构 P2 对 yaml 校对后定形。 */
-    val readCursors: JsonElement? = null,
+    /** conversationId → 该会话尾页 50 行（08 §8）。 */
+    val messages: Map<String, List<MessageRow>> = emptyMap(),
+    /** conversationId → readUpTo（多设备合并最大值，INV-7）。 */
+    val readCursors: Map<String, Long> = emptyMap(),
 )
 
 // ── 命令请求/回执（08 §4.4–4.8 共用 202 + CommandReceipt） ──────────────────

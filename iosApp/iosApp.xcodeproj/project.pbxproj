@@ -35,6 +35,7 @@
 		1A6FBB000000000000000013 /* ScrollBench.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000013 /* ScrollBench.swift */; };
 		1A6FBB000000000000000014 /* HubStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000014 /* HubStore.swift */; };
 		1A6FBB000000000000000015 /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000015 /* LoginView.swift */; };
+		1A6FBB000000000000000016 /* HubViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000016 /* HubViews.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -51,6 +52,7 @@
 		1A6FAA000000000000000001 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000014 /* HubStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HubStore.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000015 /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
+		1A6FAA000000000000000016 /* HubViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HubViews.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000002 /* AppStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStore.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000003 /* InkTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InkTheme.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000004 /* Format.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Format.swift; sourceTree = "<group>"; };
@@ -121,6 +123,7 @@
 				1A6FAA000000000000000001 /* App.swift */,
 				1A6FCC000000000000000001 /* Store */,
 				1A6FCC000000000000000009 /* Auth */,
+				1A6FCC00000000000000000A /* Hub */,
 				1A6FCC000000000000000002 /* Theme */,
 				1A6FCC000000000000000003 /* Shared */,
 				1A6FCC000000000000000004 /* Chat */,
@@ -143,6 +146,14 @@
 				1A6FAA000000000000000014 /* HubStore.swift */,
 			);
 			path = Store;
+			sourceTree = "<group>";
+		};
+		1A6FCC00000000000000000A /* Hub */ = {
+			isa = PBXGroup;
+			children = (
+				1A6FAA000000000000000016 /* HubViews.swift */,
+			);
+			path = Hub;
 			sourceTree = "<group>";
 		};
 		1A6FCC000000000000000009 /* Auth */ = {
@@ -344,6 +355,7 @@
 				1A6FBB000000000000000002 /* AppStore.swift in Sources */,
 				1A6FBB000000000000000014 /* HubStore.swift in Sources */,
 				1A6FBB000000000000000015 /* LoginView.swift in Sources */,
+				1A6FBB000000000000000016 /* HubViews.swift in Sources */,
 				1A6FBB000000000000000003 /* InkTheme.swift in Sources */,
 				1A6FBB000000000000000004 /* Format.swift in Sources */,
 				1A6FBB000000000000000005 /* Components.swift in Sources */,

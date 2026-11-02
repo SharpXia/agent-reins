@@ -34,12 +34,8 @@ struct RootView: View {
     var body: some View {
         Group {
             if hub.isLoggedIn {
-                // Hub 账号就绪；网关直连面（Onboarding/MainTabs）由 P2/P3 逐步换数据源，分支级并存到 P4
-                if store.conn.showOnboarding {
-                    OnboardingView()
-                } else {
-                    MainTabsView()
-                }
+                // P3：Hub 主界面（会话/设备）；网关直连面退役，P4 一次性删（方案 §7-R1/R2）
+                HubRootView()
             } else if hub.isRestoring {
                 ProgressView("正在恢复 Hub 登录…")
             } else {

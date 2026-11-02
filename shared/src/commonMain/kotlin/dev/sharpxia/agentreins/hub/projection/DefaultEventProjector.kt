@@ -234,6 +234,29 @@ class DefaultEventProjector(
         val sk = envelope.sessionKey ?: return skip()
         ensureConversationRow(g, sk, envelope)
         val isUser = d.role == "user"
+        // 用户行回执：同 idempotencyKey 的本地乐观行（PENDING_LOCAL 期 messageId=幂等键）整体提升，
+        // 避免乐观行与服务端行双行并存（05 §3.9 义务 4 的 UI 翻转语义）
+        if (isUser && d.idempotencyKey != null &&
+            db.hubQueries.selectMessageByIdem(d.idempotencyKey).executeAsOneOrNull() != null
+        ) {
+            db.hubQueries.promoteLocalEcho(
+                messageId = d.messageId,
+                content = d.content,
+                seq = d.sourceMessageSeq,
+                commandId = d.commandId,
+                openclawId = d.openclawId,
+                ts = envelope.ts,
+                idempotencyKey = d.idempotencyKey,
+            )
+            db.hubQueries.touchConversationPreview(
+                preview = d.content.take(PREVIEW_MAX),
+                seq = d.sourceMessageSeq,
+                lastActiveAt = envelope.ts,
+                gatewayId = g,
+                sessionKey = sk,
+            )
+            return
+        }
         db.hubQueries.upsertMessage(
             messageId = d.messageId,
             gatewayId = g,

@@ -216,13 +216,17 @@ class AgentBridge(internal val model: AppModel) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
-    // ---------- Hub 账号（P1 认证面；与网关直连分支级并存到 P4 一次性删，方案 §7-R1/R2） ----------
+    // ---------- Hub 账号与同步（P1–P3；与网关直连分支级并存到 P4 一次性删，方案 §7-R1/R2） ----------
 
     private val hubRuntime = HubRuntime(scope)
+    private var hubClient: dev.sharpxia.agentreins.hub.DefaultHubClient? = null
+    private var hubConvJob: kotlinx.coroutines.Job? = null
+    private var hubMsgJob: kotlinx.coroutines.Job? = null
 
     /**
      * Hub 账号态订阅（主线程回调）：kind = idle/working/needsLogin/loggedIn；
      * message = NeedsLogin.reason；user = LoggedIn.userDisplay；deviceId = LoggedIn.deviceId。
+     * 进入 loggedIn 时自动组装并启动 Hub 同步栈（幂等）。
      */
     fun hubObserve(onState: (kind: String, message: String?, user: String?, deviceId: String?) -> Unit) {
         scope.launch {
@@ -231,11 +235,25 @@ class AgentBridge(internal val model: AppModel) {
                     HubAuthState.Idle -> onState("idle", null, null, null)
                     HubAuthState.Working -> onState("working", null, null, null)
                     is HubAuthState.NeedsLogin -> onState("needsLogin", st.reason, null, null)
-                    is HubAuthState.LoggedIn -> onState("loggedIn", null, st.userDisplay, st.deviceId)
+                    is HubAuthState.LoggedIn -> {
+                        ensureHubStarted()
+                        onState("loggedIn", null, st.userDisplay, st.deviceId)
+                    }
                 }
             }
         }
     }
+
+    private fun ensureHubStarted() {
+        if (hubClient == null) {
+            val client = dev.sharpxia.agentreins.hub.DefaultHubClient(scope, hubRuntime, hubDbOrNull())
+            hubClient = client
+            client.start()
+        }
+    }
+
+    private fun hubDbOrNull(): dev.sharpxia.agentreins.hubdb.HubDatabase? =
+        dev.sharpxia.agentreins.hub.db.openHubDatabase(dev.sharpxia.agentreins.hub.db.createHubDriver())
 
     /** 启动恢复：Keychain 有 refreshToken 则静默刷新进 loggedIn，否则 needsLogin。 */
     fun hubRestore(baseUrl: String) = hubRuntime.restore(baseUrl)
@@ -243,11 +261,67 @@ class AgentBridge(internal val model: AppModel) {
     fun hubLogin(baseUrl: String, username: String, password: String, deviceName: String) =
         hubRuntime.login(baseUrl, username, password, deviceName)
 
-    /** 登出 = 撤销当前设备 + 清 Keychain 凭据。 */
-    fun hubLogout() = hubRuntime.logout()
+    /** 登出 = 撤销当前设备 + 清 Keychain 凭据 + 停同步栈（保留投影库，重登后 cursor 续跑）。 */
+    fun hubLogout() {
+        hubClient?.stop()
+        hubClient = null
+        hubConvJob?.cancel(); hubConvJob = null
+        hubMsgJob?.cancel(); hubMsgJob = null
+        hubRuntime.logout()
+    }
 
     /** 最近一次登录的 AUTH-006 契约预检判定（验收取证）。 */
     fun hubAuth006Verdict(): String? = hubRuntime.auth006Verdict
+
+    // ---------- Hub UI 数据桥（P3）：投影库 Flow → Swift 回调 ----------
+
+    /** 会话列表订阅（投影库变更即回调；重复调用先取消旧订阅）。 */
+    fun hubWatchConversations(onList: (List<dev.sharpxia.agentreins.hub.UiConversation>) -> Unit) {
+        hubConvJob?.cancel()
+        hubConvJob = scope.launch {
+            hubClient?.observeConversations()?.collect { onList(it) }
+        }
+    }
+
+    /** 指定会话消息订阅（打开会话页调用；重复调用切订阅）。 */
+    fun hubWatchMessages(gatewayId: String, sessionKey: String, onList: (List<dev.sharpxia.agentreins.hub.UiMessage>) -> Unit) {
+        hubMsgJob?.cancel()
+        hubMsgJob = scope.launch {
+            hubClient?.observeMessages(gatewayId, sessionKey)?.collect { onList(it) }
+        }
+    }
+
+    /** 发送消息（幂等队列 + 乐观行；进度经 command.acked/message.created 事件翻转）。 */
+    fun hubSend(conversationId: String, gatewayId: String, sessionKey: String, text: String) {
+        scope.launch { runCatching { hubClient?.commands?.sendMessage(conversationId, gatewayId, sessionKey, text) } }
+    }
+
+    /** 会话渲染完整后上报已读（readUpTo = 已渲染最大 seq）。 */
+    fun hubMarkRead(conversationId: String, gatewayId: String, sessionKey: String, readUpTo: Long) {
+        scope.launch { runCatching { hubClient?.markRead(conversationId, gatewayId, sessionKey, readUpTo) } }
+    }
+
+    /** 设备清单（设备管理页）。 */
+    fun hubDevices(onList: (List<dev.sharpxia.agentreins.hub.auth.DeviceInfo>) -> Unit) {
+        scope.launch {
+            runCatching {
+                val stack = hubRuntime.authStack ?: return@launch
+                val page = stack.auth.withBearer { stack.api.listDevices() }
+                onList(page.devices)
+            }
+        }
+    }
+
+    /** 撤销设备（可撤任意自有设备含当前；撤当前即远端登出，本地随后清凭据重登录）。 */
+    fun hubRevokeDevice(deviceId: String, onDone: () -> Unit) {
+        scope.launch {
+            runCatching {
+                val stack = hubRuntime.authStack ?: return@launch
+                stack.auth.withBearer { stack.api.deleteDevice(deviceId) }
+            }
+            onDone()
+        }
+    }
     private var started = false
 
     /** Swift 端启动观测；幂等（重复调用忽略）。 */

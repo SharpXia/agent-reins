@@ -28,11 +28,14 @@ kotlin {
         commonMain.dependencies {
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kotlinx.serialization.json)
+            implementation(libs.kotlinx.datetime)
             implementation(libs.ktor.client.core)
             // Hub REST 客户端（hub/ 包，P1 起填充）：JSON 编解码 + Bearer 注入
             implementation(libs.ktor.client.content.negotiation)
             implementation(libs.ktor.serialization.kotlinx.json)
             implementation(libs.ktor.client.websockets)
+            // Hub 投影查询 Flow 化（selectConversations.asFlow 等）
+            implementation(libs.sqldelight.coroutines)
         }
         androidMain.dependencies {
             implementation(libs.ktor.client.okhttp)

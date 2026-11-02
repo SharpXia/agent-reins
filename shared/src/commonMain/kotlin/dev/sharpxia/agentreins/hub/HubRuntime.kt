@@ -159,6 +159,6 @@ class HubRuntime(
         return trimmed
     }
 
-    private fun wsUrlOf(baseUrl: String): String =
+    fun wsUrlOf(baseUrl: String): String =
         baseUrl.replaceFirst("https://", "wss://").replaceFirst("http://", "ws://") + "/ws"
 }

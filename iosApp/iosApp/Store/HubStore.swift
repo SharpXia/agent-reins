@@ -19,6 +19,70 @@ final class HubStore {
     /// 最近一次登录的 AUTH-006 判定快照（进 loggedIn 时拉取；状态条取证用）。
     private(set) var auth006VerdictSnapshot: String?
 
+    // ---------- P3：投影库数据面（KMP Flow → Swift 回调） ----------
+
+    /// 会话列表（投影库 Flow 推送；label 空的渠道线程由 UI 兜底命名）。
+    var conversations: [UiConversation] = []
+    /// 当前打开会话的消息列表。
+    var messages: [UiMessage] = []
+    /// 当前打开的会话。
+    var selected: UiConversation?
+    /// Dev 探针用 Bool 驱动 push（KMP 类无 Hashable，NavigationPath.append 不可靠）。
+    var chatPush = false
+
+    private var devicesCache: [DeviceInfo]? = nil
+
+    /// 订阅会话列表（loggedIn 后调用一次；重复调用由桥侧换订阅）。
+    func watchConversations() { bridge.hubWatchConversations(onList: { [weak self] list in self?.conversations = list }) }
+
+    /// 打开会话：切消息订阅（旧订阅由桥侧取消）。
+    func open(_ conv: UiConversation) {
+        selected = conv
+        messages = []
+        bridge.hubWatchMessages(gatewayId: conv.gatewayId, sessionKey: conv.sessionKey) { [weak self] list in
+            self?.messages = list
+        }
+    }
+
+    func closeConversation() {
+        selected = nil
+        messages = []
+        chatPush = false
+        hubMsgWatchCancel()
+    }
+
+    /// Dev 探针直达会话（Bool push 通道，见 chatPush 注释）。
+    func devOpen(_ conv: UiConversation) {
+        selected = conv
+        messages = []
+        chatPush = true
+        bridge.hubWatchMessages(gatewayId: conv.gatewayId, sessionKey: conv.sessionKey) { [weak self] list in
+            self?.messages = list
+        }
+    }
+
+    private func hubMsgWatchCancel() { /* 桥侧换订阅/登出时取消；此句柄 P4 收紧 */ }
+
+    func send(_ text: String) {
+        guard let c = selected else { return }
+        bridge.hubSend(conversationId: c.conversationId ?? "", gatewayId: c.gatewayId, sessionKey: c.sessionKey, text: text)
+    }
+
+    /// 渲染完成后上报已读（取已渲染最大 seq）。
+    func markReadUpTo(_ seq: Int64) {
+        guard let c = selected, let id = c.conversationId else { return }
+        bridge.hubMarkRead(conversationId: id, gatewayId: c.gatewayId, sessionKey: c.sessionKey, readUpTo: seq)
+    }
+
+    /// 设备清单（设备管理页；每次进入拉新）。
+    func refreshDevices() {
+        bridge.hubDevices { [weak self] list in self?.devicesCache = list }
+    }
+
+    var devices: [DeviceInfo]? { devicesCache }
+
+    func revokeDevice(_ deviceId: String) { bridge.hubRevokeDevice(deviceId: deviceId) { [weak self] in self?.refreshDevices() } }
+
     var baseUrl: String {
         didSet { UserDefaults.standard.set(baseUrl, forKey: Self.baseUrlKey) }
     }

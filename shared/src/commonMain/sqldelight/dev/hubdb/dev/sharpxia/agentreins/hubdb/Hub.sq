@@ -208,6 +208,16 @@ setMessageState:
 UPDATE hubMessages SET state = ? WHERE messageId = ?;
 
 -- 用户行回执翻转（message.created 带 commandId/idempotencyKey → sending→delivered）
+-- 用户行回执到达：同 idempotencyKey 的本地乐观行（messageId=临时键）整体提升为服务端行，
+-- 避免乐观行+服务端行双行并存
+promoteLocalEcho:
+UPDATE hubMessages SET messageId = :messageId, content = :content, seq = :seq,
+  uiState = 'delivered', commandId = :commandId, openclawId = :openclawId, ts = :ts
+WHERE idempotencyKey = :idempotencyKey;
+
+selectMessageByIdem:
+SELECT idempotencyKey FROM hubMessages WHERE idempotencyKey = ? LIMIT 1;
+
 setMessageUiStateByIdem:
 UPDATE hubMessages SET uiState = ? WHERE idempotencyKey = ? AND state != 'failed';
 

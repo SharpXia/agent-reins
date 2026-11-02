@@ -31,7 +31,7 @@ sealed interface HubAuthState {
 
 /**
  * Hub 登录编排（P1 面向 iOS 桥与 desktop 验收通道；不依赖 Compose/AppModel，P2/P3 并入 HubClient 门面）。
- * baseUrl 由调用方传入（iOS 存 UserDefaults，desktop 走环境变量），不落代码与打包配置。
+ * baseUrl 由调用方传入（iOS 存 UserDefaults、缺省经构建期注入 Info.plist；desktop 走环境变量）。
  */
 class HubRuntime(
     private val scope: CoroutineScope,

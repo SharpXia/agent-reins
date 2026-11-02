@@ -84,11 +84,24 @@ final class HubStore {
         didSet { UserDefaults.standard.set(baseUrl, forKey: Self.baseUrlKey) }
     }
 
+    /// 构建期注入的默认 REST 地址（gitignored Config.local.xcconfig `HUB_PUBLIC_BASE` →
+    /// Info.plist `HubDefaultBaseURL` → 此处读 Bundle；CI 用同名 secret 注入，仓库零域名）。
+    /// 自建构建未注入时为空串，此时登录页要求手填地址。
+    var defaultBaseUrl: String { Self.injectedDefaultBaseUrl() }
+
+    private static func injectedDefaultBaseUrl() -> String {
+        let raw = Bundle.main.object(forInfoDictionaryKey: "HubDefaultBaseURL") as? String ?? ""
+        let t = raw.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty, !t.contains("$("), let host = URL(string: t)?.host, !host.isEmpty else { return "" }
+        return t
+    }
+
     private static let baseUrlKey = "hub.baseUrl"
     private let bridge = AgentBridge()
 
     private init() {
-        baseUrl = UserDefaults.standard.string(forKey: Self.baseUrlKey) ?? ""
+        // 未曾手改过服务器地址（UserDefaults 无值）时用注入的默认地址，登录页免填。
+        baseUrl = UserDefaults.standard.string(forKey: Self.baseUrlKey) ?? Self.injectedDefaultBaseUrl()
         bridge.hubObserve { [weak self] kind, message, user, deviceId in
             guard let self else { return }
             self.kind = kind
@@ -107,19 +120,20 @@ final class HubStore {
         // 读取后立即删除文件，口令不滞留沙盒；Release 包不编译此段。
         if let dev = Self.loadDevLogin() {
             try? FileManager.default.removeItem(at: dev.url)
-            login(baseUrl: dev.baseUrl, username: dev.username, password: dev.password)
+            login(baseUrl: dev.baseUrl ?? baseUrl, username: dev.username, password: dev.password)
         }
         #endif
     }
 
     #if DEBUG
     private struct DevLogin: Decodable {
-        let baseUrl: String
+        /// 可空：缺省走包内默认地址（与正式登录路径同源，自动化可验证默认地址面）。
+        let baseUrl: String?
         let username: String
         let password: String
     }
 
-    private static func loadDevLogin() -> (url: URL, baseUrl: String, username: String, password: String)? {
+    private static func loadDevLogin() -> (url: URL, baseUrl: String?, username: String, password: String)? {
         guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
         let url = docs.appendingPathComponent("hub-dev.json")
         guard let data = try? Data(contentsOf: url),

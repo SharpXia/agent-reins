@@ -257,6 +257,13 @@ struct HubSettingsView: View {
                     HStack { ProgressView(); Text("加载中…").foregroundStyle(.secondary) }
                 }
             }
+            Section("接入") {
+                NavigationLink {
+                    ServerSettingsView()
+                } label: {
+                    LabeledContent("服务器", value: URL(string: hub.baseUrl)?.host ?? hub.baseUrl)
+                }
+            }
             Section {
                 Button("退出登录", role: .destructive) { confirmLogout = true }
             }

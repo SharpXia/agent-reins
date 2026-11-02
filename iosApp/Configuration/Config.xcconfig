@@ -3,6 +3,10 @@ BUNDLE_ID=dev.sharpxia.agentreins
 APP_NAME=AgentReins
 JAVA_HOME=
 
+// 默认 Hub 主机名：真实值只进本机覆盖文件与 CI secret，不入仓库（公开）。
+// Info.plist 组装 HubDefaultBaseURL=https://$(HUB_PUBLIC_HOST)/v1（xcconfig 值里不能写 //，会被当注释）。
+HUB_PUBLIC_HOST=
+
 // M2.5 SQLDelight 起静态 framework 内 SQLiter cinterop 需要 app 侧链接
 // libsqlite3（pbxproj 的 OTHER_LDFLAGS 带 $(inherited)，此处自动追加）
 OTHER_LDFLAGS = -lsqlite3

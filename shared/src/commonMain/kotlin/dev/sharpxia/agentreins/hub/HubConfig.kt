@@ -3,9 +3,10 @@ package dev.sharpxia.agentreins.hub
 /**
  * Hub 接入配置。
  *
- * 地址纪律：开发期明文 HTTP/WS（TLS 属 P4 部署环节，docs/plans/hub-migration-plan.md §6），
- * 真实地址一律经运行时配置注入（.env / dev.json / 登录页输入），不写死进仓库（本仓库公开）。
- * 占位示例：REST `http://<HUB-IP>:8080/v1`、WS `ws://<HUB-IP>:8080/v1/ws`。
+ * 地址纪律（2026-11-03 修订）：真实默认地址不进仓库（本仓库公开），由宿主平台构建期注入——
+ * iOS 经 gitignored `Config.local.xcconfig`（键 `HUB_PUBLIC_BASE`）→ Info.plist
+ * `HubDefaultBaseURL=$(HUB_PUBLIC_BASE)` → Swift 读 Bundle 后传给桥；桌面探针走环境变量。
+ * shared 只承载「调用方给的地址」，不携带域名。
  */
 data class HubConfig(
     /** REST base，含 /v1 前缀。 */

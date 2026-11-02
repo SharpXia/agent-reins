@@ -24,16 +24,18 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 
-/** 客户端唯一上行帧（schema SyncResumeFrame：required type/protocolVersion/cursor）。 */
-@Serializable
-private data class SyncResumeFrame(
-    val type: String = "sync.resume",
-    val protocolVersion: Int = 1,
-    val cursor: String,
-)
+/** 客户端唯一上行帧（schema SyncResumeFrame：required type/protocolVersion/cursor）——显式构造，见 connect 注释。 */
+private fun buildResumeFrame(cursor: String): String =
+    buildJsonObject {
+        put("type", "sync.resume")
+        put("protocolVersion", 1)
+        put("cursor", cursor)
+    }.toString()
 
 /** 服务端 event 帧包裹（schema EventFrame：required type/event）。 */
 @Serializable
@@ -75,11 +77,15 @@ class DefaultHubWsClient(
     private val wsHttp: HttpClient = (http ?: hubHttpClient(HubJson)).config {
         install(WebSockets) {
             // 08 §5.4：WS 协议层 ping/pong；25s 落在 25–30s 建议带内。引擎不支持时静默忽略。
-            pingIntervalMillis = 25_000
+            // R6 实测（desktop CIO）：pingIntervalMillis>0 时 ready 帧永不到达（pinger 与
+            // webSocketSession() 用法冲突），先禁用——活性由上层 90s 无帧看门狗兜底。
+            pingIntervalMillis = 0
         }
     }
 
-    private val _frames = MutableSharedFlow<HubServerFrame>(extraBufferCapacity = 512)
+    // replay 64：connect 与下游订阅之间存在天然间隙（建连即发 resume、ready 可能先到），
+    // 无 replay 的 SharedFlow 会在无订阅者时丢帧——重放旧帧无害（事件应用按 id 幂等去重）
+    private val _frames = MutableSharedFlow<HubServerFrame>(replay = 64, extraBufferCapacity = 512)
     private val _closed = MutableStateFlow<HubWsClosed?>(null)
     private var session: DefaultClientWebSocketSession? = null
     private var receiver: Job? = null
@@ -97,8 +103,10 @@ class DefaultHubWsClient(
             header(HttpHeaders.Authorization, "Bearer ${accessTokenProvider()}")
         }
         session = s
-        // 首帧 sync.resume（服务端校验：过期 HUB-SYNC-001 / 非法 HUB-SYNC-002 → error 帧 + close）
-        s.send(Frame.Text(json.encodeToString(SyncResumeFrame.serializer(), SyncResumeFrame(cursor = cursor))))
+        // 首帧 sync.resume（服务端校验：过期 HUB-SYNC-001 / 非法 HUB-SYNC-002 → error 帧 + close）。
+        // 显式构造而非 data class 序列化：HubJson.encodeDefaults=false 会把默认值字段
+        // （type/protocolVersion）整个省掉，服务端判「首帧须为 sync.resume」（HUB-SYNC-002 实证）
+        s.send(Frame.Text(buildResumeFrame(cursor)))
         receiver = scope.launch {
             var lastClose: HubWsClosed? = null
             try {

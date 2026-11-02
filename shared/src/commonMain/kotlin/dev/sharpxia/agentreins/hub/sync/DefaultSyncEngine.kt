@@ -161,9 +161,17 @@ class DefaultSyncScheduler(
             var superseded = false
             try {
                 if (cursors.eventCursor() == null) engine.bootstrap()
-                ws.connect(cursors.eventCursor() ?: DbEventCursorStore.ZERO_ULID)
-                backoffMs = 1_000L
-                consumeUntilClosed()
+                // 帧收集先于 connect 启动：建连即发 resume，ready/事件可能在订阅建立前到达
+                val collector = scope.launch {
+                    ws.frames().collect { onFrame(it) }
+                }
+                try {
+                    ws.connect(cursors.eventCursor() ?: DbEventCursorStore.ZERO_ULID)
+                    backoffMs = 1_000L
+                    consumeUntilClosed()
+                } finally {
+                    collector.cancel()
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -185,28 +193,21 @@ class DefaultSyncScheduler(
         }
     }
 
-    /** 连接在途消费：帧分发 + 看门狗 + 周期校准。返回即连接已断。 */
+    /** 连接在途巡检：看门狗 + 周期校准（帧分发已在 runLoop 的 collector 上）。返回即连接已断。 */
     private suspend fun consumeUntilClosed() {
-        val collector = scope.launch {
-            ws.frames().collect { onFrame(it) }
-        }
-        try {
-            while (currentCoroutineContext().isActive) {
-                delay(5_000)
-                if (ws.closed.value != null) break
-                val now = nowMs()
-                val last = lastFrameAt
-                if (last != 0L && now - last > watchdogTimeoutMs) {
-                    // 90s 无帧：连接判死（中间件静默丢弃/对端假活），主动关闭走重连
-                    ws.close()
-                    break
-                }
-                if (last != 0L && now - last >= calibrationIntervalMs) {
-                    runCatching { engine.catchUp() } // R4 周期校准（不阻塞帧消费循环节奏）
-                }
+        while (currentCoroutineContext().isActive) {
+            delay(5_000)
+            if (ws.closed.value != null) break
+            val now = nowMs()
+            val last = lastFrameAt
+            if (last != 0L && now - last > watchdogTimeoutMs) {
+                // 90s 无帧：连接判死（中间件静默丢弃/对端假活），主动关闭走重连
+                ws.close()
+                break
             }
-        } finally {
-            collector.cancel()
+            if (last != 0L && now - last >= calibrationIntervalMs) {
+                runCatching { engine.catchUp() } // R4 周期校准（不阻塞帧消费循环节奏）
+            }
         }
     }
 

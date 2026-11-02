@@ -14,6 +14,12 @@ dependencies {
     implementation(compose.desktop.currentOs)
     // M25Probe 自建 in-memory 缓存库用
     implementation(libs.sqldelight.sqlite.driver)
+    // hub 验收通道（hub-login/hub-sync/hub-wsraw）直接组装 hub 客户端栈——shared 用
+    // implementation 暴露，传递依赖不透出，这里自取同版本
+    implementation(libs.ktor.client.core)
+    implementation(libs.ktor.client.cio)
+    implementation(libs.ktor.client.websockets)
+    implementation(libs.kotlinx.serialization.json)
 }
 
 compose.desktop.application {

@@ -6,6 +6,12 @@ import dev.sharpxia.agentreins.hub.HubConfig
 import dev.sharpxia.agentreins.hub.HubException
 import dev.sharpxia.agentreins.hub.auth.CredentialStore
 import dev.sharpxia.agentreins.hub.auth.HubAuthStack
+import io.ktor.client.plugins.websocket.webSocketSession
+import io.ktor.client.request.header
+import io.ktor.http.HttpHeaders
+import io.ktor.http.takeFrom
+import io.ktor.websocket.Frame
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 
 /**
@@ -19,6 +25,14 @@ import kotlinx.coroutines.runBlocking
 fun main(args: Array<String>) {
     if (args.firstOrNull() == "hub-login") {
         hubLoginProbe()
+        return
+    }
+    if (args.firstOrNull() == "hub-sync") {
+        hubSyncProbe()
+        return
+    }
+    if (args.firstOrNull() == "hub-wsraw") {
+        hubWsRawProbe()
         return
     }
     val devUrl = System.getenv("AGENTREINS_DEV_URL")
@@ -99,6 +113,134 @@ private fun hubLoginProbe() = runBlocking {
     println("   ${(e4 as? HubException)?.let { "http=${it.httpStatus} ${it.payload.code}" } ?: (e4?.message ?: "成功响应（异常）")}")
 
     println("PASS: Hub 认证两步流 + AUTH-006 + 设备绑定 + 静默恢复轮换 + 撤销 全链路通过")
+}
+
+/**
+ * Hub 同步链路验收通道（方案 §6-P2 验收判据）。HUB_BASE / HUB_USER / HUB_PASS 环境变量，不落代码。
+ * 手动编排（不经 SyncScheduler 自动循环）以精确断言每一步：bootstrap → WSS resume/ready →
+ * HTTP 增量追平 → 断连重连补拉 → 老游标 410 → 快照重建（发送队列保留）。
+ */
+private fun hubSyncProbe() = kotlinx.coroutines.runBlocking {
+    val base = System.getenv("HUB_BASE") ?: error("HUB_BASE 未设（如 http://<HUB-IP>:8080/v1）")
+    val user = System.getenv("HUB_USER") ?: error("HUB_USER 未设")
+    val pass = System.getenv("HUB_PASS") ?: error("HUB_PASS 未设")
+    val mem = object : dev.sharpxia.agentreins.hub.auth.CredentialStore {
+        var v: String? = null
+        override suspend fun saveRefreshToken(token: String) { v = token }
+        override suspend fun loadRefreshToken(): String? = v
+        override suspend fun clear() { v = null }
+    }
+    val ws = base.replaceFirst("https://", "wss://").replaceFirst("http://", "ws://") + "/ws"
+    val config = HubConfig(base, ws)
+    val stack = dev.sharpxia.agentreins.hub.auth.HubAuthStack(config, credentialStore = mem)
+
+    println("① 认证（restore 优先，退登录两步流）…")
+    if (!stack.auth.restoreFromStoredRefreshToken()) {
+        stack.auth.login(user, pass, null)
+        stack.auth.registerCurrentDevice("AgentReins P2 sync probe", "desktop", null, "p2-sync-probe")
+    }
+
+    val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default + kotlinx.coroutines.SupervisorJob())
+    val driver = app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver(app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver.IN_MEMORY)
+    dev.sharpxia.agentreins.hubdb.HubDatabase.Schema.create(driver)
+    val db = dev.sharpxia.agentreins.hubdb.HubDatabase(driver)
+    val projector = dev.sharpxia.agentreins.hub.projection.DefaultEventProjector(db)
+    val cursors = dev.sharpxia.agentreins.hub.sync.DbEventCursorStore(db)
+    val engine = dev.sharpxia.agentreins.hub.sync.DefaultSyncEngine(stack.api, stack.auth, projector, cursors)
+    val wsClient = dev.sharpxia.agentreins.hub.DefaultHubWsClient(config, { stack.auth.currentAccessToken() }, scope)
+
+    println("② bootstrap：拉快照 → 覆盖投影 → cursor = snapshotWatermark …")
+    val snap = engine.bootstrap()
+    println("   ok watermark=${snap.snapshotWatermark} conversations=${snap.conversations.size} messages=${snap.messages.values.sumOf { it.size }} gateways=${snap.gateways.size}")
+    check(cursors.eventCursor() == snap.snapshotWatermark) { "bootstrap 后 cursor ≠ snapshotWatermark" }
+
+    // 帧收集必须先于 connect（SharedFlow 订阅间隙会丢 ready/error 帧）
+    suspend fun connectAwait(cursor: String, want: kotlin.reflect.KClass<out dev.sharpxia.agentreins.hub.HubServerFrame>): dev.sharpxia.agentreins.hub.HubServerFrame {
+        val gate = kotlinx.coroutines.CompletableDeferred<dev.sharpxia.agentreins.hub.HubServerFrame>()
+        val collector = scope.launch {
+            wsClient.frames().collect { f ->
+                println("   [ws] ${f::class.simpleName}: $f")
+                if (f::class == want && !gate.isCompleted) gate.complete(f)
+            }
+        }
+        try {
+            wsClient.connect(cursor)
+            return kotlinx.coroutines.withTimeout(15_000) { gate.await() }
+        } finally {
+            collector.cancel()
+        }
+    }
+
+    println("③ WSS 建连 + sync.resume → sync.ready（先连后补 R3）…")
+    val ready = connectAwait(cursors.eventCursor()!!, dev.sharpxia.agentreins.hub.HubServerFrame.Ready::class) as dev.sharpxia.agentreins.hub.HubServerFrame.Ready
+    println("   ok watermark=${ready.watermark} pollIntervalMs=${ready.pollIntervalMs}")
+
+    println("④ HTTP 增量追平 …")
+    val caughtUp = engine.catchUp()
+    println("   ok caughtUp=$caughtUp cursor=${cursors.eventCursor()}")
+
+    println("⑤ 断连重连：close → connect → ready → catchUp（INV-5 不重放 + 幂等去重）…")
+    wsClient.close()
+    connectAwait(cursors.eventCursor()!!, dev.sharpxia.agentreins.hub.HubServerFrame.Ready::class)
+    engine.catchUp()
+    println("   ok cursor=${cursors.eventCursor()}")
+
+    println("⑥ 老游标 410（HUB-SYNC-001）→ error 帧 → 快照重建（发送队列保留）…")
+    db.hubQueries.insertCommand(
+        idempotencyKey = "probe-queue-key", commandId = null, conversationId = "conv", sessionKey = "agent:main:main",
+        runId = null, approvalId = null, type = "message.send", payloadJson = "{}",
+        state = "PENDING_LOCAL", errorCode = null, createdAt = "t", updatedAt = "t",
+    )
+    cursors.updateEventCursor("01AAAAAAAAAAAAAAAAAAAAAAAA") // 远早于 90 天保留窗口的 ULID
+    wsClient.close()
+    val err = connectAwait("01AAAAAAAAAAAAAAAAAAAAAAAA", dev.sharpxia.agentreins.hub.HubServerFrame.Error::class) as dev.sharpxia.agentreins.hub.HubServerFrame.Error
+    check(err.code == "HUB-SYNC-001") { "期待 HUB-SYNC-001，实得 ${err.code}" }
+    println("   ok ${err.code}（${err.message.take(60)}）")
+    engine.rebuild()
+    check(cursors.eventCursor() != "01AAAAAAAAAAAAAAAAAAAAAAAA") { "重建后 cursor 未恢复" }
+    check(db.hubQueries.selectNonTerminalCommands().executeAsList().any { it.idempotencyKey == "probe-queue-key" }) { "重建丢了发送队列" }
+    println("   ok 重建后 cursor=${cursors.eventCursor()}，发送队列保留=${db.hubQueries.selectNonTerminalCommands().executeAsList().size} 条")
+
+    wsClient.close()
+    println("PASS: Hub 同步链路（快照→resume→追平→重连→410 重建+队列保留）全通")
+}
+
+/** WSS 裸帧调试（P2 排障通道）：升级 → 发 resume → 打印全部原始帧直至超时。 */
+private fun hubWsRawProbe() = kotlinx.coroutines.runBlocking {
+    val base = System.getenv("HUB_BASE") ?: error("HUB_BASE 未设")
+    val user = System.getenv("HUB_USER") ?: error("HUB_USER 未设")
+    val pass = System.getenv("HUB_PASS") ?: error("HUB_PASS 未设")
+    val ws = base.replaceFirst("https://", "wss://").replaceFirst("http://", "ws://") + "/ws"
+    val config = HubConfig(base, ws)
+    val mem = object : dev.sharpxia.agentreins.hub.auth.CredentialStore {
+        var v: String? = null
+        override suspend fun saveRefreshToken(token: String) { v = token }
+        override suspend fun loadRefreshToken(): String? = v
+        override suspend fun clear() { v = null }
+    }
+    val stack = dev.sharpxia.agentreins.hub.auth.HubAuthStack(config, credentialStore = mem)
+    if (!stack.auth.restoreFromStoredRefreshToken()) {
+        stack.auth.login(user, pass, null)
+        stack.auth.registerCurrentDevice("AgentReins P2 wsraw", "desktop", null, "p2-wsraw")
+    }
+    val http = dev.sharpxia.agentreins.hub.hubHttpClient(dev.sharpxia.agentreins.hub.HubJson).config {
+        install(io.ktor.client.plugins.websocket.WebSockets)
+    }
+    val session = http.webSocketSession {
+        url { takeFrom(ws) }
+        header(HttpHeaders.Authorization, "Bearer ${stack.auth.currentAccessToken()}")
+    }
+    println("UPGRADED: ${session.call.response.status}")
+    session.send(Frame.Text("""{"type":"sync.resume","protocolVersion":1,"cursor":"01AAAAAAAAAAAAAAAAAAAAAAAA"}"""))
+    println("RESUME SENT（老游标，期待 error 帧 HUB-SYNC-001 或 ready）")
+    kotlinx.coroutines.withTimeout(12_000) {
+        for (f in session.incoming) {
+            when (f) {
+                is Frame.Text -> println("TEXT: ${f.data.decodeToString()}")
+                else -> println("FRAME: ${f::class.simpleName}")
+            }
+        }
+    }
 }
 
 /** 沙箱/CI 无屏幕录制权限时失败并写 <path>.status.txt（stdout 可能被缓冲，用文件做真值）。 */

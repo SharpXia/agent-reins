@@ -75,6 +75,7 @@ kotlin {
         val desktopTest by getting {
             dependencies {
                 implementation(libs.sqldelight.sqlite.driver)
+                implementation(libs.kotlinx.coroutines.test)
             }
         }
     }

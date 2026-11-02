@@ -193,6 +193,13 @@ private fun hubSyncProbe() = kotlinx.coroutines.runBlocking {
     println("   ok 重建后 cursor=${cursors.eventCursor()}，发送队列保留=${db.hubQueries.selectNonTerminalCommands().executeAsList().size} 条")
 
     wsClient.close()
+
+    // 自清理（与 hub-login 通道同纪律）：撤销本次注册的测试设备，不在 Hub 留孤儿设备
+    stack.auth.currentDeviceId?.let { id ->
+        runCatching { stack.auth.withBearer { stack.api.deleteDevice(id) } }
+            .onSuccess { println("⑦ 清理：测试设备已撤销 $id") }
+            .onFailure { println("⑦ 清理失败（请手动撤销 $id）：${it.message}") }
+    }
     println("PASS: Hub 同步链路（快照→resume→追平→重连→410 重建+队列保留）全通")
 }
 

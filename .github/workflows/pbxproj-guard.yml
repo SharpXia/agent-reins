@@ -27,3 +27,45 @@ jobs:
             exit 1
           fi
           echo "OK：pbxproj 无写死的 DEVELOPMENT_TEAM"
+
+  # 守卫二（Hub 化方案 §7-R11）：Release 配置指向的 Info.plist 不许带 ATS 例外。
+  # 背景：开发期明文连内网 Hub 的 NSAllowsArbitraryLoads 只许进 Info-Debug.plist
+  #（pbxproj Debug 块 7555FFA6 指它、Release 块 7555FFA7 指 Info.plist）。
+  # 守卫从 pbxproj 解析 Release 块的 INFOPLIST_FILE，再用 plistlib 检查该文件：
+  # 出现 NSAppTransportSecurity 下任一放宽键即报红；解析不到 Release 的 INFOPLIST_FILE 也报红
+  #（防止守卫因工程结构变化而静默失效）。
+  release-plist-no-ats-exception:
+    name: Release Info.plist 无 ATS 例外
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse pbxproj Release INFOPLIST_FILE and inspect plist
+        run: |
+          python3 - <<'PY'
+          import pathlib, plistlib, re, sys
+          pbx = pathlib.Path("iosApp/iosApp.xcodeproj/project.pbxproj").read_text()
+          blocks = re.findall(r"\w+ /\* Release \*/ = \{(.*?)\n\t\t\};", pbx, flags=re.S)
+          files = []
+          for b in blocks:
+              m = re.search(r'INFOPLIST_FILE = "?([^";]+)"?;', b)
+              if m:
+                  files.append(m.group(1))
+          if not files:
+              print("::error::pbxproj 里没有解析到 Release 配置的 INFOPLIST_FILE——守卫失效，请检查工程结构")
+              sys.exit(1)
+          forbidden = {"NSExceptionDomains", "NSAllowsArbitraryLoads", "NSAllowsLocalNetworking",
+                       "NSAllowsArbitraryLoadsInWebContent", "NSAllowsArbitraryLoadsForMedia"}
+          bad = False
+          for rel in files:
+              path = pathlib.Path("iosApp") / rel
+              with path.open("rb") as f:
+                  plist = plistlib.load(f)
+              ats = plist.get("NSAppTransportSecurity") or {}
+              hit = sorted(forbidden & set(ats.keys()))
+              if hit:
+                  print(f"::error file={path}::Release plist 带 ATS 例外 {hit}——明文例外只许进 Info-Debug.plist；切 https 后 Debug 例外也应整体删除")
+                  bad = True
+              else:
+                  print(f"OK：{path} 无 ATS 例外")
+          sys.exit(1 if bad else 0)
+          PY

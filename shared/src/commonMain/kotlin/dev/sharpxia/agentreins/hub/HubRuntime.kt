@@ -50,14 +50,6 @@ class HubRuntime(
     var baseUrl: String? = null
         private set
 
-    /**
-     * 最近一次登录时的 AUTH-006 契约预检判定（验收取证用，不阻断登录）：
-     * 期望 = 未绑定的会话 Token 调 GET /v1/devices 得 403 HUB-AUTH-006（hub-api-v1.yaml:110-111 ADR-15）。
-     */
-    @Volatile
-    var auth006Verdict: String? = null
-        private set
-
     /** 已组装的认证栈（登录/恢复成功后非空），供上层直接调 api/auth。 */
     val authStack: HubAuthStack? get() = stack
 
@@ -84,8 +76,9 @@ class HubRuntime(
     }
 
     /**
-     * 登录两步流：login（会话 Token）→ AUTH-006 预检（记录判定）→ registerDevice（绑定 + refreshToken 落安全存储）→ LoggedIn。
+     * 登录两步流：login（会话 Token）→ registerDevice（绑定 + refreshToken 落安全存储）→ LoggedIn。
      * 失败经 [state] 呈现 NeedsLogin(reason)，不抛出。
+     * （AUTH-006 契约预检已随 P4 调试基建退役；该判定由 desktopApp `hub-login` 验收通道承担。）
      */
     fun login(baseUrl: String, username: String, password: String, deviceName: String) {
         this.baseUrl = baseUrl
@@ -95,7 +88,6 @@ class HubRuntime(
                 mutex.withLock {
                     val s = buildStack(baseUrl)
                     val ok = s.auth.login(username = username, password = password, mfaCode = null)
-                    auth006Verdict = probeAuth006(s)
                     val reg = s.auth.registerCurrentDevice(
                         displayName = deviceName.ifBlank { "AgentReins " + hubDevicePlatform() },
                         platform = hubDevicePlatform(),
@@ -124,21 +116,6 @@ class HubRuntime(
                 stack = null
                 _state.value = HubAuthState.NeedsLogin(reason = null)
             }
-        }
-    }
-
-    /**
-     * AUTH-006 契约预检（登录后、注册前的判定记录，不阻断登录流）。实测服务端：
-     * devices 清单挂 bearer 放行，AUTH-006 只拦设备必需端点（gateways/conversations/sync/命令类），
-     * 故预检端点取 GET /v1/gateways。
-     */
-    private suspend fun probeAuth006(s: HubAuthStack): String {
-        val error = runCatching { s.api.gateways() }.exceptionOrNull()
-        return when {
-            error == null -> "unexpected: 未绑定会话 Token 竟能调 GET /v1/gateways（期待 403 HUB-AUTH-006）"
-            error is HubException && error.payload.code == "HUB-AUTH-006" ->
-                "ok: 403 HUB-AUTH-006 (x-request-id=${error.requestId})"
-            else -> "unexpected: ${error.message}"
         }
     }
 

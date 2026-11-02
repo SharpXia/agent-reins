@@ -15,7 +15,7 @@ actual fun platformCredentialStore(): CredentialStore = KeystoreCredentialStore(
 
 /**
  * Android 凭据存储：AES-256-GCM 密钥存 AndroidKeyStore（不可导出），密文落应用私有目录文件。
- * 沿用 openclaw 包 HOME 兜底目录的技术债模式（v1.1 换 context.filesDir 时一并迁移路径）。
+ * 目录取 HOME 兜底（无 Context 注入的技术债模式；v1.1 换 context.filesDir 时一并迁移路径）。
  */
 private class KeystoreCredentialStore : CredentialStore {
     private val alias = "agentreins.hub.refresh"

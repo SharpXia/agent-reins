@@ -426,8 +426,18 @@ private enum LiteMarkdownCache {
     }
 }
 
-/// ChatView 进页预热任务的入口（保持旧函数名，调用点不动）。
+/// 会话页进页预热任务的入口（Hub 会话页接入渲染引擎时调用）。
 @MainActor
 func prewarmMarkdown(_ contents: [String]) async {
     await LiteMarkdownCache.prewarm(contents)
+}
+
+/// 列表项起始判定（`- `/`* `/`+ ` 或 `1. `/`1) `）：快路径「无 Markdown 语法的短消息」判断用。
+/// 原随长消息切片逻辑同居 ChatRows.swift，P4 随旧会话页退役后收归本文件。
+func isListItemStart(_ line: Substring) -> Bool {
+    if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") { return true }
+    let digits = line.prefix { $0.isASCII && $0.isNumber }
+    guard !digits.isEmpty, digits.count <= 9 else { return false }
+    let rest = line.dropFirst(digits.count)
+    return rest.hasPrefix(". ") || rest.hasPrefix(") ")
 }

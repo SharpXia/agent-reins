@@ -28,14 +28,10 @@
 	<dict>
 		<!-- Debug 专用：开发期明文连 Tailscale 内网 Hub。注意不可与 NSAllowsLocalNetworking 共存——
 		     Apple 文档：其它 ATS 键存在时 NSAllowsArbitraryLoads 被忽略（2026-11-01 模拟器实测 -1022 即此因）。
-		     Release 用 Info.plist（无此例外），P4 切 https 后本文件整体删除。 -->
+		     Release 用 Info.plist（无 ATS 例外）；Hub 切 https 后本文件整体删除、pbxproj Debug 配置改回 Info.plist。 -->
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
-	<key>NSCameraUsageDescription</key>
-	<string>扫描 openclaw qr 生成的配对二维码，免去手动输入网关地址与批准步骤。</string>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>连接你自建的 OpenClaw 网关以查看与控制 Agent（局域网 / Tailscale）。</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

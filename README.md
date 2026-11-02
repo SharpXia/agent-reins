@@ -2,11 +2,11 @@
 
 **Hold the reins of your agents —— 看得见，拉得住。**
 
-自建 AI Agent 的原生客户端（iOS + Desktop，一套 Kotlin 代码）：取代用 Telegram/飞书当 Agent 入口的方式，把 channel 通信升级为控制台。
+自建 AI Agent 的原生移动端控制台：取代用 Telegram/飞书当 Agent 入口的方式，把 channel 通信升级为控制台。
+客户端只连自建的 **AgentReins Hub**（服务端项目 AgentReinService：REST `/v1` + WSS `/v1/ws`，契约 v1.0.0），
+由 Hub 统一对接各家 Agent 网关——客户端不再直连任何网关协议。
 
-[English summary] <!-- TODO: W4 补 3 行英文摘要 -->
-
-![overview](docs/images/overview.gif) <!-- TODO: M3 录制：连接网关 → 对话 → 工具调用卡片 → 审批卡片 -->
+[English summary] <!-- TODO: 发布时补 3 行英文摘要 -->
 
 ## 为什么需要它
 
@@ -16,36 +16,32 @@
 - 敏感操作要批准——只能回一条消息碰运气
 - 多会话、历史、网关状态——IM 里没法管理
 
-AgentReins 直连 Agent 网关，把**每次工具调用变成可展开的卡片，每次审批变成原生确认框**。理念和我的另一个项目 [git-lens-web](https://github.com/SharpXia/git-lens-web) 一脉相承：先展示事实，再执行操作。
+AgentReins 把**每次工具调用变成可展开的卡片，每次审批变成原生确认框**。理念和我的另一个项目 [git-lens-web](https://github.com/SharpXia/git-lens-web) 一脉相承：先展示事实，再执行操作。
 
-## 功能（v1.0 规划）
+## 架构
 
-- **对话**：会话列表 + 流式回复
-- **工具调用卡片**：名称 / 参数 / 结果 / 耗时，JSON 可展开
-- **审批卡片**：敏感操作原生弹卡，批准 / 拒绝
-- **状态面板**：网关 status / channels / models
-- **双端**：iPhone 与 Desktop 出自同一套 Kotlin 代码（KMP + Compose Multiplatform）；Android 保持同源构建，v1.1 出包
+- `shared/`（Kotlin Multiplatform）：Hub 客户端数据层——账号与设备绑定（refreshToken 落平台安全存储）、
+  快照 + 事件流同步引擎（SQLDelight 投影库、游标水位裁决、410 重建）、幂等命令队列（乐观 UI、四级回执纪律）。
+- `iosApp/`（SwiftUI，iOS 18+，零第三方依赖）：当前主端。经 `composeApp` 导出的 `AgentBridge` 消费 shared，
+  自研轻量 Markdown 渲染器。
+- `composeApp/` / `androidApp/` / `desktopApp/`：Android 与 Desktop 为占位壳（Hub 界面待基于 shared 另起实现）；
+  Desktop 另带三条 Hub 链路验收探针（`hub-login` / `hub-sync` / `hub-wsraw`，凭据走环境变量）。
 
-## 多 Agent 接入
+## 功能（当前）
 
-OpenClaw 是第一个也是最深的一个接入（网关 WebSocket 协议：sessions / approvals / status / channels）；架构上预留 `AgentClient` 适配层，v1.1 计划接入 OpenAI 兼容端点与自建任务编排引擎。
+- **登录与设备绑定**：用户名口令两步流，设备注册、静默恢复、设备管理（撤销 / 登出即撤销本机并清全部本地数据）
+- **会话**：会话列表（未读 / 预览 / 对账中）+ 会话页（流式行、乐观发送态、自动已读）
+- 规划中：工具调用卡片、审批卡片、agent 头像与定制（渲染资产已就位，待 Hub 事件面补齐）
 
 ## 技术栈
 
-Kotlin Multiplatform · Compose Multiplatform · Ktor（WebSocket / HTTP）· kotlinx.serialization · Material 3
+Kotlin Multiplatform · SwiftUI · Ktor（HTTP / WebSocket）· SQLDelight · kotlinx.serialization
 
 ## 快速上手
 
-<!-- TODO: W4 release 时补 -->
-1. 下载 [最新 release](../../releases)（Android APK / Desktop 包）
-2. 填入你的 Agent 网关地址与 API Key
-3. 开始对话，点击任意工具调用卡片查看详情
-
-## 路线图
-
-- [ ] v1.0 —— 对话 / 工具调用卡片 / 审批卡片 / 状态面板 / 双端（iPhone + Desktop）
-- [ ] v1.1 —— Android APK 发布、自建编排引擎工作流视图、OpenAI 兼容直连
-- [ ] v1.x —— 会话检索与归档、多后端配置
+1. 部署 AgentReins Hub（服务端项目 AgentReinService 的 `deploy/`：Docker Compose + Caddy 443 单入口）
+2. iOS：TestFlight 内测包；登录页填入 Hub 地址与账号
+3. 开发期联调约定见 `docs/plans/hub-migration-plan.md`（仅本机）
 
 ## 许可
 

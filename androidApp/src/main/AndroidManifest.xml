@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- M1 连接 OpenClaw 网关（局域网 / Tailscale） -->
+    <!-- 连接自建 AgentReins Hub（REST/WSS；release 清单不开明文，开发期明文走 debug 变体清单） -->
     <uses-permission android:name="android.permission.INTERNET" />
 
     <application

@@ -43,7 +43,7 @@ class HubSyncFixtureTest {
         assertTrue(ready is HubServerFrame.Ready && ready.watermark == "01JWM000000000000000000000" && ready.pollIntervalMs == 30000L)
         val event = ws.decodeFrame(
             """{"type":"event","event":{"id":"01JEV000000000000000000000","seq":7,"type":"message.delta",""" +
-                """"gatewayId":"01JGW000000000000000000000","sessionKey":"agent:main:main","ts":"2026-11-02T08:00:00.000Z",""" +
+                """"gatewayId":"01JGW000000000000000000000","sessionKey":"sk-main","ts":"2026-11-02T08:00:00.000Z",""" +
                 """"data":{"messageId":"01JMSG00000000000000000000","deltaText":"hi"}}}""",
         )
         assertTrue(event is HubServerFrame.Event && event.event.type == "message.delta" && event.event.seq == 7L)
@@ -147,7 +147,7 @@ class HubSyncFixtureTest {
         assertEquals(0L, db.hubQueries.selectReadCursor(GW, SK).executeAsOneOrNull())
 
         // session.created：未知会话占位行（conversationId NULL、reconciling=1）
-        val newSk = "agent:main:new-session"
+        val newSk = "sk-new-session"
         p.applyEvent(ev(nextId(), EventEnvelope.SESSION_CREATED, sk = newSk, data = buildJsonObject {
             put("sessionKey", newSk); put("agentId", "main"); put("label", "new"); put("hasActiveRun", false)
         }))
@@ -271,7 +271,7 @@ class HubSyncFixtureTest {
 
     companion object {
         const val GW = "01JGW000000000000000000000"
-        const val SK = "agent:main:main"
+        const val SK = "sk-main"
         const val WM = "01JAAA0000000000000000000000"
         const val T0 = "2026-11-02T08:00:00.000Z"
     }

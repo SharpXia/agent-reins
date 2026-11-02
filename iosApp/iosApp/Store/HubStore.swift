@@ -2,8 +2,9 @@ import SwiftUI
 import UIKit
 import composeApp
 
-/// Hub 账号态（P1）：订阅 AgentBridge.hubObserve；baseUrl 为非敏感配置存 UserDefaults，
-/// 口令只经登录请求体、refreshToken 由 KMP 侧落 Keychain，Swift 层不持有任何凭据。
+/// Hub 账号态与数据面（P4 定稿）：自持 AgentBridge（shared/hub 的唯一 Swift 入口），订阅
+/// hubObserve；baseUrl 为非敏感配置存 UserDefaults，口令只经登录请求体、refreshToken 由
+/// KMP 侧落 Keychain，Swift 层不持有任何凭据。
 @Observable
 final class HubStore {
     static let shared = HubStore()
@@ -16,8 +17,6 @@ final class HubStore {
     private(set) var deviceId: String?
     /// 启动恢复在途（Keychain 有凭据时静默刷新），用于首屏显示进度而非登录表单。
     private(set) var isRestoring = false
-    /// 最近一次登录的 AUTH-006 判定快照（进 loggedIn 时拉取；状态条取证用）。
-    private(set) var auth006VerdictSnapshot: String?
 
     // ---------- P3：投影库数据面（KMP Flow → Swift 回调） ----------
 
@@ -48,7 +47,7 @@ final class HubStore {
         selected = nil
         messages = []
         chatPush = false
-        hubMsgWatchCancel()
+        bridge.hubStopWatchingMessages()
     }
 
     /// Dev 探针直达会话（Bool push 通道，见 chatPush 注释）。
@@ -60,8 +59,6 @@ final class HubStore {
             self?.messages = list
         }
     }
-
-    private func hubMsgWatchCancel() { /* 桥侧换订阅/登出时取消；此句柄 P4 收紧 */ }
 
     func send(_ text: String) {
         guard let c = selected else { return }
@@ -88,10 +85,9 @@ final class HubStore {
     }
 
     private static let baseUrlKey = "hub.baseUrl"
-    private let bridge: AgentBridge
+    private let bridge = AgentBridge()
 
     private init() {
-        bridge = AppStore.shared.bridge
         baseUrl = UserDefaults.standard.string(forKey: Self.baseUrlKey) ?? ""
         bridge.hubObserve { [weak self] kind, message, user, deviceId in
             guard let self else { return }
@@ -100,7 +96,6 @@ final class HubStore {
             self.userDisplay = user
             self.deviceId = deviceId
             if kind != "working" { self.isRestoring = false }
-            if kind == "loggedIn" { self.auth006VerdictSnapshot = self.auth006Verdict }
         }
         if !baseUrl.isEmpty {
             isRestoring = true
@@ -145,9 +140,14 @@ final class HubStore {
         )
     }
 
-    /// 登出 = 撤销当前设备（服务端 Token 即时失效）+ 清 Keychain。
-    func logout() { bridge.hubLogout() }
-
-    /// 最近一次登录的 AUTH-006 契约预检判定（验收取证）。
-    var auth006Verdict: String? { bridge.hubAuth006Verdict() }
+    /// 登出闭环（方案 §6-P4 验收⑤）= 撤销当前设备（服务端 Token 即时失效）+ 清 Keychain
+    /// + 清全部本地投影数据（桥侧七表清空）+ 清内存态。重登后从空库 bootstrap。
+    func logout() {
+        selected = nil
+        messages = []
+        conversations = []
+        devicesCache = nil
+        chatPush = false
+        bridge.hubLogout()
+    }
 }

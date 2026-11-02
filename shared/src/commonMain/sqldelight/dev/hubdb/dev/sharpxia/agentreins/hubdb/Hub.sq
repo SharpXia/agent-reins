@@ -114,6 +114,18 @@ DELETE FROM hubMessages;
 clearReadCursors:
 DELETE FROM hubReadCursors;
 
+-- 登出全清（P4 验收⑤：登出 = 撤销当前设备 + 清全部本地数据）。与快照重建不同，
+-- 此处连 O-01 最小集（命令队列/游标）与审批累积态一并清：设备已撤销，本地不应残留
+-- 任何账号数据；重登后从空库 bootstrap。
+clearCommands:
+DELETE FROM hubCommands;
+
+clearApprovals:
+DELETE FROM hubApprovals;
+
+clearSyncState:
+DELETE FROM hubSyncState;
+
 selectGateways:
 SELECT * FROM hubGateways ORDER BY name;
 

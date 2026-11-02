@@ -92,6 +92,24 @@ class DefaultHubClient(
         scheduler = null
     }
 
+    /**
+     * 清全部本地数据（登出闭环，方案 §6-P4 验收⑤）：七表事务内清空，含 O-01 最小集
+     * （命令队列/游标）与审批累积态——设备已在服务端撤销，本地不残留任何账号数据；
+     * 重登后从空库 bootstrap。须在 [stop] 之后调用（同步循环已停，无在途投影写入）。
+     */
+    fun wipeLocalData() {
+        val db = db ?: return
+        db.hubQueries.transaction {
+            db.hubQueries.clearGateways()
+            db.hubQueries.clearConversations()
+            db.hubQueries.clearMessages()
+            db.hubQueries.clearReadCursors()
+            db.hubQueries.clearCommands()
+            db.hubQueries.clearApprovals()
+            db.hubQueries.clearSyncState()
+        }
+    }
+
     // ── UI 查询（投影库 Flow；写路径由 projector/commands 承担） ──
 
     fun observeConversations(): Flow<List<UiConversation>> {

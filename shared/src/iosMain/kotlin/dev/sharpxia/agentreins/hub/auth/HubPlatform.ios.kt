@@ -48,7 +48,7 @@ actual fun platformCredentialStore(): CredentialStore = KeychainCredentialStore(
  * iOS 凭据存储：Keychain Generic Password（service=dev.sharpxia.agentreins.hub, account=refreshToken），
  * 可访问性 AfterFirstUnlockThisDeviceOnly（后台刷新可用、不随备份迁移）。
  * 纯 CoreFoundation 构造查询字典与数据（CFDataCreate/CFStringCreateWithCString），
- * 终结 OpenClaw 时代 Documents 明文文件遗留（Platform.ios.kt 注释里的 v1.0 规格项，此处兑现）。
+ * 凭据不再以明文文件落 Documents（直连时代的 connection.json 模式已随 P4 退役）。
  */
 @OptIn(ExperimentalForeignApi::class)
 private class KeychainCredentialStore : CredentialStore {

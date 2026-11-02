@@ -15,12 +15,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 
 /**
- * 桌面壳。默认空模型（用户手动连接）。
- * Dev 直连（桌面端同界面联调取证用）：设 AGENTREINS_DEV_URL（+可选 AGENTREINS_DEV_KEY、
- * AGENTREINS_DEV_SESSION）启动即连接并自动打开指定会话；AGENTREINS_DEV_SHOT=<png路径>
- * 则 20s 后 Robot 自截全屏。凭据与路径全部来自环境变量，不落代码。
+ * 桌面壳（Hub 化 P4）：默认开占位窗（Desktop 的 Hub 界面待基于 shared/hub 另起实现）。
  *
- * `hub-login` 参数：不开窗口，跑 Hub 认证链路验收通道（P1c）后退出，见 [hubLoginProbe]。
+ * 三条 Hub 验收通道不开窗口、跑完即退出（HUB_BASE / HUB_USER / HUB_PASS 来自环境变量，不落代码）：
+ * - `hub-login`：认证两步流 + AUTH-006 + 设备绑定 + 静默恢复轮换 + 撤销，见 [hubLoginProbe]
+ * - `hub-sync`：快照 → resume → 追平 → 重连 → 410 重建 + 队列保留，见 [hubSyncProbe]
+ * - `hub-wsraw`：WSS 裸帧调试，见 [hubWsRawProbe]
  */
 fun main(args: Array<String>) {
     if (args.firstOrNull() == "hub-login") {
@@ -35,21 +35,12 @@ fun main(args: Array<String>) {
         hubWsRawProbe()
         return
     }
-    val devUrl = System.getenv("AGENTREINS_DEV_URL")
-    val devKey = System.getenv("AGENTREINS_DEV_KEY")
-    val prebuilt = devUrl?.let {
-        AppModel(initialUrl = it, initialApiKey = devKey.orEmpty()).apply {
-            devAutoConnect = true
-            devAutoSelectKey = System.getenv("AGENTREINS_DEV_SESSION") ?: "agent:main:main"
-        }
-    }
-    devScreenshot() // application{} 阻塞至退出，取证线程必须先起
     application {
         Window(
             title = "AgentReins",
             onCloseRequest = ::exitApplication,
         ) {
-            App(prebuilt)
+            App()
         }
     }
 }
@@ -187,7 +178,7 @@ private fun hubSyncProbe() = kotlinx.coroutines.runBlocking {
 
     println("⑥ 老游标 410（HUB-SYNC-001）→ error 帧 → 快照重建（发送队列保留）…")
     db.hubQueries.insertCommand(
-        idempotencyKey = "probe-queue-key", commandId = null, conversationId = "conv", sessionKey = "agent:main:main",
+        idempotencyKey = "probe-queue-key", commandId = null, conversationId = "conv", sessionKey = "probe-session",
         runId = null, approvalId = null, type = "message.send", payloadJson = "{}",
         state = "PENDING_LOCAL", errorCode = null, createdAt = "t", updatedAt = "t",
     )
@@ -241,24 +232,4 @@ private fun hubWsRawProbe() = kotlinx.coroutines.runBlocking {
             }
         }
     }
-}
-
-/** 沙箱/CI 无屏幕录制权限时失败并写 <path>.status.txt（stdout 可能被缓冲，用文件做真值）。 */
-private fun devScreenshot() {
-    val path = System.getenv("AGENTREINS_DEV_SHOT") ?: return
-    Thread {
-        Thread.sleep(20_000)
-        try {
-            val size = java.awt.Toolkit.getDefaultToolkit().screenSize
-            val img = java.awt.Robot().createScreenCapture(java.awt.Rectangle(size))
-            val ok = javax.imageio.ImageIO.write(img, "png", java.io.File(path))
-            java.io.File("$path.status.txt").writeText(
-                if (ok) "written ${img.width}x${img.height}" else "ImageIO.write returned false",
-            )
-        } catch (t: Throwable) {
-            runCatching {
-                java.io.File("$path.status.txt").writeText("failed: ${t::class.simpleName}: ${t.message}")
-            }
-        }
-    }.apply { isDaemon = true }.start()
 }

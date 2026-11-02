@@ -21,10 +21,6 @@ kotlin {
     iosSimulatorArm64()
 
     sourceSets {
-        // 多 database 时插件只为首个 database 自动挂载生成源码（2.4 实测），HubDatabase 显式挂
-        val commonMain by getting {
-            kotlin.srcDir("build/generated/sqldelight/code/HubDatabase/commonMain")
-        }
         commonMain.dependencies {
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kotlinx.serialization.json)
@@ -84,17 +80,10 @@ kotlin {
     }
 }
 
-// M2.5 数据基座（ADR #5）：单库四表。缓存是加速层不是真相源（chat.history / sessions.list
-// 始终权威），schema 独立版本号见 CacheStore——破坏性变更 drop 重建，随时可整库重建。
-// Hub 投影库（hub 化 P2）：独立整库（方案 §7-R3 不迁旧数据），P4 与 AgentReinsDatabase 一并退役。
-// 多 database 必须用 srcDir 隔离（否则每个 database 都会解析全部 .sq）；Hub 库用
-// sqlite-3-24 dialect：会话/已读 upsert 依赖 ON CONFLICT DO UPDATE（3.24+ 语法）。
+// Hub 投影库（hub 化 P2 起唯一本地库）：缓存是加速层不是真相源（快照 + 事件流始终权威），
+// 410/版本不符整库重建。sqlite-3-24 dialect：会话/已读 upsert 依赖 ON CONFLICT DO UPDATE（3.24+ 语法）。
 sqldelight {
     databases {
-        create("AgentReinsDatabase") {
-            packageName.set("dev.sharpxia.agentreins.db")
-            srcDirs.setFrom("src/commonMain/sqldelight/dev/db")
-        }
         create("HubDatabase") {
             packageName.set("dev.sharpxia.agentreins.hubdb")
             srcDirs.setFrom("src/commonMain/sqldelight/dev/hubdb")

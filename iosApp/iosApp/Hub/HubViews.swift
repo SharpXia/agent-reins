@@ -1,7 +1,7 @@
 import SwiftUI
 import composeApp
 
-/// Hub 主界面（P3 最小闭环）：会话 / 设置-设备。P4 与网关直连面二选一收口。
+/// Hub 主界面（P3 最小闭环，P4 起为唯一界面：网关直连面已退役）：会话 / 设置-设备。
 /// Dev 直达（自动化走查）：AGENTREINS_DEV_TAB=settings；AGENTREINS_DEV_CONV=1 打开首个会话。
 struct HubRootView: View {
     @State private var hub = HubStore.shared
@@ -183,10 +183,19 @@ private struct HubMessageRow: View {
         HStack {
             if m.role == "user" { Spacer(minLength: 40) }
             VStack(alignment: m.role == "user" ? .trailing : .leading, spacing: 3) {
-                Text(m.content.isEmpty && m.state == "streaming" ? "…" : m.content)
-                    .padding(.horizontal, 12).padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 16)
-                        .fill(m.role == "user" ? Color.accentColor.opacity(0.24) : ink.surfaceTertiary))
+                Group {
+                    if m.content.isEmpty && m.state == "streaming" {
+                        Text("…")
+                    } else if m.role == "user" {
+                        Text(m.content)
+                    } else {
+                        // 助手内容走自研轻量 Markdown 渲染器（0.4.8 滑动性能专项资产，P4 接入 Hub 面）
+                        MarkdownView(content: m.content)
+                    }
+                }
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(RoundedRectangle(cornerRadius: 16)
+                    .fill(m.role == "user" ? Color.accentColor.opacity(0.24) : ink.surfaceTertiary))
                 if m.role == "user" { statusBadge }
             }
             if m.role != "user" { Spacer(minLength: 40) }

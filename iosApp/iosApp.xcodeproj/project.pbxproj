@@ -15,23 +15,12 @@
 		1A5FC0012026102800000004 /* sfx_chimea.wav in Resources */ = {isa = PBXBuildFile; fileRef = 1A5FC0022026102800000004 /* sfx_chimea.wav */; };
 		1A5FC0012026102800000005 /* sfx_chimeb.wav in Resources */ = {isa = PBXBuildFile; fileRef = 1A5FC0022026102800000005 /* sfx_chimeb.wav */; };
 		1A6FBB000000000000000001 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000001 /* App.swift */; };
-		1A6FBB000000000000000002 /* AppStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000002 /* AppStore.swift */; };
 		1A6FBB000000000000000003 /* InkTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000003 /* InkTheme.swift */; };
 		1A6FBB000000000000000004 /* Format.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000004 /* Format.swift */; };
 		1A6FBB000000000000000005 /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000005 /* Components.swift */; };
 		1A6FBB000000000000000011 /* BackSwipe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000011 /* BackSwipe.swift */; };
 		1A6FBB000000000000000012 /* RobotAvatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000012 /* RobotAvatar.swift */; };
-		1A6FBB000000000000000006 /* ChatRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000006 /* ChatRows.swift */; };
-		1A6FBB000000000000000007 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000007 /* ChatView.swift */; };
-		1A6FBB000000000000000008 /* MessageRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000008 /* MessageRows.swift */; };
-		1A6FBB000000000000000009 /* ToolCallViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000009 /* ToolCallViews.swift */; };
-		1A6FBB00000000000000000A /* Composer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA00000000000000000A /* Composer.swift */; };
 		1A6FBB00000000000000000B /* MarkdownView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA00000000000000000B /* MarkdownView.swift */; };
-		1A6FBB00000000000000000C /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA00000000000000000C /* HomeView.swift */; };
-		1A6FBB00000000000000000D /* AgentDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA00000000000000000D /* AgentDetailView.swift */; };
-		1A6FBB00000000000000000E /* SearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA00000000000000000E /* SearchView.swift */; };
-		1A6FBB00000000000000000F /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA00000000000000000F /* SettingsView.swift */; };
-		1A6FBB000000000000000010 /* QrScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000010 /* QrScanner.swift */; };
 		1A6FBB000000000000000013 /* ScrollBench.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000013 /* ScrollBench.swift */; };
 		1A6FBB000000000000000014 /* HubStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000014 /* HubStore.swift */; };
 		1A6FBB000000000000000015 /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000015 /* LoginView.swift */; };
@@ -53,24 +42,13 @@
 		1A6FAA000000000000000014 /* HubStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HubStore.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000015 /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000016 /* HubViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HubViews.swift; sourceTree = "<group>"; };
-		1A6FAA000000000000000002 /* AppStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStore.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000003 /* InkTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InkTheme.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000004 /* Format.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Format.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000005 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000011 /* BackSwipe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipe.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000012 /* RobotAvatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RobotAvatar.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000013 /* ScrollBench.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollBench.swift; sourceTree = "<group>"; };
-		1A6FAA000000000000000006 /* ChatRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatRows.swift; sourceTree = "<group>"; };
-		1A6FAA000000000000000007 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
-		1A6FAA000000000000000008 /* MessageRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageRows.swift; sourceTree = "<group>"; };
-		1A6FAA000000000000000009 /* ToolCallViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolCallViews.swift; sourceTree = "<group>"; };
-		1A6FAA00000000000000000A /* Composer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Composer.swift; sourceTree = "<group>"; };
 		1A6FAA00000000000000000B /* MarkdownView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownView.swift; sourceTree = "<group>"; };
-		1A6FAA00000000000000000C /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
-		1A6FAA00000000000000000D /* AgentDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentDetailView.swift; sourceTree = "<group>"; };
-		1A6FAA00000000000000000E /* SearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchView.swift; sourceTree = "<group>"; };
-		1A6FAA00000000000000000F /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
-		1A6FAA000000000000000010 /* QrScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QrScanner.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -142,7 +120,6 @@
 		1A6FCC000000000000000001 /* Store */ = {
 			isa = PBXGroup;
 			children = (
-				1A6FAA000000000000000002 /* AppStore.swift */,
 				1A6FAA000000000000000014 /* HubStore.swift */,
 			);
 			path = Store;
@@ -187,11 +164,6 @@
 		1A6FCC000000000000000004 /* Chat */ = {
 			isa = PBXGroup;
 			children = (
-				1A6FAA000000000000000006 /* ChatRows.swift */,
-				1A6FAA000000000000000007 /* ChatView.swift */,
-				1A6FAA000000000000000008 /* MessageRows.swift */,
-				1A6FAA000000000000000009 /* ToolCallViews.swift */,
-				1A6FAA00000000000000000A /* Composer.swift */,
 				1A6FAA00000000000000000B /* MarkdownView.swift */,
 			);
 			path = Chat;
@@ -200,8 +172,6 @@
 		1A6FCC000000000000000005 /* Home */ = {
 			isa = PBXGroup;
 			children = (
-				1A6FAA00000000000000000C /* HomeView.swift */,
-				1A6FAA00000000000000000D /* AgentDetailView.swift */,
 			);
 			path = Home;
 			sourceTree = "<group>";
@@ -209,7 +179,6 @@
 		1A6FCC000000000000000006 /* Search */ = {
 			isa = PBXGroup;
 			children = (
-				1A6FAA00000000000000000E /* SearchView.swift */,
 			);
 			path = Search;
 			sourceTree = "<group>";
@@ -217,7 +186,6 @@
 		1A6FCC000000000000000007 /* Settings */ = {
 			isa = PBXGroup;
 			children = (
-				1A6FAA00000000000000000F /* SettingsView.swift */,
 			);
 			path = Settings;
 			sourceTree = "<group>";
@@ -225,7 +193,6 @@
 		1A6FCC000000000000000008 /* Qr */ = {
 			isa = PBXGroup;
 			children = (
-				1A6FAA000000000000000010 /* QrScanner.swift */,
 			);
 			path = Qr;
 			sourceTree = "<group>";
@@ -352,7 +319,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				1A6FBB000000000000000001 /* App.swift in Sources */,
-				1A6FBB000000000000000002 /* AppStore.swift in Sources */,
 				1A6FBB000000000000000014 /* HubStore.swift in Sources */,
 				1A6FBB000000000000000015 /* LoginView.swift in Sources */,
 				1A6FBB000000000000000016 /* HubViews.swift in Sources */,
@@ -362,17 +328,7 @@
 				1A6FBB000000000000000011 /* BackSwipe.swift in Sources */,
 				1A6FBB000000000000000012 /* RobotAvatar.swift in Sources */,
 				1A6FBB000000000000000013 /* ScrollBench.swift in Sources */,
-				1A6FBB000000000000000006 /* ChatRows.swift in Sources */,
-				1A6FBB000000000000000007 /* ChatView.swift in Sources */,
-				1A6FBB000000000000000008 /* MessageRows.swift in Sources */,
-				1A6FBB000000000000000009 /* ToolCallViews.swift in Sources */,
-				1A6FBB00000000000000000A /* Composer.swift in Sources */,
 				1A6FBB00000000000000000B /* MarkdownView.swift in Sources */,
-				1A6FBB00000000000000000C /* HomeView.swift in Sources */,
-				1A6FBB00000000000000000D /* AgentDetailView.swift in Sources */,
-				1A6FBB00000000000000000E /* SearchView.swift in Sources */,
-				1A6FBB00000000000000000F /* SettingsView.swift in Sources */,
-				1A6FBB000000000000000010 /* QrScanner.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

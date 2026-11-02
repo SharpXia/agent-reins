@@ -127,10 +127,15 @@ class HubRuntime(
         }
     }
 
+    /**
+     * AUTH-006 契约预检（登录后、注册前的判定记录，不阻断登录流）。实测服务端：
+     * devices 清单挂 bearer 放行，AUTH-006 只拦设备必需端点（gateways/conversations/sync/命令类），
+     * 故预检端点取 GET /v1/gateways。
+     */
     private suspend fun probeAuth006(s: HubAuthStack): String {
-        val error = runCatching { s.api.listDevices() }.exceptionOrNull()
+        val error = runCatching { s.api.gateways() }.exceptionOrNull()
         return when {
-            error == null -> "unexpected: 未绑定会话 Token 竟能调 GET /v1/devices（期待 403 HUB-AUTH-006）"
+            error == null -> "unexpected: 未绑定会话 Token 竟能调 GET /v1/gateways（期待 403 HUB-AUTH-006）"
             error is HubException && error.payload.code == "HUB-AUTH-006" ->
                 "ok: 403 HUB-AUTH-006 (x-request-id=${error.requestId})"
             else -> "unexpected: ${error.message}"

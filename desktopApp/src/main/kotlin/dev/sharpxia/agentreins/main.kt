@@ -61,8 +61,8 @@ private fun hubLoginProbe() = runBlocking {
     val ok = stack.auth.login(user, pass, null)
     println("   ok user=${ok.user.displayName} tokenType=${ok.tokenType} expiresIn=${ok.expiresIn} mfaRequired=${ok.mfaRequired}")
 
-    println("② AUTH-006 预检：未绑定会话 Token 调 GET /v1/devices…")
-    val e6 = runCatching { stack.api.listDevices() }.exceptionOrNull()
+    println("② AUTH-006 预检：未绑定会话 Token 调设备必需端点 GET /v1/gateways…（devices 清单挂 bearer 放行，AUTH-006 只拦设备必需端点）")
+    val e6 = runCatching { stack.api.gateways() }.exceptionOrNull()
     check(e6 is HubException && e6.payload.code == "HUB-AUTH-006") {
         "期待 403 HUB-AUTH-006，实得 ${e6?.message ?: "成功响应（契约破坏）"}"
     }
@@ -72,10 +72,11 @@ private fun hubLoginProbe() = runBlocking {
     val reg = stack.auth.registerCurrentDevice("AgentReins P1 probe", "desktop", null, "p1-probe")
     println("   ok deviceId=${reg.deviceId} refreshExpiresIn=${reg.refreshExpiresIn} refreshToken 已入存储=${mem.v != null}")
 
-    println("④ 同一 accessToken 现在可调设备清单（无需重新登录）…")
+    println("④ 同一 accessToken 现在已升级为绑定 Token：设备清单与设备必需端点都应放行…")
     val devices = stack.auth.withBearer { stack.api.listDevices() }
     val me = devices.devices.firstOrNull { it.deviceId == reg.deviceId } ?: error("设备清单不含刚注册的设备")
-    println("   ok 共 ${devices.devices.size} 台，本机 current=${me.current} platform=${me.platform}")
+    val gws = stack.auth.withBearer { stack.api.gateways() } // 步骤②曾 403 的端点，注册后应 200
+    println("   ok 共 ${devices.devices.size} 台，本机 current=${me.current} platform=${me.platform}；gateways=${gws.gateways.size}")
 
     println("⑤ 新实例仅凭安全存储的 refreshToken 静默恢复（refresh 一次一用轮换）…")
     val before = mem.v

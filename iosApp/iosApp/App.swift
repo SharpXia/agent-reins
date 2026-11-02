@@ -48,6 +48,9 @@ struct RootView: View {
         }
         .inkTheme()
         .preferredColorScheme(store.colorSchemeOverride)
+        #if DEBUG
+        .safeAreaInset(edge: .bottom) { hubStatusStrip }
+        #endif
         .onChange(of: scenePhase) { phase in
             if phase == .active { BackSwipe.attach() }
         }
@@ -61,6 +64,20 @@ struct RootView: View {
             get: { store.misc.pendingApproval },
             set: { _ in }
         )
+    }
+
+    /// P1 验收调试条：Hub 账号态 + AUTH-006 判定一览（P4 随直连面与调试基建一并删除）。
+    @ViewBuilder
+    private var hubStatusStrip: some View {
+        if hub.isLoggedIn {
+            let dev = hub.deviceId.map { String($0.prefix(8)) } ?? "-"
+            Text("Hub \(hub.userDisplay ?? "-") · dev \(dev) · AUTH-006 \(hub.auth006VerdictSnapshot ?? "-")")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 2)
+                .background(.thinMaterial)
+        }
     }
 }
 

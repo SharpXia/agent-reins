@@ -16,6 +16,8 @@ final class HubStore {
     private(set) var deviceId: String?
     /// 启动恢复在途（Keychain 有凭据时静默刷新），用于首屏显示进度而非登录表单。
     private(set) var isRestoring = false
+    /// 最近一次登录的 AUTH-006 判定快照（进 loggedIn 时拉取；状态条取证用）。
+    private(set) var auth006VerdictSnapshot: String?
 
     var baseUrl: String {
         didSet { UserDefaults.standard.set(baseUrl, forKey: Self.baseUrlKey) }
@@ -34,6 +36,7 @@ final class HubStore {
             self.userDisplay = user
             self.deviceId = deviceId
             if kind != "working" { self.isRestoring = false }
+            if kind == "loggedIn" { self.auth006VerdictSnapshot = self.auth006Verdict }
         }
         if !baseUrl.isEmpty {
             isRestoring = true

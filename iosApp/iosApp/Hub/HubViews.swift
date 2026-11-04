@@ -2,15 +2,17 @@ import SwiftUI
 import composeApp
 
 /// Hub 主界面（P3 最小闭环，P4 起为唯一界面：网关直连面已退役）：会话 / 设置-设备。
+/// 导航纪律（0.5.1 真机点击崩溃修复）：KMP 类不可作 value-based 导航的 Hashable 值——
+/// 列表推栈用 destination-closure 型 NavigationLink，dev 直达用 chatPush(isPresented)，
+/// 全栈零 NavigationPath/zero value-destination。
 /// Dev 直达（自动化走查）：AGENTREINS_DEV_TAB=settings；AGENTREINS_DEV_CONV=1 打开首个会话。
 struct HubRootView: View {
     @State private var hub = HubStore.shared
     @State private var tab = 0
-    @State private var sessionsPath = NavigationPath()
 
     var body: some View {
         TabView(selection: $tab) {
-            NavigationStack(path: $sessionsPath) { HubHomeView() }
+            NavigationStack { HubHomeView() }
                 .tabItem { Label("会话", systemImage: "bubble.left.and.bubble.right.fill") }
                 .tag(0)
             NavigationStack { HubSettingsView() }
@@ -24,7 +26,7 @@ struct HubRootView: View {
                 try? await Task.sleep(nanoseconds: 2_500_000_000)
                 if let first = hub.conversations.first {
                     tab = 0
-                    sessionsPath.append(first)
+                    hub.devOpen(first)
                 }
             }
             // Dev 发送探针：AGENTREINS_DEV_SEND_KEY=<label 或 conversationId 前缀> + AGENTREINS_DEV_SEND=<文本>
@@ -62,12 +64,12 @@ struct HubHomeView: View {
                                        description: Text("网关接入后会话将自动出现"))
             } else {
                 List(hub.conversations, id: \.conversationId) { c in
-                    NavigationLink(value: c) {
+                    // destination-closure 型推栈（不走 value/Hashable，见 HubRootView 导航纪律）
+                    NavigationLink {
+                        HubChatView(conv: c)
+                    } label: {
                         HubConversationRow(c: c)
                     }
-                }
-                .navigationDestination(for: UiConversation.self) { c in
-                    HubChatView(conv: c)
                 }
             }
         }

@@ -27,8 +27,10 @@ private data class DataMessageCreated(
 @Serializable
 private data class DataMessageReplaced(val messageId: String, val content: String)
 
+/** reason 可选（v1.1 载荷仅在携带 errorKind 时透传，bridge/src/normalize/index.ts chat.error）：
+ *  缺省不整帧丢弃——失败终态照落，reason 列置 NULL。 */
 @Serializable
-private data class DataMessageFailed(val messageId: String, val reason: String)
+private data class DataMessageFailed(val messageId: String, val reason: String? = null)
 
 @Serializable
 private data class DataSessionCreated(
@@ -102,12 +104,12 @@ class ProjectionStats {
 /**
  * [EventProjector] 的 SQLite 落库实现（05 §3.11 合并规则，契约 v1.1 路由）。
  *
- * 路由模型（Hub.sq v3 文件头）：卡片主键 = conversationId（快照/列表是卡片唯一来源）；
+ * 路由模型（Hub.sq v4 文件头）：卡片主键 = conversationId（快照/列表是卡片唯一来源）；
  * 事件→卡片经 hubConvKeys 映射 (gatewayId, sessionKey) → conversationId。映射只经两条
  * 强通道学习（弱键如 label 不做，宁可慢不可错绑）：① 自发送回执链（message.created 的
  * idempotencyKey → 命令队列/乐观行携带的 conversationId）；② 自命令 ack（信封 sessionKey +
  * 队列条目）。未映射事件不建卡：skip 并靠 R4 周期校准兜底。
- * 幂等性边界（INV-1）：本类所有写路径除 delta append 外均为 upsert/幂等 UPDATE；
+ * 幂等性边界（INV-1）：本类所有写路径除 delta append/占位行创建外均为 upsert/幂等 UPDATE；
  * delta 的重复防护由调用方（事件 id 去重 + 水位裁决）承担。
  */
 class DefaultEventProjector(
@@ -158,6 +160,7 @@ class DefaultEventProjector(
                         role = m.role,
                         content = m.content,
                         state = m.state,
+                        reason = m.errorKind, // v4：wp-4 additive errorKind → reason 列（事件路径共用，冷启动失败行由此获得原因）
                         uiState = m.uiState,
                         commandId = m.commandId,
                         idempotencyKey = m.idempotencyKey,
@@ -236,7 +239,38 @@ class DefaultEventProjector(
 
     private fun onMessageDelta(envelope: EventEnvelope) {
         val d = decode(DataMessageDelta.serializer(), envelope.data) ?: return skip()
-        val row = db.hubQueries.selectMessage(d.messageId).executeAsOneOrNull() ?: return skip()
+        val row = db.hubQueries.selectMessage(d.messageId).executeAsOneOrNull()
+        if (row == null) {
+            // 缺行建 streaming 占位行（v4，wp-5①）：wp-1 探针定档「无锚」——本宿主 Gateway 的
+            // chat.delta 不带 __openclaw 信封，合并产物 messageId = dstream:<runId>（run 域合成
+            // 身份），与 created 行 messageId（displayRowId 26hex）**异锚**——缺行不再是边缘而是
+            // 主路径，直接 skip 即流式面上游缺口。门卫：仅会话存在活跃 run 时建占位（run.started
+            // 先于 delta 同序到达/快照 hasActiveRun=1）；无活跃 run 的缺行 delta = 迟到重放噪声
+            // （合并器 final 后抑制驱逐兜底放行/run 终态清除后再到），skip 防幽灵气泡复活。
+            val convId = resolveConversation(envelope, null) ?: return skip() // 未映射不建卡（卡片唯一来源 = 快照/校准）
+            val conv = db.hubQueries.selectConversation(convId).executeAsOneOrNull() ?: return skip()
+            if (conv.hasActiveRun == 0L) return skip()
+            db.hubQueries.upsertMessage(
+                messageId = d.messageId,
+                conversationId = convId,
+                // 占位行 seq 取当前权威 lastSeq+1（显示序压到末尾；服务端消息 seq 口径不被污染——
+                // 不推进 lastSeq。禁止 MAX(messages.seq)+1：乐观用户行 seq=Long.MAX_VALUE 会溢出）。
+                // 同会话多占位行可能并列——异锚/终态清除下为瞬态，可接受。
+                seq = conv.lastSeq + 1L,
+                role = "assistant",
+                content = if (d.replace == true) d.deltaText else "",
+                state = STATE_STREAMING,
+                reason = null,
+                uiState = null,
+                commandId = null,
+                idempotencyKey = null,
+                ts = envelope.ts,
+            )
+            if (d.replace != true) {
+                db.hubQueries.appendMessageContent(d.deltaText, d.messageId)
+            }
+            return
+        }
         if (d.replace == true) {
             db.hubQueries.replaceMessageContent(d.deltaText, d.messageId)
         } else {
@@ -269,6 +303,13 @@ class DefaultEventProjector(
             )
             return
         }
+        if (!isUser) {
+            // 异锚收敛清除（v4，wp-5①主分支，评审阻塞项 1③）：非用户权威行落定时清除同会话
+            // 其余流式占位行（messageId ≠ 本行）——无锚 delta 占位行（dstream:<runId>）与 created
+            // 行异锚，不清除即「流式幽灵气泡 + 重复 final 气泡」。同锚分支（未来 Gateway 回锚）
+            // 下占位行即本行（被 ≠ 排除），随后 INSERT OR REPLACE 同键覆盖收敛，防御性保留。
+            db.hubQueries.deleteStreamingPlaceholdersExcept(convId, d.messageId)
+        }
         db.hubQueries.upsertMessage(
             messageId = d.messageId,
             conversationId = convId,
@@ -276,6 +317,7 @@ class DefaultEventProjector(
             role = d.role,
             content = d.content,
             state = STATE_FINAL,
+            reason = null,
             uiState = if (isUser) UI_DELIVERED else null,
             commandId = d.commandId,
             idempotencyKey = d.idempotencyKey,
@@ -310,19 +352,37 @@ class DefaultEventProjector(
 
     private fun onMessageFailed(envelope: EventEnvelope) {
         val d = decode(DataMessageFailed.serializer(), envelope.data) ?: return skip()
-        val row = db.hubQueries.selectMessage(d.messageId).executeAsOneOrNull() ?: return skip()
-        db.hubQueries.setMessageState(STATE_FAILED, d.messageId)
+        db.hubQueries.selectMessage(d.messageId).executeAsOneOrNull() ?: return skip()
+        // reason 落库（v4，wp-5②）：载荷 reason = 脱敏 errorKind 闭集（06 §3.1.4），此前只翻
+        // state 丢 reason——快照重建前失败行徽标无因。缺省载荷（未分类）写 NULL，不虚构。
+        db.hubQueries.setMessageStateReason(STATE_FAILED, d.reason, d.messageId)
     }
 
     // ── run / session 域 ─────────────────────────────────────────────────────
 
     private fun setRun(envelope: EventEnvelope, active: Boolean) {
         val convId = resolveConversation(envelope, null) ?: return
+        // v4（wp-5③）：捕获当前活跃 runId（wp-8 Stop 按钮 → REST #11 run.cancel 路径参数必带
+        // runId，hub-api-v1.yaml:500-511）。信封 run 域必带 runId（06 §2.2）；防御性再读
+        // data.runId（与 Hub 引擎 applyRun 同序）。终态一律置 NULL——hasActiveRun=0 的写路径
+        // 不残留死 runId。
+        val runId = envelope.runId ?: dataRunId(envelope)
         db.hubQueries.setConversationActiveRun(
             hasActiveRun = if (active) 1L else 0L,
+            activeRunId = if (active) runId else null,
             conversationId = convId,
         )
+        if (!active) {
+            // run 终态清除（v4）：失败/中止 run 无 message 终态事件可收敛其占位行（异锚身份），
+            // 活跃 run 结束即清会话全部流式行——正常完成时占位行已被 created 清除，此处兜底
+            // 防幽灵流式气泡；单活跃 run 模型下终态时刻不存在合法在途流。
+            db.hubQueries.deleteStreamingRows(convId)
+        }
     }
+
+    /** run 域载荷 runId 兜底（信封缺省时；与 Hub 引擎 applyRun 的取序一致）。 */
+    private fun dataRunId(envelope: EventEnvelope): String? =
+        runCatching { envelope.data.jsonObject["runId"]?.toString()?.trim('"')?.takeIf { it.isNotEmpty() } }.getOrNull()
 
     private fun onSessionCreated(envelope: EventEnvelope) {
         // v1.1：事件不带 conversationId，不建卡（卡片唯一来源 = 快照/列表校准），且新会话的
@@ -457,6 +517,7 @@ class DefaultEventProjector(
 
     companion object {
         internal const val STATE_FINAL = "final"
+        internal const val STATE_STREAMING = "streaming"
         internal const val STATE_FAILED = "failed"
         internal const val UI_DELIVERED = "delivered"
         internal const val UI_FAILED = "failed"

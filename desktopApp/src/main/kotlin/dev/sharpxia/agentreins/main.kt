@@ -1,7 +1,10 @@
 package dev.sharpxia.agentreins
 
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
+import androidx.compose.ui.window.rememberWindowState
+import dev.sharpxia.agentreins.desktopui.DesktopHubApp
 import dev.sharpxia.agentreins.hub.HubConfig
 import dev.sharpxia.agentreins.hub.HubException
 import dev.sharpxia.agentreins.hub.auth.CredentialStore
@@ -15,7 +18,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 
 /**
- * 桌面壳（Hub 化 P4）：默认开占位窗（Desktop 的 Hub 界面待基于 shared/hub 另起实现）。
+ * 桌面壳（wp-6 MVP）：默认窗渲染 Compose Desktop Hub 面（[DesktopHubApp]，登录/会话列表/
+ * 会话页/设置四屏，整体落 desktopApp 不动 commonMain 的 App()）。
  *
  * 三条 Hub 验收通道不开窗口、跑完即退出（HUB_BASE / HUB_USER / HUB_PASS 来自环境变量，不落代码）：
  * - `hub-login`：认证两步流 + AUTH-006 + 设备绑定 + 静默恢复轮换 + 撤销，见 [hubLoginProbe]
@@ -37,10 +41,11 @@ fun main(args: Array<String>) {
     }
     application {
         Window(
-            title = "AgentReins",
+            title = "AgentReins Hub",
             onCloseRequest = ::exitApplication,
+            state = rememberWindowState(width = 1280.dp, height = 800.dp),
         ) {
-            App()
+            DesktopHubApp()
         }
     }
 }

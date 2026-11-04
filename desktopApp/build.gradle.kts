@@ -12,6 +12,8 @@ dependencies {
     implementation(project(":composeApp"))
     implementation(project(":shared"))
     implementation(compose.desktop.currentOs)
+    // 桌面 Hub 面（wp-6）：material3 组件（composeApp 内的 material3 是 implementation 不透出，自取同版本）
+    implementation(libs.compose.material3)
     // hub-sync 验收通道自建 in-memory 投影库用
     implementation(libs.sqldelight.sqlite.driver)
     // hub 验收通道（hub-login/hub-sync/hub-wsraw）直接组装 hub 客户端栈——shared 用

@@ -120,7 +120,7 @@ class HubSyncFixtureTest {
         val cmdIdem = "0f9c6a2e-1111-4222-8333-444455556666"
         db.hubQueries.upsertMessage(
             messageId = "01JMSG00000000000000000008", conversationId = CONV, seq = 2L,
-            role = "user", content = "sending...", state = "final", uiState = "sending",
+            role = "user", content = "sending...", state = "final", reason = null, uiState = "sending",
             commandId = "01JCMD00000000000000000000", idempotencyKey = cmdIdem, ts = null,
         )
         val newSk = "sk-learned-via-echo"
@@ -271,6 +271,187 @@ class HubSyncFixtureTest {
         }))
         assertEquals("hi!", db.hubQueries.selectMessage("01JMSG00000000000000000001").executeAsOne().content)
         assertEquals(after, cursors.eventCursor())
+    }
+
+    // ── ⑤ v4 wp-5①：缺行 delta 建 streaming 占位行 + 占位行收敛双分支（探针定档：无锚=异锚为主） ──
+    //
+    // wp-1 探针结论（AgentReinService bridge/src/normalize/index.ts delta 分支 + relay/delta-coalesce.ts）：
+    // 本宿主 Gateway chat.delta 恒无锚，合并产物 messageId = dstream:<runId>（run 域合成身份），
+    // 与 created 行 messageId（displayRowId 26hex）**异锚** → 异锚清除为主用例；同锚覆盖为
+    // 防御性保留用例（未来 Gateway 回锚）。
+
+    @Test
+    fun streamingPlaceholderAndConvergence() = runTest {
+        val db = newDb()
+        val p = DefaultEventProjector(db)
+        p.applySnapshot(fixtureSnapshot())
+        db.hubQueries.upsertConvKey(GW, SK, CONV)
+        var n = 200
+        fun nextId(): String = "01JAAA00000000000000000${(++n).toString().padStart(4, '0')}"
+
+        val dstreamId = "dstream:run-a"
+        val deltaData: (String, Long) -> kotlinx.serialization.json.JsonObject = { text, seq ->
+            buildJsonObject {
+                put("messageId", dstreamId); put("deltaText", text); put("seq", seq); put("runScoped", true)
+            }
+        }
+
+        // 门卫：无活跃 run 的缺行 delta = 迟到重放噪声（合并器 final 后抑制驱逐兜底放行），skip 不建行
+        p.applyEvent(ev(nextId(), EventEnvelope.MESSAGE_DELTA, data = deltaData("Hel", 1L)))
+        assertEquals(1, p.stats.eventsSkipped)
+        assertNull(db.hubQueries.selectMessage(dstreamId).executeAsOneOrNull())
+
+        // run.started：hasActiveRun=1 + activeRunId 捕获（wp-5③，wp-8 Stop 取值）
+        p.applyEvent(ev(nextId(), EventEnvelope.RUN_STARTED, data = buildJsonObject {
+            put("runId", "run-a"); put("agentId", "main")
+        }, runId = "run-a"))
+        var conv = db.hubQueries.selectConversation(CONV).executeAsOne()
+        assertEquals(1L, conv.hasActiveRun)
+        assertEquals("run-a", conv.activeRunId)
+
+        // 缺行 delta → 建 streaming 占位行（异锚主路径），后续 delta 追加
+        p.applyEvent(ev(nextId(), EventEnvelope.MESSAGE_DELTA, data = deltaData("Hel", 1L)))
+        val ph = db.hubQueries.selectMessage(dstreamId).executeAsOneOrNull()
+        assertNotNull(ph)
+        assertEquals(CONV, ph.conversationId)
+        assertEquals("assistant", ph.role)
+        assertEquals("streaming", ph.state)
+        assertEquals("Hel", ph.content)
+        assertEquals(3L, ph.seq) // 快照 lastSeq=2 → 占位行 seq=3 压尾显示；不推进 lastSeq（服务端 seq 口径不污染）
+        p.applyEvent(ev(nextId(), EventEnvelope.MESSAGE_DELTA, data = deltaData("lo", 2L)))
+        assertEquals("Hello", db.hubQueries.selectMessage(dstreamId).executeAsOne().content)
+        assertEquals(2L, db.hubQueries.selectConversation(CONV).executeAsOne().lastSeq)
+
+        // 异锚收敛：created 权威行（26hex）落定 → 占位行清除、单行 final（无幽灵气泡+无重复气泡）
+        p.applyEvent(ev(nextId(), EventEnvelope.MESSAGE_CREATED, data = buildJsonObject {
+            put("messageId", "01JMSG00000000000000000009")
+            put("role", "assistant"); put("content", "Hello"); put("sourceMessageSeq", 3L)
+        }))
+        assertNull(db.hubQueries.selectMessage(dstreamId).executeAsOneOrNull())
+        assertEquals("final", db.hubQueries.selectMessage("01JMSG00000000000000000009").executeAsOne().state)
+        assertEquals(
+            1,
+            db.hubQueries.selectMessages(CONV).executeAsList().count { it.role == "assistant" && it.seq == 3L },
+        )
+
+        // 同锚分支（防御性保留）：delta messageId == created messageId，占位行经 created 同键
+        // INSERT OR REPLACE 覆盖收敛（清除规则以 messageId=本行排除，不误删在途行）
+        val anchoredId = "01JMSG00000000000000000011"
+        p.applyEvent(ev(nextId(), EventEnvelope.MESSAGE_DELTA, data = buildJsonObject {
+            put("messageId", anchoredId); put("deltaText", "partial"); put("seq", 3L)
+        }))
+        assertEquals("streaming", db.hubQueries.selectMessage(anchoredId).executeAsOne().state)
+        p.applyEvent(ev(nextId(), EventEnvelope.MESSAGE_CREATED, data = buildJsonObject {
+            put("messageId", anchoredId)
+            put("role", "assistant"); put("content", "authoritative"); put("sourceMessageSeq", 4L)
+        }))
+        val same = db.hubQueries.selectMessage(anchoredId).executeAsOne()
+        assertEquals("final", same.state)
+        assertEquals("authoritative", same.content)
+        assertEquals(1, db.hubQueries.selectMessages(CONV).executeAsList().count { it.messageId == anchoredId })
+
+        // run.completed：hasActiveRun 翻转 + activeRunId 清空 + 流式行兜底清除（无残留）
+        p.applyEvent(ev(nextId(), EventEnvelope.RUN_COMPLETED, data = buildJsonObject {
+            put("runId", "run-a"); put("stopReason", "end_turn")
+        }, runId = "run-a"))
+        conv = db.hubQueries.selectConversation(CONV).executeAsOne()
+        assertEquals(0L, conv.hasActiveRun)
+        assertNull(conv.activeRunId)
+        assertEquals(0, db.hubQueries.selectMessages(CONV).executeAsList().count { it.state == "streaming" })
+
+        // run.failed 终态清除：失败 run 的占位行无 message 终态事件可收敛，不得残留幽灵气泡
+        p.applyEvent(ev(nextId(), EventEnvelope.RUN_STARTED, data = buildJsonObject {
+            put("runId", "run-b"); put("agentId", "main")
+        }, runId = "run-b"))
+        p.applyEvent(ev(nextId(), EventEnvelope.MESSAGE_DELTA, data = buildJsonObject {
+            put("messageId", "dstream:run-b"); put("deltaText", "x"); put("seq", 1L); put("runScoped", true)
+        }))
+        assertNotNull(db.hubQueries.selectMessage("dstream:run-b").executeAsOneOrNull())
+        p.applyEvent(ev(nextId(), EventEnvelope.RUN_FAILED, data = buildJsonObject { put("runId", "run-b") }, runId = "run-b"))
+        assertNull(db.hubQueries.selectMessage("dstream:run-b").executeAsOneOrNull())
+        conv = db.hubQueries.selectConversation(CONV).executeAsOne()
+        assertEquals(0L, conv.hasActiveRun)
+        assertNull(conv.activeRunId)
+    }
+
+    // ── ⑥ v4 wp-5②：事件路径 message.failed 的 reason 落库（此前只翻 state 丢 reason） ──
+
+    @Test
+    fun failedReasonPersists() = runTest {
+        val db = newDb()
+        val p = DefaultEventProjector(db)
+        p.applySnapshot(fixtureSnapshot())
+        db.hubQueries.upsertConvKey(GW, SK, CONV)
+        var n = 300
+        fun nextId(): String = "01JAAA00000000000000000${(++n).toString().padStart(4, '0')}"
+
+        // 载荷带 reason（脱敏 errorKind 闭集）→ 写入 reason 列（与快照路径共用）
+        p.applyEvent(ev(nextId(), EventEnvelope.MESSAGE_FAILED, data = buildJsonObject {
+            put("messageId", "01JMSG00000000000000000001"); put("reason", "timeout")
+        }))
+        val classified = db.hubQueries.selectMessage("01JMSG00000000000000000001").executeAsOne()
+        assertEquals("failed", classified.state)
+        assertEquals("timeout", classified.reason)
+
+        // 未分类失败（载荷缺 reason——normalize chat.error 仅在携带 errorKind 时透传）：
+        // state 照翻、reason 置 NULL 不虚构，事件不因缺字段整帧丢弃
+        p.applyEvent(ev(nextId(), EventEnvelope.MESSAGE_FAILED, data = buildJsonObject {
+            put("messageId", "01JMSG00000000000000000002")
+        }))
+        val unclassified = db.hubQueries.selectMessage("01JMSG00000000000000000002").executeAsOne()
+        assertEquals("failed", unclassified.state)
+        assertNull(unclassified.reason)
+        assertEquals(0, p.stats.eventsSkipped)
+    }
+
+    // ── ⑦ v4 wp-5④：快照路径 MessageRow.errorKind → hubMessages.reason（事件/快照共用同一列） ──
+
+    @Test
+    fun snapshotErrorKindMapsToReason() {
+        val db = newDb()
+        // 宽解析容忍缺省：无 errorKind 字段的历史快照行照常解码（additive 老客户端兼容语义）
+        val lenient = kotlinx.serialization.json.Json { ignoreUnknownKeys = true; isLenient = true }
+        val parsed = lenient.decodeFromString(
+            MessageRow.serializer(),
+            """{"messageId":"01JMSG00000000000000000009","seq":9,"role":"assistant","content":"legacy","state":"failed"}""",
+        )
+        assertNull(parsed.errorKind)
+
+        DefaultEventProjector(db).applySnapshot(
+            SnapshotResponse(
+                snapshotWatermark = WM,
+                generatedAt = T0,
+                gateways = listOf(GatewaySummary(gatewayId = GW, name = "mini", online = false)),
+                conversations = listOf(
+                    ConversationRow(
+                        conversationId = CONV, gatewayId = GW, label = "主线", agentId = "main",
+                        lastMessagePreview = "", lastSeq = 3L, lastActiveAt = T0,
+                        unreadCount = 0, hasActiveRun = false, reconciling = false,
+                    ),
+                ),
+                messages = mapOf(
+                    CONV to listOf(
+                        // wp-4 additive：仅 failed 行携带 errorKind（六值闭集），快照重建的失败行由此获得原因
+                        MessageRow(
+                            messageId = "01JMSG00000000000000000001", seq = 1L, role = "assistant",
+                            content = "boom", state = "failed", errorKind = "refusal",
+                        ),
+                        MessageRow(
+                            messageId = "01JMSG00000000000000000002", seq = 2L, role = "assistant",
+                            content = "unclassified", state = "failed",
+                        ),
+                        MessageRow(
+                            messageId = "01JMSG00000000000000000003", seq = 3L, role = "user",
+                            content = "hi", state = "final",
+                        ),
+                    ),
+                ),
+                readCursors = emptyMap(),
+            ),
+        )
+        assertEquals("refusal", db.hubQueries.selectMessage("01JMSG00000000000000000001").executeAsOne().reason)
+        assertNull(db.hubQueries.selectMessage("01JMSG00000000000000000002").executeAsOne().reason)
+        assertNull(db.hubQueries.selectMessage("01JMSG00000000000000000003").executeAsOne().reason)
     }
 
     // ── fixture 工厂 ──

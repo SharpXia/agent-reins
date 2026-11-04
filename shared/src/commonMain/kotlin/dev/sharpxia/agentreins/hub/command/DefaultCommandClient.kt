@@ -103,7 +103,8 @@ class DefaultCommandClient(
         if (type == "message.send" && conversationId != null) {
             db.hubQueries.upsertMessage(
                 messageId = key, conversationId = conversationId, seq = Long.MAX_VALUE,
-                role = "user", content = payload, state = "final", uiState = "sending",
+                role = "user", content = payload, state = "final", reason = null,
+                uiState = "sending",
                 commandId = null, idempotencyKey = key, ts = now,
             )
         }

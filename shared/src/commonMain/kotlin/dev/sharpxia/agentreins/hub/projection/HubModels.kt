@@ -55,6 +55,13 @@ data class MessageRow(
     val content: String,
     /** final / streaming / failed；流式行允许跳过 delta，终态由 created/replaced 收敛（05 §3.11）。 */
     val state: String,
+    /**
+     * 可选（v1.1 additive，2026-11-05，wp-4）：失败行原因分类，仅 `state: failed` 行可携带
+     * （message.failed 的 reason 脱敏六值闭集 refusal/timeout/rate_limit/context_length/
+     * state_contention/unknown）；非失败行与未分类失败行字段省略。宽解析容忍缺省——
+     * 老快照/历史行无此字段即 null。落库映射 hubMessages.reason，与事件路径共用同一列。
+     */
+    val errorKind: String? = null,
     /** 仅用户行：sending/delivered/read/failed；服务端现状不产出 read 态，UI 不得依赖。 */
     val uiState: String? = null,
     /** message.created 携带，驱动发送方 UI 翻转（乐观 UI 对账，05 §3.8）。 */

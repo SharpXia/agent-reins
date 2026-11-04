@@ -1,15 +1,7 @@
 package dev.sharpxia.agentreins.hub.projection
 
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
-
-/** 网关行元数据信封：原样透传保存、不解释、不数值化（05 §2.3）。 */
-@Serializable
-data class OpenclawAnchor(
-    val id: String,
-    val seq: Long,
-)
 
 @Serializable
 data class AgentRef(val agentId: String, val label: String)
@@ -28,20 +20,15 @@ data class GatewaySummary(
 data class GatewaysPage(val gateways: List<GatewaySummary> = emptyList())
 
 /**
- * 会话行。**契约 required 13 字段全量建模**（hub-api-v1.yaml:783，P0 建模；缺字段会在反序列化或验收对比时翻车）。
- * 不透明 ID 禁令（06 §12.2 义务 3）：sessionKey/sessionId/gatewayId 原样透传、不解析、不数值化。
+ * 会话行（契约 v1.1.0：required 10 字段）。化身不出 REST 面（02 R7）：sessionId/sessionKey/
+ * lifecycleRevision 已撤，化身更替经事件流 session.updated 的 lifecycleRevision 感知；
+ * 前端会话句柄 = conversationId（化身更替后不变，05 §3.10）。
  */
 @Serializable
 data class ConversationRow(
     val conversationId: String,
     /** 归属网关：一个账号可挂多网关（08 §4.1），会话必须能归属。 */
     val gatewayId: String,
-    /** Gateway 逻辑会话键 `agent:<agentId>:<mainKey>` 文法——原样保留、不解析。 */
-    val sessionKey: String,
-    /** 当前化身（物理会话代次）标识；化身更替后新代次 seq 从 1 重计（05 §3.10）。 */
-    val sessionId: String,
-    /** 化身围栏计数：变化即化身更替（新 sessionId + 新 revision 随 session.updated 下发）。 */
-    val lifecycleRevision: Long,
     val label: String,
     val agentId: String,
     val lastMessagePreview: String,
@@ -54,21 +41,22 @@ data class ConversationRow(
     val reconciling: Boolean,
 )
 
-/** 消息行。合并键 = messageId（upsert）+ seq（当前化身内插入顺序）；与事件信封 id 是两条独立序列（05 §2.2/§3.11）。 */
+/**
+ * 消息行（v1.1：__openclaw 锚已撤，App 面禁出 openclaw 字段）。合并键 = messageId（upsert）+
+ * seq（当前化身内插入顺序）；与事件信封 id 是两条独立序列（05 §2.2/§3.11）。
+ */
 @Serializable
 data class MessageRow(
     /** Hub ULID，upsert 主键。 */
     val messageId: String,
-    val conversationId: String? = null,
     val seq: Long,
-    /** 仅 user/assistant（服务端读取面已过滤合成行）；宽松解析用 String，勿建封闭枚举。 */
+    /** user / assistant / ""（v1.1 additive：空串=compaction/reset 合成行，渲染为分隔条）。 */
     val role: String,
     val content: String,
     /** final / streaming / failed；流式行允许跳过 delta，终态由 created/replaced 收敛（05 §3.11）。 */
     val state: String,
     /** 仅用户行：sending/delivered/read/failed；服务端现状不产出 read 态，UI 不得依赖。 */
     val uiState: String? = null,
-    @SerialName("__openclaw") val openclaw: OpenclawAnchor? = null,
     /** message.created 携带，驱动发送方 UI 翻转（乐观 UI 对账，05 §3.8）。 */
     val commandId: String? = null,
     val idempotencyKey: String? = null,
@@ -96,8 +84,9 @@ data class MessagesPage(
  * EventEnvelopeBase：required = id/type/gatewayId/ts/data）。
  * 幂等去重键 = id（INV-1）；**未知 type：忽略内容但必须照常推进游标**（06 §12.2 义务 2）。
  * data 统一用 JsonElement 承载——宽松解析，各域载荷按 type 分发解析。
- * 可省字段（06 §2.2 矩阵）：seq（gateway/read/command 域）、sessionKey（gateway/read/command 域无）、
- * runId（仅 run/tool/approval 域必带）。conversationId 不是信封字段（read.updated 载荷才有）。
+ * 可省字段（06 §2.2 矩阵）：seq（gateway/read/command 域）、sessionKey（gateway/read 域不带——
+ * eventlog 服务端强制校验；command 域「命令关联会话时带」）、runId（run/tool/approval 域必带）。
+ * 信封不含 conversationId（read.updated 载荷才有）——事件→卡片路由经投影库 hubConvKeys 映射。
  */
 @Serializable
 data class EventEnvelope(
@@ -177,6 +166,25 @@ data class CancelRunRequest(val idempotencyKey: String)
 /** decision 请求值 ∈ approve/reject（Hub 归一化为 approved/rejected 广播）。 */
 @Serializable
 data class ApprovalDecisionRequest(val idempotencyKey: String, val decision: String, val note: String? = null)
+
+/** #16 conversation.create：label 与 idempotencyKey 均可选（缺省 Hub 生成幂等键、重试安全）。 */
+@Serializable
+data class CreateConversationRequest(val label: String? = null, val idempotencyKey: String? = null)
+
+/** #19 conversation.rename：label 必填非空（缺失/空串 → 400 HUB-BIZ-004）。 */
+@Serializable
+data class RenameConversationRequest(val label: String)
+
+/** #18 Agent 状态（纯投影派生，无命令无副作用；限流走列表类 60 次/分/设备）。 */
+@Serializable
+data class AgentStatusResponse(
+    val agentId: String,
+    val gatewayId: String,
+    val gatewayOnline: Boolean,
+    val activeConversations: Int,
+    val activeRuns: Int,
+    val lastSeenAt: String? = null,
+)
 
 @Serializable
 data class CommandReceipt(

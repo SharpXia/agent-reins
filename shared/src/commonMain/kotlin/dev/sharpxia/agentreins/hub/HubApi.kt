@@ -7,26 +7,30 @@ import dev.sharpxia.agentreins.hub.auth.LoginOk
 import dev.sharpxia.agentreins.hub.auth.LoginRequest
 import dev.sharpxia.agentreins.hub.auth.RefreshOk
 import dev.sharpxia.agentreins.hub.auth.RefreshRequest
+import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
 import dev.sharpxia.agentreins.hub.projection.ApprovalDecisionRequest
 import dev.sharpxia.agentreins.hub.projection.CommandReceipt
 import dev.sharpxia.agentreins.hub.projection.ConversationsPage
+import dev.sharpxia.agentreins.hub.projection.CreateConversationRequest
 import dev.sharpxia.agentreins.hub.projection.EventsPage
 import dev.sharpxia.agentreins.hub.projection.GatewaysPage
 import dev.sharpxia.agentreins.hub.projection.MessagesPage
 import dev.sharpxia.agentreins.hub.projection.ReadCursorRequest
+import dev.sharpxia.agentreins.hub.projection.RenameConversationRequest
 import dev.sharpxia.agentreins.hub.projection.SendMessageRequest
 import dev.sharpxia.agentreins.hub.projection.SnapshotResponse
 import dev.sharpxia.agentreins.hub.projection.CancelRunRequest
 
 /**
- * Hub REST 客户端（v1 契约 14 端点；P0 骨架，P1 起填充 Ktor 实现）。
+ * Hub REST 客户端（契约 v1.1.0：18 端点 + WSS，tag hub-api-v1.1.1；v1.0 14 端点 + v1.1 新增 4）。
  *
- * 契约钉版（P0 验收②，docs/plans/hub-migration-plan.md §6-P0）：
- * - REST 契约：`api/hub-api-v1.yaml` — OpenAPI 3.0.3，info.version = **v1.0.0**，`x-hub-api-version: 1`，
- *   冻结 git tag `hub-api-v1.0.0`（AgentReinService 仓，冻结日 2026-11-01）
+ * 契约钉版（P0 验收②，docs/plans/hub-migration-plan.md §6-P0；v1.1 迁移见 §8 变更清单）：
+ * - REST 契约：`api/hub-api-v1.yaml` — OpenAPI 3.0.3，info.version = **v1.1.0**，`x-hub-api-version: 1`，
+ *   冻结 git tag `hub-api-v1.1.1`（AgentReinService 仓）
  * - WSS 帧契约：`api/hub-wss-frames-v1.schema.json` — JSON Schema 2020-12，protocolVersion 支持集 = {1}
  * - 版本策略（08 §6.1）：/v1 内仅 additive（新增端点、可选请求字段、响应字段、错误码）；
- *   破坏性变更升 /v2 并行 ≥90 天。客户端义务 = 忽略未知字段、宽松解析、不因新增字段失败
+ *   破坏性变更升 /v2 并行 ≥90 天（v1.1 为前端未开工期的破坏性修订特例，不经 /v2）。客户端义务
+ *   = 忽略未知字段、宽松解析、不因新增字段失败
  * - 通用（08 §1.1）：每响应带 `x-hub-api-version: 1` 与 `x-request-id`（排障必须引用）；
  *   错误形状见 [HubErrorPayload]；命令类端点共用 202 + CommandReceipt（ADR-07：进度只经事件流）
  */
@@ -64,6 +68,19 @@ interface HubApi {
 
     /** 已读上报命令 read.mark；readUpTo 指向当前化身的既有精确 message seq（05 §3.10）。 */
     suspend fun markRead(conversationId: String, req: ReadCursorRequest): CommandReceipt
+
+    // ── v1.1 新增（#16–#19；命令类 202 + CommandReceipt，幂等键由 Hub 生成，网关离线进 WAITING_BRIDGE 排队） ──
+    /** 新开会话命令 conversation.create（#16，openclaw 原生指令端点）；新会话经 roster 同步自动出现在列表。404 HUB-BIZ-002。 */
+    suspend fun createConversation(gatewayId: String, agentId: String, req: CreateConversationRequest): CommandReceipt
+
+    /** 压缩上下文命令 conversation.compact（#17）；化身更替后 conversationId 不变。404 HUB-BIZ-002。 */
+    suspend fun compactConversation(conversationId: String): CommandReceipt
+
+    /** Agent 状态查询（#18，纯投影派生无副作用；限流走列表类）。 */
+    suspend fun agentStatus(gatewayId: String, agentId: String): AgentStatusResponse
+
+    /** 会话重命名命令 conversation.rename（#19）；结果经 session.updated 事件与列表投影更新。404 HUB-BIZ-002。 */
+    suspend fun renameConversation(conversationId: String, req: RenameConversationRequest): CommandReceipt
 
     // ── 命令（#11 / #12，Bearer） ────────────────────────────────────────
     /** 取消 Run 命令 run.cancel；runId 只能从事件流获得；已结束后取消为幂等成功。 */

@@ -6,18 +6,21 @@ import dev.sharpxia.agentreins.hub.auth.TokenManager
 import dev.sharpxia.agentreins.hub.projection.ApprovalDecisionRequest
 import dev.sharpxia.agentreins.hub.projection.CancelRunRequest
 import dev.sharpxia.agentreins.hub.projection.CommandReceipt
+import dev.sharpxia.agentreins.hub.projection.CreateConversationRequest
 import dev.sharpxia.agentreins.hub.projection.ReadCursorRequest
+import dev.sharpxia.agentreins.hub.projection.RenameConversationRequest
 import dev.sharpxia.agentreins.hub.projection.SendMessageRequest
 import dev.sharpxia.agentreins.hubdb.HubDatabase
 import kotlinx.coroutines.CancellationException
 import kotlin.random.Random
 
 /**
- * [CommandClient] 实现（ADR-07 幂等队列 + 乐观 UI）：
+ * [CommandClient] 实现（ADR-07 幂等队列 + 乐观 UI；v1.1 命令目标 = conversationId）：
  * 入队（PENDING_LOCAL + 乐观行 sending）→ REST 提交（202 receipt → PERSISTED）→
  * 后续状态只经事件流 command.acked/command.failed 翻转（projector 落库）。
  * 幂等键生成后永不更换；HUB-BIZ-001 → FAILED（禁换键）；网络失败保持 PENDING_LOCAL 待重试。
  * payloadJson 存原始载荷（message.send 存文本、read.mark 存 readUpTo 数字串），重试按同键同载荷。
+ * v1.1 的 create/compact/rename 不走队列（幂等键由 Hub 生成，见 [CommandClient] 注）。
  */
 class DefaultCommandClient(
     private val api: HubApi,
@@ -25,37 +28,37 @@ class DefaultCommandClient(
     private val db: HubDatabase,
 ) : CommandClient {
 
-    override suspend fun sendMessage(
-        conversationId: String,
-        gatewayId: String,
-        sessionKey: String,
-        text: String,
-    ): CommandReceipt? = enqueueAndSubmit("message.send", conversationId, sessionKey, text, gatewayId) { key ->
-        api.sendMessage(conversationId, SendMessageRequest(idempotencyKey = key, message = text))
-    }
+    override suspend fun sendMessage(conversationId: String, text: String): CommandReceipt? =
+        enqueueAndSubmit("message.send", conversationId, text) { key ->
+            api.sendMessage(conversationId, SendMessageRequest(idempotencyKey = key, message = text))
+        }
 
-    override suspend fun markRead(
-        conversationId: String,
-        gatewayId: String,
-        sessionKey: String,
-        readUpTo: Long,
-    ) {
-        enqueueAndSubmit("read.mark", conversationId, sessionKey, readUpTo.toString()) { key ->
+    override suspend fun markRead(conversationId: String, readUpTo: Long) {
+        enqueueAndSubmit("read.mark", conversationId, readUpTo.toString()) { key ->
             api.markRead(conversationId, ReadCursorRequest(idempotencyKey = key, readUpTo = readUpTo))
         }
     }
 
-    override suspend fun cancelRun(runId: String, sessionKey: String?) {
-        enqueueAndSubmit("run.cancel", null, sessionKey, runId) { key ->
+    override suspend fun cancelRun(runId: String) {
+        enqueueAndSubmit("run.cancel", null, runId) { key ->
             api.cancelRun(runId, CancelRunRequest(idempotencyKey = key))
         }
     }
 
-    override suspend fun decideApproval(approvalId: String, decision: String, sessionKey: String?) {
-        enqueueAndSubmit("approval.decide", null, sessionKey, "$approvalId:$decision") { key ->
+    override suspend fun decideApproval(approvalId: String, decision: String) {
+        enqueueAndSubmit("approval.decide", null, "$approvalId:$decision") { key ->
             api.decideApproval(approvalId, ApprovalDecisionRequest(idempotencyKey = key, decision = decision))
         }
     }
+
+    override suspend fun createConversation(gatewayId: String, agentId: String, label: String?): CommandReceipt =
+        auth.withBearer { api.createConversation(gatewayId, agentId, CreateConversationRequest(label = label)) }
+
+    override suspend fun compactConversation(conversationId: String): CommandReceipt =
+        auth.withBearer { api.compactConversation(conversationId) }
+
+    override suspend fun renameConversation(conversationId: String, label: String): CommandReceipt =
+        auth.withBearer { api.renameConversation(conversationId, RenameConversationRequest(label = label)) }
 
     /** 队列重试：对未终态条目按同键同载荷重发（05 §3.9 义务 6）；重复提交被 Hub 幂等吸收。 */
     override suspend fun retryUnfinished() {
@@ -84,25 +87,24 @@ class DefaultCommandClient(
     private suspend fun enqueueAndSubmit(
         type: String,
         conversationId: String?,
-        sessionKey: String?,
         payload: String,
-        gatewayId: String = "",
         call: suspend (key: String) -> CommandReceipt,
     ): CommandReceipt? {
         val key = newUuid()
         val now = nowText()
         db.hubQueries.insertCommand(
             idempotencyKey = key, commandId = null, conversationId = conversationId,
-            sessionKey = sessionKey, runId = null, approvalId = null, type = type,
+            runId = null, approvalId = null, type = type,
             payloadJson = payload, state = "PENDING_LOCAL", errorCode = null,
             createdAt = now, updatedAt = now,
         )
-        // message.send 同步插乐观行（messageId=幂等键临时占位，message.created 回执时提升为服务端行）
-        if (type == "message.send") {
+        // message.send 同步插乐观行（messageId=幂等键临时占位，message.created 回执时提升为服务端行；
+        // seq=Long.MAX_VALUE 恒排末尾，回执后取服务端 seq）
+        if (type == "message.send" && conversationId != null) {
             db.hubQueries.upsertMessage(
-                messageId = key, gatewayId = gatewayId, sessionKey = sessionKey ?: "", seq = Long.MAX_VALUE,
+                messageId = key, conversationId = conversationId, seq = Long.MAX_VALUE,
                 role = "user", content = payload, state = "final", uiState = "sending",
-                openclawId = null, commandId = null, idempotencyKey = key, ts = now,
+                commandId = null, idempotencyKey = key, ts = now,
             )
         }
         return submit(key, call)
@@ -110,8 +112,8 @@ class DefaultCommandClient(
 
     private suspend fun submit(
         key: String,
-        call: suspend (String) -> dev.sharpxia.agentreins.hub.projection.CommandReceipt,
-    ): dev.sharpxia.agentreins.hub.projection.CommandReceipt? = try {
+        call: suspend (String) -> CommandReceipt,
+    ): CommandReceipt? = try {
         val receipt = auth.withBearer { call(key) }
         db.hubQueries.updateCommandId(receipt.commandId, receipt.acceptedAt, key)
         db.hubQueries.updateCommandState("PERSISTED", null, receipt.acceptedAt, key)

@@ -27,14 +27,16 @@ struct HubRootView: View {
                     sessionsPath.append(first)
                 }
             }
-            // Dev 发送探针：AGENTREINS_DEV_SEND_KEY=<sessionKey 前缀> + AGENTREINS_DEV_SEND=<文本>
-            // 发到指定既有会话（P3 命令链路验收用；必须指向专用测试会话，勿发真实会话）。
-            // 轮询等投影就绪（首快照+WSS 追平秒级），最多 20s。
+            // Dev 发送探针：AGENTREINS_DEV_SEND_KEY=<label 或 conversationId 前缀> + AGENTREINS_DEV_SEND=<文本>
+            // 发到指定既有会话（v1.1 起 sessionKey 不再出 UI 面，定位键改 label/conversationId；
+            // 必须指向专用测试会话，勿发真实会话）。轮询等投影就绪（首快照+WSS 追平秒级），最多 20s。
             if let keyPrefix = ProcessInfo.processInfo.environment["AGENTREINS_DEV_SEND_KEY"],
                let text = ProcessInfo.processInfo.environment["AGENTREINS_DEV_SEND"] {
                 var target: UiConversation?
                 for _ in 0..<20 {
-                    target = hub.conversations.first(where: { $0.sessionKey.contains(keyPrefix) })
+                    target = hub.conversations.first {
+                        $0.conversationId.hasPrefix(keyPrefix) || $0.label.contains(keyPrefix)
+                    }
                     if target != nil { break }
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
                 }
@@ -49,7 +51,7 @@ struct HubRootView: View {
     }
 }
 
-/// 会话列表：投影库 Flow 推送；label 空的渠道线程用 sessionKey 尾段兜底命名。
+/// 会话列表：投影库 Flow 推送；label 空的卡片以 agentId 兜底命名（v1.1：sessionKey 不出 UI 面）。
 struct HubHomeView: View {
     @State private var hub = HubStore.shared
 
@@ -59,7 +61,7 @@ struct HubHomeView: View {
                 ContentUnavailableView("暂无会话", systemImage: "bubble.left",
                                        description: Text("网关接入后会话将自动出现"))
             } else {
-                List(hub.conversations, id: \.sessionKey) { c in
+                List(hub.conversations, id: \.conversationId) { c in
                     NavigationLink(value: c) {
                         HubConversationRow(c: c)
                     }
@@ -81,10 +83,8 @@ private struct HubConversationRow: View {
     let c: UiConversation
 
     private var title: String {
-        let label = c.label
-        if !label.isEmpty { return label }
-        let tail = c.sessionKey.split(separator: ":").last.map(String.init) ?? c.sessionKey
-        return tail
+        if !c.label.isEmpty { return c.label }
+        return c.agentId.isEmpty ? "会话" : c.agentId
     }
 
     var body: some View {
@@ -116,10 +116,14 @@ private struct HubConversationRow: View {
     }
 }
 
-/// 会话页：消息时间线（乐观态徽标 + 流式行）+ 发送条；渲染完整后自动上报已读。
+/// 会话页：消息时间线（乐观态徽标 + 流式行 + 合成行分隔条）+ 发送条 + 会话操作菜单；
+/// 渲染完整后自动上报已读。
 struct HubChatView: View {
     @State private var hub = HubStore.shared
     @State private var draft = ""
+    @State private var renaming = false
+    @State private var renameDraft = ""
+    @State private var compacting = false
     @Environment(\.inkColors) private var ink
     let conv: UiConversation
 
@@ -154,14 +158,44 @@ struct HubChatView: View {
                 } label: {
                     Image(systemName: "arrow.up.circle.fill").font(.title2)
                 }
-                .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty || conv.conversationId == nil)
+                .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
         }
         .navigationTitle(title(conv))
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button {
+                        renameDraft = conv.label
+                        renaming = true
+                    } label: {
+                        Label("重命名", systemImage: "pencil")
+                    }
+                    Button {
+                        compacting = true
+                        hub.compact(conv) { _ in compacting = false }
+                    } label: {
+                        Label(compacting ? "压缩中…" : "压缩上下文", systemImage: "rectangle.compress.vertical")
+                    }
+                    .disabled(compacting || conv.hasActiveRun)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+            }
+        }
+        .alert("重命名会话", isPresented: $renaming) {
+            TextField("会话名称", text: $renameDraft)
+            Button("保存") {
+                let t = renameDraft.trimmingCharacters(in: .whitespaces)
+                guard !t.isEmpty else { return }
+                hub.rename(conv, to: t)
+            }
+            Button("取消", role: .cancel) {}
+        }
         .onAppear { hub.open(conv) }
-        .onDisappear { if hub.selected?.sessionKey == conv.sessionKey { hub.closeConversation() } }
+        .onDisappear { if hub.selected?.conversationId == conv.conversationId { hub.closeConversation() } }
         .task {
             try? await Task.sleep(nanoseconds: 400_000_000)
             let maxSeq = hub.messages.filter { $0.state == "final" }.map(\.seq).max() ?? 0
@@ -171,7 +205,7 @@ struct HubChatView: View {
 
     private func title(_ c: UiConversation) -> String {
         if !c.label.isEmpty { return c.label }
-        return c.sessionKey.split(separator: ":").last.map(String.init) ?? c.sessionKey
+        return c.agentId.isEmpty ? "会话" : c.agentId
     }
 }
 
@@ -180,25 +214,38 @@ private struct HubMessageRow: View {
     @Environment(\.inkColors) private var ink
 
     var body: some View {
-        HStack {
-            if m.role == "user" { Spacer(minLength: 40) }
-            VStack(alignment: m.role == "user" ? .trailing : .leading, spacing: 3) {
-                Group {
-                    if m.content.isEmpty && m.state == "streaming" {
-                        Text("…")
-                    } else if m.role == "user" {
-                        Text(m.content)
-                    } else {
-                        // 助手内容走自研轻量 Markdown 渲染器（0.4.8 滑动性能专项资产，P4 接入 Hub 面）
-                        MarkdownView(content: m.content)
-                    }
-                }
-                .padding(.horizontal, 12).padding(.vertical, 8)
-                .background(RoundedRectangle(cornerRadius: 16)
-                    .fill(m.role == "user" ? Color.accentColor.opacity(0.24) : ink.surfaceTertiary))
-                if m.role == "user" { statusBadge }
+        if m.role == "" {
+            // 合成行（v1.1 additive：role="" = compaction/reset 标记行，无正文语义）渲染为分隔条
+            HStack(spacing: 8) {
+                Rectangle().fill(ink.surfaceTertiary).frame(height: 1)
+                Label(m.content.isEmpty ? "上下文已压缩" : m.content, systemImage: "rectangle.compress.vertical")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Rectangle().fill(ink.surfaceTertiary).frame(height: 1)
             }
-            if m.role != "user" { Spacer(minLength: 40) }
+            .padding(.vertical, 4)
+        } else {
+            HStack {
+                if m.role == "user" { Spacer(minLength: 40) }
+                VStack(alignment: m.role == "user" ? .trailing : .leading, spacing: 3) {
+                    Group {
+                        if m.content.isEmpty && m.state == "streaming" {
+                            Text("…")
+                        } else if m.role == "user" {
+                            Text(m.content)
+                        } else {
+                            // 助手内容走自研轻量 Markdown 渲染器（0.4.8 滑动性能专项资产，P4 接入 Hub 面）
+                            MarkdownView(content: m.content)
+                        }
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 16)
+                        .fill(m.role == "user" ? Color.accentColor.opacity(0.24) : ink.surfaceTertiary))
+                    if m.role == "user" { statusBadge }
+                }
+                if m.role != "user" { Spacer(minLength: 40) }
+            }
         }
     }
 

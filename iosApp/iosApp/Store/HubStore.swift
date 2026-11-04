@@ -38,7 +38,7 @@ final class HubStore {
     func open(_ conv: UiConversation) {
         selected = conv
         messages = []
-        bridge.hubWatchMessages(gatewayId: conv.gatewayId, sessionKey: conv.sessionKey) { [weak self] list in
+        bridge.hubWatchMessages(conversationId: conv.conversationId) { [weak self] list in
             self?.messages = list
         }
     }
@@ -55,20 +55,32 @@ final class HubStore {
         selected = conv
         messages = []
         chatPush = true
-        bridge.hubWatchMessages(gatewayId: conv.gatewayId, sessionKey: conv.sessionKey) { [weak self] list in
+        bridge.hubWatchMessages(conversationId: conv.conversationId) { [weak self] list in
             self?.messages = list
         }
     }
 
     func send(_ text: String) {
         guard let c = selected else { return }
-        bridge.hubSend(conversationId: c.conversationId ?? "", gatewayId: c.gatewayId, sessionKey: c.sessionKey, text: text)
+        bridge.hubSend(conversationId: c.conversationId, text: text)
     }
 
     /// 渲染完成后上报已读（取已渲染最大 seq）。
     func markReadUpTo(_ seq: Int64) {
-        guard let c = selected, let id = c.conversationId else { return }
-        bridge.hubMarkRead(conversationId: id, gatewayId: c.gatewayId, sessionKey: c.sessionKey, readUpTo: seq)
+        guard let c = selected else { return }
+        bridge.hubMarkRead(conversationId: c.conversationId, readUpTo: seq)
+    }
+
+    // ---------- v1.1 新端点（openclaw 原生指令） ----------
+
+    /// 会话重命名（conversation.rename；结果经 session.updated 事件回流列表）。
+    func rename(_ conv: UiConversation, to label: String, onDone: ((Bool) -> Void)? = nil) {
+        bridge.hubRenameConversation(conversationId: conv.conversationId, label: label, onDone: { ok in onDone?(ok.boolValue) })
+    }
+
+    /// 压缩上下文（conversation.compact；化身更替后 conversationId 不变）。
+    func compact(_ conv: UiConversation, onDone: ((Bool) -> Void)? = nil) {
+        bridge.hubCompactConversation(conversationId: conv.conversationId, onDone: { ok in onDone?(ok.boolValue) })
     }
 
     /// 设备清单（设备管理页；每次进入拉新）。

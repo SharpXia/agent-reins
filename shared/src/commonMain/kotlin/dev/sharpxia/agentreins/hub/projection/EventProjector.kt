@@ -14,5 +14,11 @@ package dev.sharpxia.agentreins.hub.projection
 interface EventProjector {
     fun applySnapshot(snapshot: SnapshotResponse)
 
+    /**
+     * 会话列表校准（08 §4.2 #7；R4 周期校准的卡片面）：服务端列表行 upsert 合并——
+     * 新会话卡出现、既有卡字段对齐；**不清表**（与快照整体覆盖不同：仅对账、不回滚事件已推进的本地态）。
+     */
+    fun applyConversations(rows: List<ConversationRow>)
+
     fun applyEvent(envelope: EventEnvelope)
 }

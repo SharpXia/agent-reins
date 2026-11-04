@@ -2,32 +2,30 @@ package dev.sharpxia.agentreins.hub.projection
 
 import dev.sharpxia.agentreins.hubdb.HubDatabase
 import kotlinx.serialization.KSerializer
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.jsonObject
 import kotlin.concurrent.Volatile
 
-// ── 事件载荷 DTO（hub-wss-frames-v1.schema.json $defs/Data* 镜像；宽松解析，未知字段忽略） ──
+// ── 事件载荷 DTO（hub-wss-frames-v1.schema.json $defs/Data* 镜像，v1.1；宽松解析，未知字段忽略） ──
 
 @Serializable
 private data class DataMessageDelta(val messageId: String, val deltaText: String, val replace: Boolean? = null)
 
+/** v1.1：openclawId/sessionId 已撤（App 面禁出 openclaw 锚字段，02 R7）。 */
 @Serializable
 private data class DataMessageCreated(
     val messageId: String,
     val role: String,
     val content: String,
-    val openclawId: String,
-    val sessionId: String,
     val sourceMessageSeq: Long,
     val commandId: String? = null,
     val idempotencyKey: String? = null,
 )
 
 @Serializable
-private data class DataMessageReplaced(val messageId: String, val content: String, val openclawId: String)
+private data class DataMessageReplaced(val messageId: String, val content: String)
 
 @Serializable
 private data class DataMessageFailed(val messageId: String, val reason: String)
@@ -40,12 +38,12 @@ private data class DataSessionCreated(
     val hasActiveRun: Boolean,
 )
 
+/** v1.1：sessionId 已撤；lifecycleRevision 保留 = 化身更替信号（客户端据此失效本地缓存，05 §3.10）。 */
 @Serializable
 private data class DataSessionUpdated(
     val sessionKey: String,
     val agentId: String,
     val label: String,
-    val sessionId: String,
     val lifecycleRevision: Long,
     val hasActiveRun: Boolean,
     val activeRunIds: JsonElement? = null,
@@ -102,11 +100,13 @@ class ProjectionStats {
 }
 
 /**
- * [EventProjector] 的 SQLite 落库实现（05 §3.11 合并规则）。
+ * [EventProjector] 的 SQLite 落库实现（05 §3.11 合并规则，契约 v1.1 路由）。
  *
- * 关键契约事实：服务端 conversation_id 是投影时新生成的内部 ULID，事件载荷不携带——
- * 会话/消息/已读的自然键 = (gatewayId, sessionKey)，conversationId 仅由快照对齐填充；
- * 事件流单独建的会话行 reconciling=1，句柄补齐前 UI 不可进详情页。
+ * 路由模型（Hub.sq v3 文件头）：卡片主键 = conversationId（快照/列表是卡片唯一来源）；
+ * 事件→卡片经 hubConvKeys 映射 (gatewayId, sessionKey) → conversationId。映射只经两条
+ * 强通道学习（弱键如 label 不做，宁可慢不可错绑）：① 自发送回执链（message.created 的
+ * idempotencyKey → 命令队列/乐观行携带的 conversationId）；② 自命令 ack（信封 sessionKey +
+ * 队列条目）。未映射事件不建卡：skip 并靠 R4 周期校准兜底。
  * 幂等性边界（INV-1）：本类所有写路径除 delta append 外均为 upsert/幂等 UPDATE；
  * delta 的重复防护由调用方（事件 id 去重 + 水位裁决）承担。
  */
@@ -140,11 +140,7 @@ class DefaultEventProjector(
             db.hubQueries.clearReadCursors()
             snapshot.conversations.forEach { c ->
                 db.hubQueries.upsertConversation(
-                    gatewayId = c.gatewayId,
-                    sessionKey = c.sessionKey,
                     conversationId = c.conversationId,
-                    sessionId = c.sessionId,
-                    lifecycleRevision = c.lifecycleRevision,
                     label = c.label,
                     agentId = c.agentId,
                     lastMessagePreview = c.lastMessagePreview,
@@ -157,25 +153,45 @@ class DefaultEventProjector(
                 snapshot.messages[c.conversationId]?.forEach { m ->
                     db.hubQueries.upsertMessage(
                         messageId = m.messageId,
-                        gatewayId = c.gatewayId,
-                        sessionKey = c.sessionKey,
+                        conversationId = c.conversationId,
                         seq = m.seq,
                         role = m.role,
                         content = m.content,
                         state = m.state,
                         uiState = m.uiState,
-                        openclawId = m.openclaw?.id,
                         commandId = m.commandId,
                         idempotencyKey = m.idempotencyKey,
                         ts = m.timestamp,
                     )
                 }
                 snapshot.readCursors[c.conversationId]?.let { up ->
-                    db.hubQueries.upsertReadCursor(c.gatewayId, c.sessionKey, up)
+                    db.hubQueries.upsertReadCursor(c.conversationId, up)
                 }
             }
+            // 映射表跨重建保留（conversationId 化身更替后不变），失效项（卡已不存在）清掉
+            db.hubQueries.clearConvKeysOrphan()
         }
         stats.snapshotsApplied++
+    }
+
+    /** 会话列表校准（08 §4.2）：upsert 合并，不清表、不碰 hubConvKeys（映射跨校准保留）。 */
+    override fun applyConversations(rows: List<ConversationRow>) {
+        db.transaction {
+            rows.forEach { c ->
+                db.hubQueries.upsertConversation(
+                    conversationId = c.conversationId,
+                    label = c.label,
+                    agentId = c.agentId,
+                    lastMessagePreview = c.lastMessagePreview,
+                    lastSeq = c.lastSeq,
+                    lastActiveAt = c.lastActiveAt,
+                    unreadCount = c.unreadCount.toLong(),
+                    hasActiveRun = if (c.hasActiveRun) 1L else 0L,
+                    reconciling = if (c.reconciling) 1L else 0L,
+                )
+            }
+            db.hubQueries.clearConvKeysOrphan()
+        }
     }
 
     // ── 事件应用（05 §3.11 表；载荷解析失败/目标行缺失 → 忽略内容，游标由调用方照常推进） ──
@@ -230,9 +246,7 @@ class DefaultEventProjector(
 
     private fun onMessageCreated(envelope: EventEnvelope) {
         val d = decode(DataMessageCreated.serializer(), envelope.data) ?: return skip()
-        val g = envelope.gatewayId
-        val sk = envelope.sessionKey ?: return skip()
-        ensureConversationRow(g, sk, envelope)
+        val convId = resolveConversation(envelope, d.idempotencyKey) ?: return skip()
         val isUser = d.role == "user"
         // 用户行回执：同 idempotencyKey 的本地乐观行（PENDING_LOCAL 期 messageId=幂等键）整体提升，
         // 避免乐观行与服务端行双行并存（05 §3.9 义务 4 的 UI 翻转语义）
@@ -244,7 +258,6 @@ class DefaultEventProjector(
                 content = d.content,
                 seq = d.sourceMessageSeq,
                 commandId = d.commandId,
-                openclawId = d.openclawId,
                 ts = envelope.ts,
                 idempotencyKey = d.idempotencyKey,
             )
@@ -252,21 +265,18 @@ class DefaultEventProjector(
                 preview = d.content.take(PREVIEW_MAX),
                 seq = d.sourceMessageSeq,
                 lastActiveAt = envelope.ts,
-                gatewayId = g,
-                sessionKey = sk,
+                conversationId = convId,
             )
             return
         }
         db.hubQueries.upsertMessage(
             messageId = d.messageId,
-            gatewayId = g,
-            sessionKey = sk,
+            conversationId = convId,
             seq = d.sourceMessageSeq,
             role = d.role,
             content = d.content,
             state = STATE_FINAL,
             uiState = if (isUser) UI_DELIVERED else null,
-            openclawId = d.openclawId,
             commandId = d.commandId,
             idempotencyKey = d.idempotencyKey,
             ts = envelope.ts,
@@ -279,14 +289,14 @@ class DefaultEventProjector(
             preview = d.content.take(PREVIEW_MAX),
             seq = d.sourceMessageSeq,
             lastActiveAt = envelope.ts,
-            gatewayId = g,
-            sessionKey = sk,
+            conversationId = convId,
         )
-        // 本地未读增量（05 §3.7 义务 3，与 Hub 同口径：当前化身 seq>readUpTo 的 assistant final 行）
-        if (!isUser) {
-            val readUpTo = db.hubQueries.selectReadCursor(g, sk).executeAsOneOrNull() ?: 0L
+        // 本地未读增量（05 §3.7 义务 3，与 Hub 同口径：当前化身 seq>readUpTo 的 assistant final 行；
+        // role="" 合成行不计）
+        if (!isUser && d.role != ROLE_SYNTHETIC) {
+            val readUpTo = db.hubQueries.selectReadCursor(convId).executeAsOneOrNull() ?: 0L
             if (d.sourceMessageSeq > readUpTo) {
-                bumpUnread(g, sk)
+                bumpUnread(convId)
             }
         }
     }
@@ -307,61 +317,59 @@ class DefaultEventProjector(
     // ── run / session 域 ─────────────────────────────────────────────────────
 
     private fun setRun(envelope: EventEnvelope, active: Boolean) {
-        val sk = envelope.sessionKey ?: return
+        val convId = resolveConversation(envelope, null) ?: return
         db.hubQueries.setConversationActiveRun(
             hasActiveRun = if (active) 1L else 0L,
-            gatewayId = envelope.gatewayId,
-            sessionKey = sk,
+            conversationId = convId,
         )
     }
 
     private fun onSessionCreated(envelope: EventEnvelope) {
-        val d = decode(DataSessionCreated.serializer(), envelope.data) ?: return skip()
-        val sk = d.sessionKey.ifEmpty { envelope.sessionKey } ?: return skip()
-        upsertConversationFromEvent(envelope.gatewayId, sk, d.label, d.agentId, d.hasActiveRun, envelope.ts)
+        // v1.1：事件不带 conversationId，不建卡（卡片唯一来源 = 快照/列表校准），且新会话的
+        // conversationId 未知、映射无从学习——静默忽略（非解析失败，不计 skip），卡片由 R4 校准拉入。
     }
 
     private fun onSessionUpdated(envelope: EventEnvelope) {
         val d = decode(DataSessionUpdated.serializer(), envelope.data) ?: return skip()
-        val sk = d.sessionKey.ifEmpty { envelope.sessionKey } ?: return skip()
-        val g = envelope.gatewayId
-        val existing = db.hubQueries.selectConversation(g, sk).executeAsOneOrNull()
-        if (existing != null && existing.lifecycleRevision != d.lifecycleRevision) {
-            // 化身更替（05 §3.10）：旧代次消息封存移出、seq 从 1 重计、未读清零、readCursor 重置
-            db.hubQueries.deleteMessagesByConversation(g, sk)
-            db.hubQueries.setReadCursorValue(g, sk, 0L)
-            db.hubQueries.setConversationUnread(0L, g, sk)
+        val convId = resolveConversation(envelope, null) ?: return skip()
+        val existing = db.hubQueries.selectConversation(convId).executeAsOneOrNull() ?: return skip()
+        // 化身更替（05 §3.10）：revision 持久基准（列，-1=未知/快照行）——基准未知时只记录不重置；
+        // 已知且变化 = 更替：旧代次消息封存移出、seq 从 1 重计、未读清零、readCursor 重置
+        val prior = existing.lifecycleRevision
+        if (prior >= 0 && prior != d.lifecycleRevision) {
+            db.hubQueries.deleteMessagesByConversation(convId)
+            db.hubQueries.deleteReadCursor(convId)
+            db.hubQueries.resetConversationIncarnation(convId)
         }
-        upsertConversationFromEvent(g, sk, d.label, d.agentId, d.hasActiveRun, envelope.ts)
-        if (existing != null) {
-            db.hubQueries.updateConversationIdentity(
-                sessionId = d.sessionId,
-                revision = d.lifecycleRevision,
-                label = d.label,
-                hasActiveRun = if (d.hasActiveRun) 1L else 0L,
-                gatewayId = g,
-                sessionKey = sk,
-            )
-        }
+        db.hubQueries.updateConversationIdentity(
+            label = d.label,
+            hasActiveRun = if (d.hasActiveRun) 1L else 0L,
+            revision = d.lifecycleRevision,
+            conversationId = convId,
+        )
     }
 
     private fun onSessionRemoved(envelope: EventEnvelope) {
         val d = decode(DataSessionRemoved.serializer(), envelope.data) ?: return skip()
-        val sk = d.sessionKey.ifEmpty { envelope.sessionKey } ?: return skip()
         val g = envelope.gatewayId
-        db.hubQueries.deleteConversation(g, sk)
-        db.hubQueries.deleteMessagesByConversation(g, sk)
-        db.hubQueries.deleteReadCursor(g, sk)
+        val sk = d.sessionKey.ifEmpty { envelope.sessionKey } ?: return skip()
+        val key = db.hubQueries.selectConversationByKey(g, sk).executeAsOneOrNull() ?: return skip()
+        val convId = key.conversationId
+        db.hubQueries.deleteConversation(convId)
+        db.hubQueries.deleteMessagesByConversation(convId)
+        db.hubQueries.deleteReadCursor(convId)
+        db.hubQueries.deleteConvKey(g, sk)
     }
 
     // ── approval / command / read 域 ─────────────────────────────────────────
 
     private fun onApprovalRequested(envelope: EventEnvelope) {
         val d = decode(DataApprovalRequested.serializer(), envelope.data) ?: return skip()
+        val convId = resolveConversation(envelope, null)
         db.hubQueries.upsertApproval(
             approvalId = d.approvalId,
             runId = d.runId,
-            sessionKey = envelope.sessionKey,
+            conversationId = convId,
             toolName = d.toolName,
             payloadSummary = d.payloadSummary,
             status = "pending",
@@ -381,6 +389,7 @@ class DefaultEventProjector(
         db.hubQueries.updateCommandId(d.commandId, envelope.ts, d.idempotencyKey)
         // 发送行 UI 翻转：正向迁移即已投递（COMPLETED 由 message.created 权威内容收敛）
         db.hubQueries.setMessageUiStateByIdem(UI_DELIVERED, d.idempotencyKey)
+        learnMappingFromCommand(envelope, d.idempotencyKey)
     }
 
     private fun onCommandFailed(envelope: EventEnvelope) {
@@ -389,43 +398,54 @@ class DefaultEventProjector(
         if (d.status == "FAILED") {
             db.hubQueries.setMessageUiStateByIdem(UI_FAILED, d.idempotencyKey)
         }
+        learnMappingFromCommand(envelope, d.idempotencyKey)
     }
 
     private fun onReadUpdated(envelope: EventEnvelope) {
         val d = decode(DataReadUpdated.serializer(), envelope.data) ?: return skip()
-        val conv = db.hubQueries.selectConversationByHandle(d.conversationId).executeAsOneOrNull()
-            ?: return skip() // 句柄未对齐：跳过内容，快照/校准对齐后重取
-        val g = conv.gatewayId
-        val sk = conv.sessionKey
-        db.hubQueries.upsertReadCursor(g, sk, d.readUpTo) // INV-7 取 max
-        val unread = db.hubQueries.countUnread(g, sk, d.readUpTo).executeAsOne()
-        db.hubQueries.setConversationUnread(unread, g, sk)
+        // conversationId 直接可路由（read 域载荷自携带），无需映射
+        db.hubQueries.selectConversation(d.conversationId).executeAsOneOrNull() ?: return skip()
+        db.hubQueries.upsertReadCursor(d.conversationId, d.readUpTo) // INV-7 取 max
+        val unread = db.hubQueries.countUnread(d.conversationId, d.readUpTo).executeAsOne()
+        db.hubQueries.setConversationUnread(unread, d.conversationId)
     }
 
     // ── 内部 ─────────────────────────────────────────────────────────────────
 
-    /** 事件流建会话占位行：conversationId=NULL + reconciling=1，句柄由快照/校准对齐。 */
-    private fun ensureConversationRow(g: String, sk: String, envelope: EventEnvelope) {
-        val existing = db.hubQueries.selectConversation(g, sk).executeAsOneOrNull()
-        if (existing == null) {
-            upsertConversationFromEvent(g, sk, label = "", agentId = "", hasActiveRun = false, ts = envelope.ts)
+    /**
+     * 事件 → 卡片路由 + 映射学习：
+     * ① hubConvKeys 直查；② 自发送回执链——message.created 的 idempotencyKey 在本地命令队列
+     * （或乐观行）中携带 conversationId，学习后写映射；③ 仍无 → null（skip，校准兜底）。
+     */
+    private fun resolveConversation(envelope: EventEnvelope, idempotencyKey: String?): String? {
+        val sk = envelope.sessionKey ?: return null
+        val g = envelope.gatewayId
+        db.hubQueries.selectConversationByKey(g, sk).executeAsOneOrNull()?.let { return it.conversationId }
+        if (idempotencyKey != null) {
+            db.hubQueries.selectCommandByKey(idempotencyKey).executeAsOneOrNull()?.conversationId
+                ?.let { convId ->
+                    db.hubQueries.upsertConvKey(g, sk, convId)
+                    return convId
+                }
+            db.hubQueries.selectMessageByIdem(idempotencyKey).executeAsOneOrNull()?.conversationId
+                ?.let { convId ->
+                    db.hubQueries.upsertConvKey(g, sk, convId)
+                    return convId
+                }
         }
+        return null
     }
 
-    private fun upsertConversationFromEvent(g: String, sk: String, label: String, agentId: String, hasActiveRun: Boolean, ts: String) {
-        db.hubQueries.upsertConversationFromEvent(
-            gatewayId = g,
-            sessionKey = sk,
-            label = label,
-            agentId = agentId,
-            lastActiveAt = ts,
-            hasActiveRun = if (hasActiveRun) 1L else 0L,
-        )
+    /** 自命令 ack 的映射学习（通道②）：信封 (gatewayId, sessionKey) + 队列条目 conversationId。 */
+    private fun learnMappingFromCommand(envelope: EventEnvelope, idempotencyKey: String) {
+        val sk = envelope.sessionKey ?: return
+        val convId = db.hubQueries.selectCommandByKey(idempotencyKey).executeAsOneOrNull()?.conversationId ?: return
+        db.hubQueries.upsertConvKey(envelope.gatewayId, sk, convId)
     }
 
-    private fun bumpUnread(g: String, sk: String) {
-        val conv = db.hubQueries.selectConversation(g, sk).executeAsOneOrNull() ?: return
-        db.hubQueries.setConversationUnread(conv.unreadCount + 1, g, sk)
+    private fun bumpUnread(convId: String) {
+        val conv = db.hubQueries.selectConversation(convId).executeAsOneOrNull() ?: return
+        db.hubQueries.setConversationUnread(conv.unreadCount + 1, convId)
     }
 
     private fun <T> decode(serializer: KSerializer<T>, data: JsonElement): T? =
@@ -440,6 +460,7 @@ class DefaultEventProjector(
         internal const val STATE_FAILED = "failed"
         internal const val UI_DELIVERED = "delivered"
         internal const val UI_FAILED = "failed"
+        internal const val ROLE_SYNTHETIC = ""
         internal const val PREVIEW_MAX = 120
 
         private val ListSerializerAgentRef =

@@ -7,14 +7,17 @@ import dev.sharpxia.agentreins.hub.auth.LoginOk
 import dev.sharpxia.agentreins.hub.auth.LoginRequest
 import dev.sharpxia.agentreins.hub.auth.RefreshOk
 import dev.sharpxia.agentreins.hub.auth.RefreshRequest
+import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
 import dev.sharpxia.agentreins.hub.projection.ApprovalDecisionRequest
 import dev.sharpxia.agentreins.hub.projection.CancelRunRequest
 import dev.sharpxia.agentreins.hub.projection.CommandReceipt
 import dev.sharpxia.agentreins.hub.projection.ConversationsPage
+import dev.sharpxia.agentreins.hub.projection.CreateConversationRequest
 import dev.sharpxia.agentreins.hub.projection.EventsPage
 import dev.sharpxia.agentreins.hub.projection.GatewaysPage
 import dev.sharpxia.agentreins.hub.projection.MessagesPage
 import dev.sharpxia.agentreins.hub.projection.ReadCursorRequest
+import dev.sharpxia.agentreins.hub.projection.RenameConversationRequest
 import dev.sharpxia.agentreins.hub.projection.SendMessageRequest
 import dev.sharpxia.agentreins.hub.projection.SnapshotResponse
 import io.ktor.client.HttpClient
@@ -24,6 +27,7 @@ import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
+import io.ktor.client.request.patch
 import io.ktor.client.request.parameter
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -88,6 +92,23 @@ class DefaultHubApi(
     override suspend fun markRead(conversationId: String, req: ReadCursorRequest): CommandReceipt =
         post("/conversations/$conversationId/read-cursor", req)
 
+    // ── v1.1 新增（#16–#19） ────────────────────────────────────────────
+
+    override suspend fun createConversation(
+        gatewayId: String,
+        agentId: String,
+        req: CreateConversationRequest,
+    ): CommandReceipt = post("/gateways/$gatewayId/agents/$agentId/conversations", req)
+
+    override suspend fun compactConversation(conversationId: String): CommandReceipt =
+        post("/conversations/$conversationId/compact", Unit)
+
+    override suspend fun agentStatus(gatewayId: String, agentId: String): AgentStatusResponse =
+        get("/gateways/$gatewayId/agents/$agentId/status")
+
+    override suspend fun renameConversation(conversationId: String, req: RenameConversationRequest): CommandReceipt =
+        patch("/conversations/$conversationId", req)
+
     override suspend fun cancelRun(runId: String, req: CancelRunRequest): CommandReceipt =
         post("/runs/$runId/cancel", req)
 
@@ -112,6 +133,15 @@ class DefaultHubApi(
     private suspend inline fun <reified B : Any, reified T> post(path: String, body: B, auth: Boolean = true): T {
         val resp = http.post(config.baseUrl + path) {
             if (auth) bearer()
+            contentType(ContentType.Application.Json)
+            setBody(body)
+        }
+        return decode(resp)
+    }
+
+    private suspend inline fun <reified B : Any, reified T> patch(path: String, body: B): T {
+        val resp = http.patch(config.baseUrl + path) {
+            bearer()
             contentType(ContentType.Application.Json)
             setBody(body)
         }

@@ -6,6 +6,8 @@ import dev.sharpxia.agentreins.hub.auth.CredentialStore
 import dev.sharpxia.agentreins.hub.auth.platformCredentialStore
 import dev.sharpxia.agentreins.hub.command.CommandClient
 import dev.sharpxia.agentreins.hub.command.DefaultCommandClient
+import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
+import dev.sharpxia.agentreins.hub.projection.CommandReceipt
 import dev.sharpxia.agentreins.hub.projection.DefaultEventProjector
 import dev.sharpxia.agentreins.hub.projection.EventProjector
 import dev.sharpxia.agentreins.hub.db.createHubDriver
@@ -22,10 +24,8 @@ import kotlinx.coroutines.launch
 
 /** UI 只读模型：隔离 sqldelight 生成行类型（iOS 桥按此投影）。 */
 data class UiConversation(
-    val gatewayId: String,
-    val sessionKey: String,
-    /** REST 句柄；事件流单独建的占位行此值为 null（对齐前不可进详情/发消息）。 */
-    val conversationId: String?,
+    /** Hub ULID 句柄；化身更替后不变。卡片唯一来源 = 快照/列表校准（v1.1：UI 只见 conversation）。 */
+    val conversationId: String,
     val label: String,
     val agentId: String,
     val preview: String,
@@ -102,6 +102,7 @@ class DefaultHubClient(
         db.hubQueries.transaction {
             db.hubQueries.clearGateways()
             db.hubQueries.clearConversations()
+            db.hubQueries.clearConvKeys()
             db.hubQueries.clearMessages()
             db.hubQueries.clearReadCursors()
             db.hubQueries.clearCommands()
@@ -117,7 +118,6 @@ class DefaultHubClient(
         return db.hubQueries.selectConversations().asFlow().mapToList(scope.coroutineContext).map { rows ->
             rows.map {
                 UiConversation(
-                    gatewayId = it.gatewayId, sessionKey = it.sessionKey,
                     conversationId = it.conversationId, label = it.label, agentId = it.agentId,
                     preview = it.lastMessagePreview, lastSeq = it.lastSeq, lastActiveAt = it.lastActiveAt,
                     unread = it.unreadCount.toInt(), hasActiveRun = it.hasActiveRun == 1L,
@@ -127,9 +127,9 @@ class DefaultHubClient(
         }
     }
 
-    fun observeMessages(gatewayId: String, sessionKey: String): Flow<List<UiMessage>> {
+    fun observeMessages(conversationId: String): Flow<List<UiMessage>> {
         val db = db ?: return flowOf(emptyList())
-        return db.hubQueries.selectMessages(gatewayId, sessionKey).asFlow().mapToList(scope.coroutineContext).map { rows ->
+        return db.hubQueries.selectMessages(conversationId).asFlow().mapToList(scope.coroutineContext).map { rows ->
             rows.map {
                 UiMessage(
                     messageId = it.messageId, seq = it.seq, role = it.role, content = it.content,
@@ -140,8 +140,25 @@ class DefaultHubClient(
     }
 
     /** 会话完整渲染后上报已读（readUpTo = 已渲染最大 seq）。 */
-    suspend fun markRead(conversationId: String, gatewayId: String, sessionKey: String, readUpTo: Long) {
-        commands?.markRead(conversationId, gatewayId, sessionKey, readUpTo)
+    suspend fun markRead(conversationId: String, readUpTo: Long) {
+        commands?.markRead(conversationId, readUpTo)
+    }
+
+    // ── v1.1 新端点门面（#16/#17/#18/#19；不走幂等队列，直调） ──────────────
+
+    /** 新开会话（openclaw 原生指令）；新会话经 roster 同步 + R4 校准自动出现在列表。 */
+    suspend fun createConversation(gatewayId: String, agentId: String, label: String?): CommandReceipt =
+        commands!!.createConversation(gatewayId, agentId, label)
+
+    suspend fun compactConversation(conversationId: String): CommandReceipt =
+        commands!!.compactConversation(conversationId)
+
+    suspend fun renameConversation(conversationId: String, label: String): CommandReceipt =
+        commands!!.renameConversation(conversationId, label)
+
+    suspend fun agentStatus(gatewayId: String, agentId: String): AgentStatusResponse {
+        val stack = runtime.authStack ?: throw IllegalStateException("未登录")
+        return stack.auth.withBearer { stack.api.agentStatus(gatewayId, agentId) }
     }
 
     companion object {

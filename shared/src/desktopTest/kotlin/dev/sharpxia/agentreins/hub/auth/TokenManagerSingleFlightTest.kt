@@ -5,7 +5,10 @@ import dev.sharpxia.agentreins.hub.HubErrorPayload
 import dev.sharpxia.agentreins.hub.HubException
 import dev.sharpxia.agentreins.hub.projection.ApprovalDecisionRequest
 import dev.sharpxia.agentreins.hub.projection.CancelRunRequest
+import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
 import dev.sharpxia.agentreins.hub.projection.CommandReceipt
+import dev.sharpxia.agentreins.hub.projection.CreateConversationRequest
+import dev.sharpxia.agentreins.hub.projection.RenameConversationRequest
 import dev.sharpxia.agentreins.hub.projection.ConversationsPage
 import dev.sharpxia.agentreins.hub.projection.EventsPage
 import dev.sharpxia.agentreins.hub.projection.GatewaysPage
@@ -73,6 +76,10 @@ class TokenManagerSingleFlightTest {
         override suspend fun conversations(limit: Int?, cursor: String?): ConversationsPage = unused()
         override suspend fun messages(conversationId: String, before: Long?, limit: Int?): MessagesPage = unused()
         override suspend fun sendMessage(conversationId: String, req: SendMessageRequest): CommandReceipt = unused()
+        override suspend fun createConversation(gatewayId: String, agentId: String, req: CreateConversationRequest): CommandReceipt = unused()
+        override suspend fun compactConversation(conversationId: String): CommandReceipt = unused()
+        override suspend fun agentStatus(gatewayId: String, agentId: String): AgentStatusResponse = unused()
+        override suspend fun renameConversation(conversationId: String, req: RenameConversationRequest): CommandReceipt = unused()
         override suspend fun markRead(conversationId: String, req: ReadCursorRequest): CommandReceipt = unused()
         override suspend fun cancelRun(runId: String, req: CancelRunRequest): CommandReceipt = unused()
         override suspend fun decideApproval(approvalId: String, req: ApprovalDecisionRequest): CommandReceipt = unused()

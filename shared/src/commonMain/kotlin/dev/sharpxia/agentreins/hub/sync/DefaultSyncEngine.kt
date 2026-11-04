@@ -94,7 +94,18 @@ class DefaultSyncEngine(
             caughtUp = !page.hasMore && next == page.currentWatermark
             if (!page.hasMore) break
         }
+        if (caughtUp) runCatching { calibrateConversations() }
         return caughtUp
+    }
+
+    /**
+     * 会话列表校准（08 §4.2 #7，R4 的卡片面）：v1.1 事件不带 conversationId、客户端不建占位卡，
+     * 新会话卡/字段对齐全靠本路径——追平后拉一页列表 upsert 合并（新卡出现；孤儿映射顺带清理）。
+     * 失败不阻塞同步循环（下一校准节拍重试）。
+     */
+    suspend fun calibrateConversations() {
+        val page = auth.withBearer { api.conversations(limit = 200) }
+        if (page.conversations.isNotEmpty()) projector.applyConversations(page.conversations)
     }
 
     suspend fun onEventArrived(e: EventEnvelope) {

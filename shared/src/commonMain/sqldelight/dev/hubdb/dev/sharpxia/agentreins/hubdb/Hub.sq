@@ -1,11 +1,14 @@
--- Hub 投影库 v2（方案 §7-R3：不迁网关时代数据，整库重建；库文件 agentreins-hub.db）。
+-- Hub 投影库 v3（契约 v1.1.0 去 session 化，tag hub-api-v1.1.1）。
 -- 全部表都是 Hub 快照+事件流的派生投影，可随时整库丢弃重建（05 §3.12）；
 -- 例外 hubCommands/hubSyncState 属于 O-01 持久化最小集（发送队列含幂等键、eventCursor）。
 --
--- 锚定纪律（实测服务端 store_pg.go：conversation_id 是投影时新生成的内部 ULID，
--- 事件载荷不携带）：会话/消息/已读的投影自然键 = (gatewayId, sessionKey)；
--- conversationId 只是 REST 句柄，由快照与 /v1/conversations 校准对齐填充——
--- 事件流单独建行的会话在句柄补齐前不可进详情页/发消息（UI 呈现对账中）。
+-- v1.1 关键契约事实（08 §8.1/§8.5）：REST ConversationRow 撤 sessionKey/sessionId/lifecycleRevision，
+-- 事件信封按域带 sessionKey（eventlog 强制校验：message/session/tool/approval/run 域必带、
+-- gateway/read 域不带）——两域无交集字段。因此：
+--   卡片主键 = conversationId（快照/列表校准是卡片唯一来源；「UI 只见 conversation」）；
+--   事件路由 = hubConvKeys 映射表 (gatewayId, sessionKey) → conversationId；
+--   映射学习 = 自发送回执链（message.created 的 idempotencyKey → 命令队列 conversationId）
+--   与自命令 ack（信封 sessionKey + 队列条目）；未映射事件不建卡，R4 周期校准兜底。
 
 CREATE TABLE hubGateways (
     gatewayId TEXT NOT NULL PRIMARY KEY,
@@ -16,46 +19,50 @@ CREATE TABLE hubGateways (
 );
 
 CREATE TABLE hubConversations (
-    gatewayId TEXT NOT NULL,
-    sessionKey TEXT NOT NULL,               -- agent:<agentId>:<mainKey> 原样保留不解析（ADR-14）
-    conversationId TEXT,                    -- 服务端句柄；事件流建行时为 NULL，快照/校准对齐
-    sessionId TEXT NOT NULL DEFAULT '',     -- 当前化身
-    lifecycleRevision INTEGER NOT NULL DEFAULT 0,
+    conversationId TEXT NOT NULL PRIMARY KEY,  -- Hub ULID 句柄，化身更替后不变（05 §3.10）
+    sessionKey TEXT,                           -- 映射学习成果（事件路由加速）；快照行无此值
     label TEXT NOT NULL DEFAULT '',
     agentId TEXT NOT NULL DEFAULT '',
     lastMessagePreview TEXT NOT NULL DEFAULT '',
-    lastSeq INTEGER NOT NULL DEFAULT 0,
+    lastSeq INTEGER NOT NULL DEFAULT 0,        -- 当前化身内最新消息 seq（新化身从 1 重计）
     lastActiveAt TEXT NOT NULL DEFAULT '',
     unreadCount INTEGER NOT NULL DEFAULT 0,
     hasActiveRun INTEGER NOT NULL DEFAULT 0,
     reconciling INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (gatewayId, sessionKey)
+    -- 化身围栏持久基准（事件 session.updated 衍生态，非 REST 面镜像）：-1=未知（快照行），
+    -- 首个事件只记录；之后 revision 变化即化身更替（清消息/重置 seq/unread/cursor）。
+    lifecycleRevision INTEGER NOT NULL DEFAULT -1
 );
 CREATE INDEX hubConversations_byActive ON hubConversations(lastActiveAt DESC);
 
+-- 事件路由映射：卡片键（conversationId）与事件键（gatewayId, sessionKey）的桥（见文件头）。
+CREATE TABLE hubConvKeys (
+    gatewayId TEXT NOT NULL,
+    sessionKey TEXT NOT NULL,               -- 原样保留不解析（ADR-14）
+    conversationId TEXT NOT NULL,
+    PRIMARY KEY (gatewayId, sessionKey)
+);
+
 CREATE TABLE hubMessages (
     messageId TEXT NOT NULL PRIMARY KEY,    -- Hub ULID，upsert 合并键（05 §3.11）
-    gatewayId TEXT NOT NULL,
-    sessionKey TEXT NOT NULL,
-    seq INTEGER NOT NULL,                   -- 当前化身内插入顺序
-    role TEXT NOT NULL,                     -- user/assistant（服务端读取面已滤合成行）
+    conversationId TEXT NOT NULL,
+    seq INTEGER NOT NULL,                   -- 当前化身内插入顺序（新化身从 1 重计）
+    role TEXT NOT NULL,                     -- user/assistant/""（""=compaction/reset 合成行，渲染分隔条）
     content TEXT NOT NULL,
     state TEXT NOT NULL,                    -- final/streaming/failed
     uiState TEXT,                           -- 仅用户行：sending/delivered/read/failed
-    openclawId TEXT,                        -- __openclaw.id 锚点原样保存、不数值化（O-12）
     commandId TEXT,
     idempotencyKey TEXT,
     ts TEXT
 );
-CREATE INDEX hubMessages_byConv ON hubMessages(gatewayId, sessionKey, seq);
+CREATE INDEX hubMessages_byConv ON hubMessages(conversationId, seq);
 CREATE INDEX hubMessages_byIdem ON hubMessages(idempotencyKey);
 
 -- 本地发送队列（O-01/O-08）：idempotencyKey 客户端生成 UUID 生成后永不更换；终态移入历史展示。
 CREATE TABLE hubCommands (
     idempotencyKey TEXT NOT NULL PRIMARY KEY,
     commandId TEXT,                         -- PENDING_LOCAL 期尚未分配
-    conversationId TEXT,                    -- REST 句柄（发起时必有）
-    sessionKey TEXT,                        -- 定位会话行翻转 UI
+    conversationId TEXT,                    -- REST 句柄（message.send/read.mark 必有）
     runId TEXT,
     approvalId TEXT,
     type TEXT NOT NULL,                     -- message.send/run.cancel/approval.decide/read.mark
@@ -68,16 +75,14 @@ CREATE TABLE hubCommands (
 CREATE INDEX hubCommands_byState ON hubCommands(state);
 
 CREATE TABLE hubReadCursors (
-    gatewayId TEXT NOT NULL,
-    sessionKey TEXT NOT NULL,
-    readUpTo INTEGER NOT NULL DEFAULT 0,    -- INV-7 只进不退：应用前取 max
-    PRIMARY KEY (gatewayId, sessionKey)
+    conversationId TEXT NOT NULL PRIMARY KEY,
+    readUpTo INTEGER NOT NULL DEFAULT 0     -- INV-7 只进不退：应用前取 max
 );
 
 CREATE TABLE hubApprovals (
     approvalId TEXT NOT NULL PRIMARY KEY,
     runId TEXT NOT NULL,
-    sessionKey TEXT,
+    conversationId TEXT,                    -- 事件路由查映射；未命中为 NULL（UI 未接，无碍）
     toolName TEXT NOT NULL,
     payloadSummary TEXT NOT NULL,
     status TEXT NOT NULL,                   -- pending/approved/rejected
@@ -100,13 +105,16 @@ VALUES (?, ?, ?, ?, ?);
 setGatewayOnline:
 UPDATE hubGateways SET online = ?, lastSeenAt = ? WHERE gatewayId = ?;
 
--- 快照整体覆盖：四张投影表事务内清空（hubCommands/hubSyncState/hubApprovals 不清——
--- O-01 持久化最小集与事件流累积态跨重建保留，05 §3.6）
+-- 快照整体覆盖：投影表事务内清空（hubConvKeys/hubCommands/hubSyncState/hubApprovals 不清——
+-- 映射与 O-01 持久化最小集、审批累积态跨重建保留，05 §3.6；映射失效项由下句清理）
 clearGateways:
 DELETE FROM hubGateways;
 
 clearConversations:
 DELETE FROM hubConversations;
+
+clearConvKeysOrphan:
+DELETE FROM hubConvKeys WHERE conversationId NOT IN (SELECT conversationId FROM hubConversations);
 
 clearMessages:
 DELETE FROM hubMessages;
@@ -115,8 +123,11 @@ clearReadCursors:
 DELETE FROM hubReadCursors;
 
 -- 登出全清（P4 验收⑤：登出 = 撤销当前设备 + 清全部本地数据）。与快照重建不同，
--- 此处连 O-01 最小集（命令队列/游标）与审批累积态一并清：设备已撤销，本地不应残留
+-- 此处连映射、O-01 最小集（命令队列/游标）与审批累积态一并清：设备已撤销，本地不应残留
 -- 任何账号数据；重登后从空库 bootstrap。
+clearConvKeys:
+DELETE FROM hubConvKeys;
+
 clearCommands:
 DELETE FROM hubCommands;
 
@@ -129,58 +140,64 @@ DELETE FROM hubSyncState;
 selectGateways:
 SELECT * FROM hubGateways ORDER BY name;
 
--- 会话行整行 upsert（快照对齐 / session.created）
+-- 快照/列表落定的卡片灌入（v1.1 行无 sessionKey/revision；conversationId 是主键）
 upsertConversation:
 INSERT INTO hubConversations
-(gatewayId, sessionKey, conversationId, sessionId, lifecycleRevision, label, agentId,
- lastMessagePreview, lastSeq, lastActiveAt, unreadCount, hasActiveRun, reconciling)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(gatewayId, sessionKey) DO UPDATE SET
-  conversationId = COALESCE(excluded.conversationId, hubConversations.conversationId),
-  sessionId = excluded.sessionId,
-  lifecycleRevision = excluded.lifecycleRevision,
+(conversationId, sessionKey, label, agentId, lastMessagePreview, lastSeq, lastActiveAt,
+ unreadCount, hasActiveRun, reconciling, lifecycleRevision)
+VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, -1)
+ON CONFLICT(conversationId) DO UPDATE SET
   label = excluded.label,
   agentId = excluded.agentId,
-  lastMessagePreview = CASE WHEN excluded.lastMessagePreview = ''
-      THEN hubConversations.lastMessagePreview ELSE excluded.lastMessagePreview END,
-  lastSeq = MAX(hubConversations.lastSeq, excluded.lastSeq),
-  lastActiveAt = CASE WHEN excluded.lastActiveAt = ''
-      THEN hubConversations.lastActiveAt ELSE excluded.lastActiveAt END,
+  lastMessagePreview = excluded.lastMessagePreview,
+  lastSeq = excluded.lastSeq,
+  lastActiveAt = excluded.lastActiveAt,
   unreadCount = excluded.unreadCount,
   hasActiveRun = excluded.hasActiveRun,
   reconciling = excluded.reconciling;
 
--- 快照/REST 校准的句柄回填（只补 conversationId，不动其余列）
-fillConversationId:
-UPDATE hubConversations SET conversationId = ?
-WHERE gatewayId = ? AND sessionKey = ?;
+-- 映射学习/回填（自发送回执链与自命令 ack；只加速路由，不作存在性判定）
+upsertConvKey:
+INSERT INTO hubConvKeys(gatewayId, sessionKey, conversationId) VALUES (?, ?, ?)
+ON CONFLICT(gatewayId, sessionKey) DO UPDATE SET conversationId = excluded.conversationId;
 
--- session.updated 身份迁移（化身更替）；label 空 = 载荷未带，保留旧值
+-- 队列条目反查 conversationId（映射学习通道 b/c）
+selectCommandByKey:
+SELECT * FROM hubCommands WHERE idempotencyKey = ?;
+
+selectConversation:
+SELECT * FROM hubConversations WHERE conversationId = ?;
+
+selectConversationByKey:
+SELECT * FROM hubConvKeys WHERE gatewayId = ? AND sessionKey = ?;
+
+selectConversations:
+SELECT * FROM hubConversations ORDER BY lastActiveAt DESC;
+
+deleteConversation:
+DELETE FROM hubConversations WHERE conversationId = ?;
+
+deleteConvKey:
+DELETE FROM hubConvKeys WHERE gatewayId = ? AND sessionKey = ?;
+
+-- session.updated（映射命中后）：label 空 = 载荷未带，保留旧值；revision 持久基准更新
 updateConversationIdentity:
 UPDATE hubConversations SET
-  sessionId = :sessionId, lifecycleRevision = :revision,
   label = CASE WHEN :label = '' THEN label ELSE :label END,
-  hasActiveRun = :hasActiveRun
-WHERE gatewayId = :gatewayId AND sessionKey = :sessionKey;
+  hasActiveRun = :hasActiveRun,
+  lifecycleRevision = :revision
+WHERE conversationId = :conversationId;
 
 setConversationActiveRun:
-UPDATE hubConversations SET hasActiveRun = ?
-WHERE gatewayId = ? AND sessionKey = ?;
+UPDATE hubConversations SET hasActiveRun = ? WHERE conversationId = ?;
 
--- session.created（事件流建行/温和更新；conversationId 无法从事件获得——保持 NULL 待快照对齐）
-upsertConversationFromEvent:
-INSERT INTO hubConversations
-(gatewayId, sessionKey, conversationId, sessionId, lifecycleRevision, label, agentId,
- lastMessagePreview, lastSeq, lastActiveAt, unreadCount, hasActiveRun, reconciling)
-VALUES (?, ?, NULL, '', 0, ?, ?, '', 0, ?, 0, ?, 1)
-ON CONFLICT(gatewayId, sessionKey) DO UPDATE SET
-  label = CASE WHEN excluded.label = '' THEN hubConversations.label ELSE excluded.label END,
-  hasActiveRun = excluded.hasActiveRun,
-  reconciling = 1;
+-- 化身更替（session.updated lifecycleRevision 变化）：旧代次封存移出、seq 从 1 重计、
+-- 未读清零、readCursor 重置（05 §3.10；消息行无化身列，以显式信号整体清空）
+resetConversationIncarnation:
+UPDATE hubConversations SET lastSeq = 0, unreadCount = 0 WHERE conversationId = ?;
 
 setConversationUnread:
-UPDATE hubConversations SET unreadCount = ?
-WHERE gatewayId = ? AND sessionKey = ?;
+UPDATE hubConversations SET unreadCount = ? WHERE conversationId = ?;
 
 setConversationReconciling:
 UPDATE hubConversations SET reconciling = ? WHERE conversationId = ?;
@@ -189,24 +206,12 @@ UPDATE hubConversations SET reconciling = ? WHERE conversationId = ?;
 touchConversationPreview:
 UPDATE hubConversations SET
   lastMessagePreview = :preview, lastSeq = MAX(lastSeq, :seq), lastActiveAt = :lastActiveAt
-WHERE gatewayId = :gatewayId AND sessionKey = :sessionKey;
-
-selectConversations:
-SELECT * FROM hubConversations ORDER BY lastActiveAt DESC;
-
-selectConversation:
-SELECT * FROM hubConversations WHERE gatewayId = ? AND sessionKey = ?;
-
-selectConversationByHandle:
-SELECT * FROM hubConversations WHERE conversationId = ?;
-
-deleteConversation:
-DELETE FROM hubConversations WHERE gatewayId = ? AND sessionKey = ?;
+WHERE conversationId = :conversationId;
 
 upsertMessage:
 INSERT OR REPLACE INTO hubMessages
-(messageId, gatewayId, sessionKey, seq, role, content, state, uiState, openclawId, commandId, idempotencyKey, ts)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+(messageId, conversationId, seq, role, content, state, uiState, commandId, idempotencyKey, ts)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- delta 追加（replace=false）：流式行内容拼接
 appendMessageContent:
@@ -219,16 +224,15 @@ UPDATE hubMessages SET content = ? WHERE messageId = ?;
 setMessageState:
 UPDATE hubMessages SET state = ? WHERE messageId = ?;
 
--- 用户行回执翻转（message.created 带 commandId/idempotencyKey → sending→delivered）
 -- 用户行回执到达：同 idempotencyKey 的本地乐观行（messageId=临时键）整体提升为服务端行，
--- 避免乐观行+服务端行双行并存
+-- 避免乐观行+服务端行双行并存（05 §3.9 义务 4 的 UI 翻转语义）
 promoteLocalEcho:
 UPDATE hubMessages SET messageId = :messageId, content = :content, seq = :seq,
-  uiState = 'delivered', commandId = :commandId, openclawId = :openclawId, ts = :ts
+  uiState = 'delivered', commandId = :commandId, ts = :ts
 WHERE idempotencyKey = :idempotencyKey;
 
 selectMessageByIdem:
-SELECT idempotencyKey FROM hubMessages WHERE idempotencyKey = ? LIMIT 1;
+SELECT idempotencyKey, conversationId FROM hubMessages WHERE idempotencyKey = ? LIMIT 1;
 
 setMessageUiStateByIdem:
 UPDATE hubMessages SET uiState = ? WHERE idempotencyKey = ? AND state != 'failed';
@@ -237,27 +241,25 @@ selectMessage:
 SELECT * FROM hubMessages WHERE messageId = ?;
 
 selectMessages:
-SELECT * FROM hubMessages WHERE gatewayId = ? AND sessionKey = ? ORDER BY seq;
+SELECT * FROM hubMessages WHERE conversationId = ? ORDER BY seq;
 
 selectMessagesBefore:
-SELECT * FROM hubMessages WHERE gatewayId = ? AND sessionKey = ? AND seq < ?
+SELECT * FROM hubMessages WHERE conversationId = ? AND seq < ?
 ORDER BY seq DESC LIMIT ?;
 
-selectMaxMessageSeq:
-SELECT MAX(seq) FROM hubMessages WHERE gatewayId = ? AND sessionKey = ?;
-
--- 本地未读重算（与 Hub 口径同式：当前化身内 seq > readUpTo 且 role=assistant 的 final 行）
+-- 本地未读重算（与 Hub 口径同式：当前化身内 seq > readUpTo 且 role=assistant 的 final 行；
+-- role="" 合成行不计）
 countUnread:
 SELECT COUNT(*) FROM hubMessages
-WHERE gatewayId = ? AND sessionKey = ? AND seq > ? AND role = 'assistant' AND state = 'final';
+WHERE conversationId = ? AND seq > ? AND role = 'assistant' AND state = 'final';
 
 deleteMessagesByConversation:
-DELETE FROM hubMessages WHERE gatewayId = ? AND sessionKey = ?;
+DELETE FROM hubMessages WHERE conversationId = ?;
 
 insertCommand:
 INSERT OR REPLACE INTO hubCommands
-(idempotencyKey, commandId, conversationId, sessionKey, runId, approvalId, type, payloadJson, state, errorCode, createdAt, updatedAt)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+(idempotencyKey, commandId, conversationId, runId, approvalId, type, payloadJson, state, errorCode, createdAt, updatedAt)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 updateCommandState:
 UPDATE hubCommands SET state = ?, errorCode = ?, updatedAt = ? WHERE idempotencyKey = ?;
@@ -265,33 +267,27 @@ UPDATE hubCommands SET state = ?, errorCode = ?, updatedAt = ? WHERE idempotency
 updateCommandId:
 UPDATE hubCommands SET commandId = ?, updatedAt = ? WHERE idempotencyKey = ?;
 
-selectCommandByKey:
-SELECT * FROM hubCommands WHERE idempotencyKey = ?;
-
 selectNonTerminalCommands:
 SELECT * FROM hubCommands WHERE state NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'INDETERMINATE');
 
 upsertReadCursor:
-INSERT INTO hubReadCursors(gatewayId, sessionKey, readUpTo) VALUES (?, ?, ?)
-ON CONFLICT(gatewayId, sessionKey) DO UPDATE SET readUpTo = MAX(readUpTo, excluded.readUpTo);
-
-selectReadCursors:
-SELECT * FROM hubReadCursors;
+INSERT INTO hubReadCursors(conversationId, readUpTo) VALUES (?, ?)
+ON CONFLICT(conversationId) DO UPDATE SET readUpTo = MAX(readUpTo, excluded.readUpTo);
 
 selectReadCursor:
-SELECT readUpTo FROM hubReadCursors WHERE gatewayId = ? AND sessionKey = ?;
+SELECT readUpTo FROM hubReadCursors WHERE conversationId = ?;
 
 -- 化身更替时 readCursor 重置（upsertReadCursor 的 MAX 会阻止归零，须显式覆写）
 setReadCursorValue:
-INSERT INTO hubReadCursors(gatewayId, sessionKey, readUpTo) VALUES (?, ?, ?)
-ON CONFLICT(gatewayId, sessionKey) DO UPDATE SET readUpTo = excluded.readUpTo;
+INSERT INTO hubReadCursors(conversationId, readUpTo) VALUES (?, ?)
+ON CONFLICT(conversationId) DO UPDATE SET readUpTo = excluded.readUpTo;
 
 deleteReadCursor:
-DELETE FROM hubReadCursors WHERE gatewayId = ? AND sessionKey = ?;
+DELETE FROM hubReadCursors WHERE conversationId = ?;
 
 upsertApproval:
 INSERT OR REPLACE INTO hubApprovals
-(approvalId, runId, sessionKey, toolName, payloadSummary, status, decidedBy, updatedAt)
+(approvalId, runId, conversationId, toolName, payloadSummary, status, decidedBy, updatedAt)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?);
 
 setApprovalStatus:

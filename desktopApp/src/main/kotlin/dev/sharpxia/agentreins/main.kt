@@ -178,7 +178,7 @@ private fun hubSyncProbe() = kotlinx.coroutines.runBlocking {
 
     println("⑥ 老游标 410（HUB-SYNC-001）→ error 帧 → 快照重建（发送队列保留）…")
     db.hubQueries.insertCommand(
-        idempotencyKey = "probe-queue-key", commandId = null, conversationId = "conv", sessionKey = "probe-session",
+        idempotencyKey = "probe-queue-key", commandId = null, conversationId = "conv",
         runId = null, approvalId = null, type = "message.send", payloadJson = "{}",
         state = "PENDING_LOCAL", errorCode = null, createdAt = "t", updatedAt = "t",
     )

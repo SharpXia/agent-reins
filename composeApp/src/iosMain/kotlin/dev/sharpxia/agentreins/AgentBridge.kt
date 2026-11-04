@@ -45,14 +45,17 @@ class AgentBridge {
      */
     fun hubObserve(onState: (kind: String, message: String?, user: String?, deviceId: String?) -> Unit) {
         scope.launch {
-            hubRuntime.state.collect { st ->
-                when (st) {
-                    HubAuthState.Idle -> onState("idle", null, null, null)
-                    HubAuthState.Working -> onState("working", null, null, null)
-                    is HubAuthState.NeedsLogin -> onState("needsLogin", st.reason, null, null)
-                    is HubAuthState.LoggedIn -> {
-                        ensureHubStarted()
-                        onState("loggedIn", null, st.userDisplay, st.deviceId)
+            // 投影/同步栈异常不得带崩宿主 App（0.5.1 教训：collect 异常经 uncaught handler SIGABRT）
+            runCatching {
+                hubRuntime.state.collect { st ->
+                    when (st) {
+                        HubAuthState.Idle -> onState("idle", null, null, null)
+                        HubAuthState.Working -> onState("working", null, null, null)
+                        is HubAuthState.NeedsLogin -> onState("needsLogin", st.reason, null, null)
+                        is HubAuthState.LoggedIn -> {
+                            ensureHubStarted()
+                            onState("loggedIn", null, st.userDisplay, st.deviceId)
+                        }
                     }
                 }
             }
@@ -93,7 +96,7 @@ class AgentBridge {
     fun hubWatchConversations(onList: (List<UiConversation>) -> Unit) {
         hubConvJob?.cancel()
         hubConvJob = scope.launch {
-            hubClient?.observeConversations()?.collect { onList(it) }
+            runCatching { hubClient?.observeConversations()?.collect { onList(it) } }
         }
     }
 
@@ -101,7 +104,7 @@ class AgentBridge {
     fun hubWatchMessages(conversationId: String, onList: (List<UiMessage>) -> Unit) {
         hubMsgJob?.cancel()
         hubMsgJob = scope.launch {
-            hubClient?.observeMessages(conversationId)?.collect { onList(it) }
+            runCatching { hubClient?.observeMessages(conversationId)?.collect { onList(it) } }
         }
     }
 

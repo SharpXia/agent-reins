@@ -90,10 +90,43 @@ final class HubStore {
 
     private var devicesCache: [DeviceInfo]? = nil
 
-    /// 订阅会话列表（loggedIn 后调用一次；重复调用由桥侧换订阅）。
-    func watchConversations() { bridge.hubWatchConversations(onList: { [weak self] list in self?.conversations = list }) }
+    // ---------- wp-13：通知面（iOS 本地通知 + 按会话静音） ----------
+
+    /// 主 tab 选择（HubRootView 绑定）：通知点按需把用户从任意 tab 带回会话栈，tab 态必须在
+    /// store 而非视图 @State（wp-13 从 HubRootView 迁入，语义不变）。
+    var selectedTab: Int = 0
+
+    /// 按会话静音集（本地偏好，UserDefaults 持久化 + 内存镜像保 @Observable 响应式；
+    /// 跨登出保留——静音是本地用户偏好，非账号数据）。
+    private(set) var mutedConversations: Set<String> = HubStore.loadMutedConversations()
+
+    /// 通知差异面基线：已知卡片的 unread 增量 = assistant final 到达（与投影 countUnread 同
+    /// 口径：role=assistant 且 state=final 且 seq>readUpTo）→「有新回复」。只对**已知**卡片
+    /// 通知——登录/bootstrap 快照带 unread>0 入表的新卡片不算「到达」（首次推送打底 +
+    /// 新卡片只记录不提醒），随后 live 增量才提醒。
+    private var conversationsPrimed = false
+    private var lastUnreadByConversation: [String: Int] = [:]
+
+    /// run.completed 与紧随其后的 assistant final 同批到达（顺序不保证）：完成通知派发后
+    /// 短窗内的「有新回复」吞掉，防同一 run 结束双响（运行完成 + 有新回复）。失败 run 通常
+    /// 无 final 行，不受此窗影响。登出清空。
+    private var replySuppressUntil: [String: ContinuousClock.Instant] = [:]
+
+    private let notifications = NotificationCoordinator.shared
+
+    /// 订阅会话列表（loggedIn 后调用一次；重复调用由桥侧换订阅）。每次推送同时喂通知差异面
+    ///（wp-13：已知卡片的 unread 增量 = assistant final 到达）。
+    func watchConversations() {
+        bridge.hubWatchConversations { [weak self] list in
+            guard let self else { return }
+            self.conversations = list
+            self.noteConversationsPush(list)
+        }
+    }
 
     /// 订阅待审批列表（进入 loggedIn 时挂载；重复调用由桥侧换订阅）。
+    /// （wp-13 审批通知不走本 Flow：快照带回的积压 pending 行会被差异面误判为新事件，
+    /// 触发面用桥侧 approval.requested 事件旁路，见 noteApprovalRequested。）
     func watchApprovals() {
         bridge.hubWatchApprovals { [weak self] list in
             guard let self else { return }
@@ -184,7 +217,10 @@ final class HubStore {
     }
 
     /// Dev 探针直达会话（Bool push 通道，见 chatPush 注释）。
-    func devOpen(_ conv: UiConversation) {
+    func devOpen(_ conv: UiConversation) { openViaPush(conv) }
+
+    /// push 通道打开会话（chatPush Bool 直达）：Dev 探针与 wp-13 通知点按共用同一导航面。
+    func openViaPush(_ conv: UiConversation) {
         selected = conv
         resetMessagesStream()
         resetPagingState()
@@ -270,6 +306,120 @@ final class HubStore {
     func markReadUpTo(_ seq: Int64) {
         guard let c = selected else { return }
         bridge.hubMarkRead(conversationId: c.conversationId, readUpTo: seq)
+    }
+
+    // ---------- wp-13：通知面（iOS 本地通知 + 按会话静音） ----------
+
+    // 触发面分工（scope：approval.requested / assistant final 且非当前打开 / run 终态完成失败）：
+    // - 回复：会话列表 Flow 差异（已知卡片 unread 增量）——「非当前打开」是 Swift UI 态，
+    //   静音判定与点按跳转也都需要 conversationId，只在此可得；校准延迟带来的延迟提醒可接受。
+    // - 审批、run 终态：AgentBridge eventTap（投影把 run 三种终态压成同一 hasActiveRun=0，
+    //   Flow 面无法还原事件类型；审批走事件旁路则免 bootstrap 快照积压行的假阳性，见
+    //   noteApprovalRequested）。conversationId 由桥侧 hubConvKeys 解析（未映射 = 空串），
+    //   Swift 侧按归属可得性显式降级，不编造归属。
+
+    /// 会话列表推送喂通知差异面（主线程，KMP 回调）。
+    private func noteConversationsPush(_ list: [UiConversation]) {
+        guard conversationsPrimed else {
+            conversationsPrimed = true
+            lastUnreadByConversation = Dictionary(
+                uniqueKeysWithValues: list.map { ($0.conversationId, Int($0.unread)) }
+            )
+            return
+        }
+        for c in list {
+            let id = c.conversationId
+            let now = Int(c.unread)
+            // 只对已知卡片判增量（登录/快照重建后新入列的卡片带 unread 只记录，不算「到达」）
+            guard let prev = lastUnreadByConversation[id] else {
+                lastUnreadByConversation[id] = now
+                continue
+            }
+            lastUnreadByConversation[id] = now
+            guard now > prev else { continue }                       // assistant final 才增 unread
+            guard selected?.conversationId != id else { continue }   // 当前打开不提醒（scope 语义）
+            guard !mutedConversations.contains(id) else { continue } // 按会话静音
+            // 完成去重窗（见 noteRunTerminal）：run.completed 派发后短窗内的回复吞掉，防双响。
+            if let until = replySuppressUntil[id], ContinuousClock.now < until { continue }
+            notifications.replyArrived(conversationId: id, label: displayLabel(c))
+        }
+    }
+
+    /// approval.requested 事件（桥 eventTap 回调，主线程）。触发面用事件旁路而非审批 Flow
+    /// 差异：快照不经过 applyEvent，bootstrap 带回的积压 pending 行天然不提醒；断线补投的
+    /// 事件经 cursor/幂等去重后仍会触发（对客户端确属新事件）。conversationId 空串 = 未映射
+    /// 会话：无归属、无法静音判定——审批仍具行动性（设置页待审批清单可见），降级为无归属
+    /// 提醒（不编造会话名，与 UiApproval conversationId 同纪律）。
+    private func noteApprovalRequested(conversationId: String) {
+        guard isLoggedIn else { return }
+        let attributed = !conversationId.isEmpty
+        if attributed, mutedConversations.contains(conversationId) { return }
+        let label: String? = attributed
+            ? conversations.first { $0.conversationId == conversationId }.map(displayLabel)
+            : nil
+        notifications.approvalRequested(
+            conversationId: attributed ? conversationId : nil,
+            label: label
+        )
+    }
+
+    /// run 终态事件（桥 eventTap 回调，主线程）。conversationId 空串 = 未映射会话：无归属、
+    /// 无法静音判定与跳转，显式降级不提醒（不编造归属，与 UiApproval conversationId 同纪律）。
+    private func noteRunTerminal(conversationId: String, runId: String, status: String) {
+        guard isLoggedIn, !conversationId.isEmpty else { return }
+        guard !mutedConversations.contains(conversationId) else { return }
+        let label = conversations.first { $0.conversationId == conversationId }
+            .map(displayLabel) ?? "会话"
+        if status == "failed" {
+            notifications.runFailed(conversationId: conversationId, label: label)
+            return
+        }
+        guard status == "completed" else { return } // 其余值不识别即丢弃（桥只发两种）
+        // 完成去重（在回复路径生效，见 noteConversationsPush）：run.completed 派发后短窗内的
+        // 「有新回复」吞掉——同一 run 结束，完成通知已含「回来看」信号（run.completed 与
+        // message.created 同批到达、先后不保证，故用时间窗而非时序判定）。窗内到达的第二条
+        // 独立回复同样被吞（罕见，窗口后下一条正常提醒）。
+        replySuppressUntil[conversationId] = ContinuousClock.now.advanced(by: .seconds(3))
+        notifications.runCompleted(conversationId: conversationId, label: label)
+    }
+
+    /// 通知点按跳会话（coordinator 回调；可能在非主线程，回主队列再动 UI 态）。
+    /// 卡片不在列表现值中（投影延迟/会话已删）时只打开 App 不跳转，不编造会话。
+    private func handleNotificationTap(conversationId: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isLoggedIn else { return }
+            guard let conv = self.conversations.first(where: { $0.conversationId == conversationId }) else { return }
+            self.selectedTab = 0
+            self.openViaPush(conv)
+        }
+    }
+
+    /// 卡片显示名（与 HubChatView.title 同式：label 空 → agentId → 「会话」兜底）。
+    private func displayLabel(_ c: UiConversation) -> String {
+        if !c.label.isEmpty { return c.label }
+        return c.agentId.isEmpty ? "会话" : c.agentId
+    }
+
+    /// 按会话静音开关（本地偏好存储；跨登出保留）。
+    func setMuted(_ muted: Bool, conversationId: String) {
+        let key = Self.mutedKeyPrefix + conversationId
+        if muted {
+            UserDefaults.standard.set(true, forKey: key)
+            mutedConversations.insert(conversationId)
+        } else {
+            UserDefaults.standard.removeObject(forKey: key)
+            mutedConversations.remove(conversationId)
+        }
+    }
+
+    private static let mutedKeyPrefix = "hub.muted."
+
+    private static func loadMutedConversations() -> Set<String> {
+        let defaults = UserDefaults.standard
+        let names = defaults.dictionaryRepresentation().keys.filter { $0.hasPrefix(mutedKeyPrefix) }
+        return Set(names.compactMap { name in
+            defaults.bool(forKey: name) ? String(name.dropFirst(mutedKeyPrefix.count)) : nil
+        })
     }
 
     // ---------- wp-12：历史翻页（加载更早） ----------
@@ -398,6 +548,16 @@ final class HubStore {
     private init() {
         // 未曾手改过服务器地址（UserDefaults 无值）时用注入的默认地址，登录页免填。
         baseUrl = UserDefaults.standard.string(forKey: Self.baseUrlKey) ?? Self.injectedDefaultBaseUrl()
+        // wp-13：通知点按 → 跳对应会话；run 终态与审批请求事件（桥 eventTap）→ 通知面。
+        notifications.onTapConversation = { [weak self] conversationId in
+            self?.handleNotificationTap(conversationId: conversationId)
+        }
+        bridge.hubWatchRunTerminal { [weak self] conversationId, runId, status in
+            self?.noteRunTerminal(conversationId: conversationId, runId: runId, status: status)
+        }
+        bridge.hubWatchApprovalRequested { [weak self] conversationId in
+            self?.noteApprovalRequested(conversationId: conversationId)
+        }
         bridge.hubObserve { [weak self] kind, message, user, deviceId in
             guard let self else { return }
             self.kind = kind
@@ -407,7 +567,11 @@ final class HubStore {
             if kind != "working" { self.isRestoring = false }
             // wp-9：登录态建立（hubClient 就绪）即挂待审批订阅；重复回调由桥侧换订阅。
             // 不挂在视图 .task（与 watchConversations 不同）：审批计数在设置页也要活，须跟登录态走。
-            if kind == "loggedIn" { self.watchApprovals() }
+            if kind == "loggedIn" {
+                self.watchApprovals()
+                // wp-13：登录态建立即请求通知授权（系统只在首次未决定时弹窗；拒绝后静默降级）。
+                self.notifications.requestAuthorizationIfNeeded()
+            }
         }
         if !baseUrl.isEmpty {
             isRestoring = true
@@ -471,6 +635,11 @@ final class HubStore {
         createdConversationFor = []
         devicesCache = nil
         chatPush = false
+        // wp-13：通知差异面基线随投影数据一并作废（重登 bootstrap 快照不是新事件）；
+        // mutedConversations 为本地偏好，跨登出保留。
+        conversationsPrimed = false
+        lastUnreadByConversation = [:]
+        replySuppressUntil = [:]
         bridge.hubLogout()
     }
 }

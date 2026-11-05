@@ -28,25 +28,53 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import dev.sharpxia.agentreins.hub.DefaultHubClient
 import dev.sharpxia.agentreins.hub.HubAuthState
+import dev.sharpxia.agentreins.hub.HubRuntime
+import dev.sharpxia.agentreins.hub.auth.platformCredentialStore
+import dev.sharpxia.agentreins.hub.db.createHubDriver
+import dev.sharpxia.agentreins.hub.db.openHubDatabase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 
 /**
- * 桌面 Hub 面根组件（wp-6；整体落 desktopApp，不动 composeApp commonMain 的 App()——
- * App() 同时被 androidApp MainActivity setContent 渲染，Android 无任何 Hub 接线）。
+ * 桌面 Hub 面根组件（wp-6 壳 + wp-10 交互 parity + wp-18 渲染/通知；整体落 desktopApp，
+ * 不动 composeApp commonMain 的 App()——App() 同时被 androidApp MainActivity setContent
+ * 渲染，Android 无任何 Hub 接线）。
  *
- * 组装（全部复用 shared 门面，平台无关）：DefaultHubClient.create（HubRuntime + 投影库 +
- * 平台凭据存储）→ 启动静默恢复（有 refreshToken 时）→ LoggedIn 后 start() 组装同步栈；
- * 登出 = stop → runtime.logout → wipeLocalData（验收⑤清库闭环）。
+ * 组装（全部复用 shared 门面，平台无关）：HubRuntime + 投影库 + 平台凭据存储 → 启动静默
+ * 恢复（有 refreshToken 时）→ LoggedIn 后 start() 组装同步栈；登出 = stop → runtime.logout
+ * → wipeLocalData（验收⑤清库闭环）。
+ * wp-10：待审批 Flow 在壳层单点订阅（对齐 iOS HubStore.watchApprovals），审批决策瞬态
+ * （[ApprovalDecisionState]）壳层持有、随行离场收敛清理，会话页/设置页共用同一份。
+ * wp-18：客户端按 eventTap 构造（iOS AgentBridge 同模式）——通知协调器消费 shared 事件流
+ * （审批/run 终态走事件旁路、回复走会话列表 Flow 差异面），助手行走 [MarkdownText]。
  */
 @Composable
 fun DesktopHubApp() {
     // 数据面 scope：与窗口同生命周期（合成器销毁即取消）；全在 Dispatchers.Default，不占 UI 线程
     val scope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Default) }
     DisposableEffect(Unit) { onDispose { scope.cancel() } }
-    val client = remember { DefaultHubClient.create(scope) }
+    // wp-18：库与客户端同构展开（等价 companion create），保留库引用 + eventTap——与 iOS
+    // AgentBridge（DefaultHubClient(scope, hubRuntime, hubDb, eventTap = ::onBridgeEvent)）
+    // 同模式：库引用供通知面 hubConvKeys 直查，eventTap 为 wp-13 建的 shared 事件旁路面。
+    val hubDb = remember { openHubDatabase(createHubDriver()) }
+    val coordinator = remember(hubDb) {
+        DesktopNotificationCoordinator(
+            conversationKeyResolver = { gatewayId, sessionKey ->
+                hubDb?.hubQueries?.selectConversationByKey(gatewayId, sessionKey)
+                    ?.executeAsOneOrNull()?.conversationId.orEmpty()
+            },
+        ).also { it.start(scope) }
+    }
+    val client = remember(hubDb) {
+        DefaultHubClient(
+            scope,
+            HubRuntime(scope, platformCredentialStore()),
+            hubDb,
+            eventTap = { envelope -> coordinator.onEventEnvelope(envelope) },
+        )
+    }
     val authState by client.runtime.state.collectAsState()
 
     // 启动静默恢复：入口地址 = HUB_BASE 环境变量 > 上次登录记忆；无地址/无凭据 → 登录页
@@ -66,13 +94,15 @@ fun DesktopHubApp() {
     // 登录表单提交中的本地 busy 标记（runtime.login 期间 state=Working，表单保持可见）
     var submitting by remember { mutableStateOf(false) }
     LaunchedEffect(authState) {
+        // wp-18：登录态离场（登出/凭据失效）重置通知面 unread 基线与抑制窗（清库后旧基线不复用）
+        if (authState !is HubAuthState.LoggedIn) coordinator.reset()
         if (authState is HubAuthState.NeedsLogin || authState is HubAuthState.LoggedIn) submitting = false
     }
 
     MaterialTheme {
         when {
             authState is HubAuthState.LoggedIn -> {
-                HubShell(client, authState as HubAuthState.LoggedIn)
+                HubShell(client, authState as HubAuthState.LoggedIn, coordinator)
             }
             authState is HubAuthState.NeedsLogin ||
                 (authState is HubAuthState.Idle && restoreAttempted) || submitting -> {
@@ -108,10 +138,23 @@ private enum class HubPane { Conversations, Settings }
 
 /** 已登录主壳：左栏（账号头 + 会话列表 + 导航）+ 右内容区（会话页 / 设置页）。 */
 @Composable
-private fun HubShell(client: DefaultHubClient, session: HubAuthState.LoggedIn) {
+private fun HubShell(
+    client: DefaultHubClient,
+    session: HubAuthState.LoggedIn,
+    coordinator: DesktopNotificationCoordinator,
+) {
     val conversations by client.observeConversations().collectAsState(initial = emptyList())
+    // wp-10：待审批单点订阅 + 决策瞬态（壳层持有跨面板存活；行离场 approval.resolved 时收敛清理）
+    val pendingApprovals by client.observePendingApprovals().collectAsState(initial = emptyList())
+    val decisions = remember { ApprovalDecisionState() }
+    LaunchedEffect(pendingApprovals) { decisions.retainAll(pendingApprovals.map { it.approvalId }) }
     var selectedId by remember { mutableStateOf<String?>(null) }
     var pane by remember { mutableStateOf(HubPane.Conversations) }
+    // wp-18 通知规则数据面：会话列表推送喂回复差异面（unread 增量）；当前打开会话供
+    // 「非当前打开」判定（iOS HubStore.selected 同口径）。规则态由协调器消费协程独占，
+    // 壳层只投递，不在组合线程做判定。
+    LaunchedEffect(conversations) { coordinator.pushConversations(conversations) }
+    LaunchedEffect(selectedId) { coordinator.openConversationId = selectedId }
 
     Row(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.width(340.dp).fillMaxHeight()) {
@@ -146,12 +189,28 @@ private fun HubShell(client: DefaultHubClient, session: HubAuthState.LoggedIn) {
         }
         Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
             when (pane) {
-                HubPane.Settings -> SettingsScreen(client = client, session = session, onLoggedOut = {})
+                HubPane.Settings -> SettingsScreen(
+                    client = client,
+                    session = session,
+                    onLoggedOut = {},
+                    pendingApprovals = pendingApprovals,
+                    conversations = conversations,
+                    decisions = decisions,
+                )
                 HubPane.Conversations -> {
                     val selected = selectedId?.let { id -> conversations.firstOrNull { it.conversationId == id } }
                     if (selected != null) {
                         key(selected.conversationId) {
-                            ConversationScreen(client, selected.conversationId, selected.label)
+                            ConversationScreen(
+                                client = client,
+                                conversationId = selected.conversationId,
+                                label = selected.label,
+                                conversations = conversations,
+                                // wp-9：只挂归属本会话的 pending 审批；归属未学习（null）的审批不得
+                                // 错挂进任意会话页，只在设置页待审批清单出现
+                                approvals = pendingApprovals.filter { it.conversationId == selected.conversationId },
+                                decisions = decisions,
+                            )
                         }
                     } else {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

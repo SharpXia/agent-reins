@@ -24,7 +24,7 @@ import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
-/** 共享小部件与格式化助手（wp-6 桌面 Hub 面）。MVP 纯文本渲染：Markdown/操作按钮在 wp-10/wp-18。 */
+/** 共享小部件与格式化助手（wp-6 桌面 Hub 面 + wp-10 交互 parity 复用）。助手行 Markdown 渲染器在 MarkdownText.kt（wp-18）。 */
 
 /** 未读徽标：数字为 Hub 投影的 unreadCount（05 §3.7，客户端不发明第二套计数）。 */
 @Composable

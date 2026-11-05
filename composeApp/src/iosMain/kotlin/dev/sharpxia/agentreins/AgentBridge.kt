@@ -11,12 +11,14 @@ import dev.sharpxia.agentreins.hub.UiMessagesPage
 import dev.sharpxia.agentreins.hub.auth.DeviceInfo
 import dev.sharpxia.agentreins.hub.db.createHubDriver
 import dev.sharpxia.agentreins.hub.db.openHubDatabase
+import dev.sharpxia.agentreins.hub.projection.EventEnvelope
 import dev.sharpxia.agentreins.hubdb.HubDatabase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.jsonObject
 
 /**
  * SwiftUI 壳 ↔ shared/hub 桥（Hub 化 P4 定稿：网关直连面已整体退役，本桥只剩 Hub 面）。
@@ -37,6 +39,12 @@ class AgentBridge {
     private var hubMsgJob: Job? = null
     private var hubApprovalJob: Job? = null
     private var hubGatewayJob: Job? = null
+
+    /** wp-13：run 终态通知回调（Swift 注册；见 [hubWatchRunTerminal]）。 */
+    private var runTerminalSink: ((conversationId: String, runId: String, status: String) -> Unit)? = null
+
+    /** wp-13：审批请求通知回调（Swift 注册；见 [hubWatchApprovalRequested]）。 */
+    private var approvalRequestedSink: ((conversationId: String) -> Unit)? = null
 
     /** 投影库句柄进程内唯一（登出清表后复用同一连接，重登从空库 bootstrap）。 */
     private val hubDb: HubDatabase? by lazy { openHubDatabase(createHubDriver()) }
@@ -69,7 +77,8 @@ class AgentBridge {
 
     private fun ensureHubStarted() {
         if (hubClient == null) {
-            val client = DefaultHubClient(scope, hubRuntime, hubDb)
+            // wp-13：eventTap = 通知触发面（run 终态区分 completed/failed，投影 Flow 面无法还原事件类型）。
+            val client = DefaultHubClient(scope, hubRuntime, hubDb, eventTap = ::onBridgeEvent)
             hubClient = client
             client.start()
         }
@@ -142,6 +151,57 @@ class AgentBridge {
         hubGatewayJob?.cancel()
         hubGatewayJob = scope.launch {
             runCatching { hubClient?.observeGateways()?.collect { onList(it) } }
+        }
+    }
+
+    // ---------- wp-13：通知面（iOS 本地通知触发面） ----------
+
+    /**
+     * run 终态事件回调（wp-13 通知面；Swift 启动时注册一次，重复调用覆盖旧回调）：
+     * conversationId = 桥侧经 hubConvKeys 映射解析（与投影 resolveConversation 同一通道①；
+     * 未映射会话为空串，调用方不得编造归属）、runId = 信封 runId、status ∈ completed/failed。
+     * 回调在主线程（同步引擎运行于本桥 scope = Dispatchers.Main）。回复通知不走本通道：
+     * assistant final 以会话列表 Flow 的 unread 增量为源（「非当前打开」是 Swift UI 态，
+     * 静音判定与点按跳转也都需要 conversationId）；审批走 [hubWatchApprovalRequested]。
+     */
+    fun hubWatchRunTerminal(onEvent: (conversationId: String, runId: String, status: String) -> Unit) {
+        runTerminalSink = onEvent
+    }
+
+    /**
+     * 审批请求事件回调（wp-13 通知面；Swift 启动时注册一次，重复调用覆盖旧回调）：
+     * approval.requested 到达即回调，conversationId = hubConvKeys 解析（未映射 = 空串，调用方
+     * 降级为无归属提醒）。走事件旁路而非审批 Flow 差异的原因：Flow 首推打底后，登录 bootstrap
+     * 快照带回的积压 pending 行会被误判为「新审批」（快照不经过 applyEvent，事件旁路天然不带
+     * bootstrap 假阳性；断线补投的事件经 cursor/幂等去重后仍会触发——对客户端确属新事件）。
+     * 回调在主线程（同 [hubWatchRunTerminal]）。
+     */
+    fun hubWatchApprovalRequested(onEvent: (conversationId: String) -> Unit) {
+        approvalRequestedSink = onEvent
+    }
+
+    /**
+     * DefaultHubClient eventTap（wp-13）：投影应用后按信封类型分派通知触发面。取 run 终态
+     * completed/failed——run.aborted 是用户主动 Stop 的自致结果，不提醒——与
+     * approval.requested（回复通知仍走投影库 Flow 面：unread 增量与「非当前打开」判定都在
+     * Swift 会话列表态）。conversationId 经 hubConvKeys 直查（信封 gatewayId + sessionKey，
+     * run/approval 域必带 sessionKey）；未映射 = 空串透传，由 Swift 侧显式降级。
+     */
+    private fun onBridgeEvent(envelope: EventEnvelope) {
+        val sk = envelope.sessionKey ?: return
+        val conversationId = hubDb?.hubQueries
+            ?.selectConversationByKey(envelope.gatewayId, sk)
+            ?.executeAsOneOrNull()?.conversationId.orEmpty()
+        when (envelope.type) {
+            EventEnvelope.RUN_COMPLETED, EventEnvelope.RUN_FAILED -> {
+                val status = if (envelope.type == EventEnvelope.RUN_COMPLETED) "completed" else "failed"
+                val runId = envelope.runId
+                    ?: envelope.data.jsonObject["runId"]?.toString()?.trim('"')?.takeIf { it.isNotEmpty() }
+                    ?: return
+                runTerminalSink?.invoke(conversationId, runId, status)
+            }
+            EventEnvelope.APPROVAL_REQUESTED -> approvalRequestedSink?.invoke(conversationId)
+            else -> Unit // 其余事件不走通知面（回复 = 会话列表 Flow 的 unread 增量）
         }
     }
 

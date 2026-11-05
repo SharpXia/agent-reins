@@ -9,10 +9,10 @@ import composeApp
 /// Dev 直达（自动化走查）：AGENTREINS_DEV_TAB=settings；AGENTREINS_DEV_CONV=1 打开首个会话。
 struct HubRootView: View {
     @State private var hub = HubStore.shared
-    @State private var tab = 0
 
     var body: some View {
-        TabView(selection: $tab) {
+        // tab 态在 HubStore（wp-13：通知点按需从任意 tab 带回会话栈），此处只绑定。
+        TabView(selection: $hub.selectedTab) {
             NavigationStack { HubHomeView() }
                 .tabItem { Label("会话", systemImage: "bubble.left.and.bubble.right.fill") }
                 .tag(0)
@@ -22,11 +22,11 @@ struct HubRootView: View {
         }
         .environment(hub)
         .task {
-            if ProcessInfo.processInfo.environment["AGENTREINS_DEV_TAB"] == "settings" { tab = 1 }
+            if ProcessInfo.processInfo.environment["AGENTREINS_DEV_TAB"] == "settings" { hub.selectedTab = 1 }
             if ProcessInfo.processInfo.environment["AGENTREINS_DEV_CONV"] == "1" {
                 try? await Task.sleep(nanoseconds: 2_500_000_000)
                 if let first = hub.conversations.first {
-                    tab = 0
+                    hub.selectedTab = 0
                     hub.devOpen(first)
                 }
             }
@@ -44,7 +44,7 @@ struct HubRootView: View {
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
                 }
                 if let t = target {
-                    tab = 0
+                    hub.selectedTab = 0
                     hub.devOpen(t)
                     try? await Task.sleep(nanoseconds: 1_500_000_000)
                     hub.send(text)
@@ -444,6 +444,15 @@ struct HubChatView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
+                    // wp-13：按会话静音开关（本地偏好，UserDefaults 持久化；静音会话的
+                    // 审批/回复/run 终态本地通知一并抑制）。
+                    Button {
+                        hub.setMuted(!hub.mutedConversations.contains(conv.conversationId),
+                                     conversationId: conv.conversationId)
+                    } label: {
+                        Label(hub.mutedConversations.contains(conv.conversationId) ? "取消静音" : "静音此会话",
+                              systemImage: hub.mutedConversations.contains(conv.conversationId) ? "bell.fill" : "bell.slash")
+                    }
                     Button {
                         renameDraft = conv.label
                         renaming = true

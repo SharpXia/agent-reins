@@ -1,0 +1,282 @@
+package dev.sharpxia.agentreins.desktopui
+
+import dev.sharpxia.agentreins.hub.UiConversation
+import dev.sharpxia.agentreins.hub.projection.EventEnvelope
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
+
+/**
+ * wp-18：macOS 本地通知面（iOS wp-13 NotificationCoordinator + HubStore 触发面的桌面同位）。
+ *
+ * 数据面（无第二协议面）：全部经 shared 事件流消费——
+ * - 审批（approval.requested）与 run 终态（completed/failed）：[DefaultHubClient] eventTap
+ *   旁路（wp-13 共用面，信封为已应用且已过幂等/水位裁决的事件；投影把 run 三种终态压成同一
+ *   hasActiveRun=0，Flow 面无法还原事件类型——iOS AgentBridge.onBridgeEvent 同口径）。
+ *   conversationId 经 hubConvKeys 直查（信封 gatewayId + sessionKey，run/approval 域必带），
+ *   未映射 = 空串，按归属可得性显式降级，不编造归属。
+ * - 回复（有新回复）：会话列表投影 Flow 的 unread 增量差异面（iOS noteConversationsPush
+ *   同构：assistant final 才增 unread；「非当前打开」在本地判定）。
+ *
+ * 触发面清单（与 iOS wp-13 HubStore 同清单）：
+ * - 审批：有归属 → 「会话名」有新的审批请求；未映射 → 无归属提醒（审批仍具行动性）。
+ *   当前打开不抑制（审批是 run 前置门，出现即需注意，与 iOS 同口径）。
+ * - 回复：已知卡片 unread 增量 + 非当前打开；run.completed 后 3s 窗内的回复吞掉（防双响）。
+ * - run 终态：仅 completed/failed（run.aborted 是用户主动 Stop 的自致结果，不提醒）；
+ *   未映射会话不提醒。completed 同时置 3s 回复抑制窗。
+ *
+ * 静默降级纪律（验收硬要求）：权限拒绝（osascript 通知权限）/进程失败/超时任何路径不抛
+ * 不崩不重试；通知内容最小化（标题 + 会话名，零正文/payload 摘要，iOS 同纪律）。
+ * 按会话静音是 iOS wp-13 特性（桌面无静音 UI），本面不实现。
+ *
+ * 线程模型：eventTap 在同步引擎协程线程回调（只做分类 + hubConvKeys 查询，毫秒级，不阻塞
+ * 投影循环）；所有决策状态（unread 基线/抑制窗/会话快照）由单一消费协程独占（经 Channel
+ * 序列化），osascript 子进程也在消费协程串行拉起。消费者必须永不抛出（消费循环 runCatching
+ * 兜底），通知失败即静默丢弃。
+ */
+internal class DesktopNotificationCoordinator(
+    private val notifier: DesktopNotifier = OsascriptNotifier(),
+    /** hubConvKeys 解析（信封 gatewayId + sessionKey → conversationId；未映射 = ""）。生产实现见 DesktopHubApp。 */
+    private val conversationKeyResolver: (gatewayId: String, sessionKey: String) -> String = { _, _ -> "" },
+    /** 单调时钟注入点（测试控制 3s 抑制窗推进；生产 = System.nanoTime）。 */
+    private val nowNanos: () -> Long = System::nanoTime,
+) {
+    /** 单条已定形的本地通知（发送面 = [DesktopNotifier]）。 */
+    internal data class Request(
+        val kind: Kind,
+        /** null = 无归属（审批未映射场景）；reply/run 必有归属（未映射已丢弃）。 */
+        val conversationId: String?,
+        val title: String,
+        val body: String,
+    )
+
+    internal enum class Kind { APPROVAL, REPLY, RUN_COMPLETED, RUN_FAILED }
+
+    /** 通知发送面：实现必须自带静默降级（任何失败不抛）。 */
+    internal fun interface DesktopNotifier {
+        fun notify(request: Request)
+    }
+
+    // ── 事件旁路入口（同步引擎协程线程；永不抛、不阻塞） ──────────────────────
+
+    private sealed interface Msg {
+        data class Event(val classified: Classified) : Msg
+        data class Conversations(val list: List<UiConversation>) : Msg
+        data object Reset : Msg
+    }
+
+    internal sealed interface Classified {
+        data class ApprovalRequested(val conversationId: String) : Classified
+        data class RunTerminal(val conversationId: String, val completed: Boolean) : Classified
+    }
+
+    private val channel = Channel<Msg>(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    private val started = AtomicBoolean(false)
+
+    /** 当前打开会话（壳层写 / 消费协程读，回复「非当前打开」判定；null = 无打开会话）。 */
+    @Volatile
+    var openConversationId: String? = null
+
+    /** eventTap 入口（DefaultHubClient 组装时注入；投影应用后回调）。 */
+    fun onEventEnvelope(envelope: EventEnvelope) {
+        runCatching {
+            val classified = classify(envelope) ?: return
+            channel.trySend(Msg.Event(classified))
+        }
+    }
+
+    /**
+     * 信封分类（纯函数，单测覆盖）：sessionKey 缺失即不出通知（run/approval 域必带——
+     * 缺失说明信封不属通知触发面）；conversationId 经 hubConvKeys 解析，未映射 = 空串。
+     */
+    internal fun classify(envelope: EventEnvelope): Classified? {
+        val sk = envelope.sessionKey ?: return null
+        val conversationId = conversationKeyResolver(envelope.gatewayId, sk)
+        return when (envelope.type) {
+            EventEnvelope.APPROVAL_REQUESTED -> Classified.ApprovalRequested(conversationId)
+            EventEnvelope.RUN_COMPLETED -> Classified.RunTerminal(conversationId, completed = true)
+            EventEnvelope.RUN_FAILED -> Classified.RunTerminal(conversationId, completed = false)
+            else -> null // run.aborted 与其余事件不走通知面（回复走会话列表 Flow 差异）
+        }
+    }
+
+    /** 会话列表投影 Flow 推送入口（壳层 LaunchedEffect 喂入）。 */
+    fun pushConversations(list: List<UiConversation>) {
+        channel.trySend(Msg.Conversations(list))
+    }
+
+    /** 登录态离场（登出/凭据失效）重置：unread 基线与抑制窗不得跨会话复用。 */
+    fun reset() {
+        channel.trySend(Msg.Reset)
+    }
+
+    /** 起消费协程（幂等；DesktopHubApp scope，与窗口同生命周期）。 */
+    fun start(scope: CoroutineScope) {
+        if (!started.compareAndSet(false, true)) return
+        scope.launch {
+            for (msg in channel) {
+                runCatching {
+                    when (msg) {
+                        is Msg.Event -> handleEvent(msg.classified)
+                        is Msg.Conversations -> handleConversationsPush(msg.list)
+                        Msg.Reset -> handleReset()
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 决策层（消费协程独占；internal 供单测直调） ──────────────────────────
+
+    /** 登录后首个推送只记基线（bootstrap 快照积压不算「到达」，iOS conversationsPrimed 同构）。 */
+    private var primed = false
+    private val lastUnread = HashMap<String, Int>()
+    private val replySuppressUntilNanos = HashMap<String, Long>()
+    private var latestConversations: List<UiConversation> = emptyList()
+
+    internal fun handleEvent(classified: Classified) {
+        when (classified) {
+            is Classified.ApprovalRequested -> notifyApproval(classified.conversationId)
+            is Classified.RunTerminal -> notifyRunTerminal(classified.conversationId, classified.completed)
+        }
+    }
+
+    internal fun handleConversationsPush(list: List<UiConversation>) {
+        latestConversations = list
+        if (list.isEmpty()) {
+            // 全空推送 = 登出清库后的空窗：基线清零（重登快照从零重记，不误报「到达」）
+            primed = false
+            lastUnread.clear()
+            replySuppressUntilNanos.clear()
+            return
+        }
+        if (!primed) {
+            primed = true
+            list.forEach { lastUnread[it.conversationId] = it.unread }
+            return
+        }
+        list.forEach { c ->
+            val prev = lastUnread[c.conversationId]
+            lastUnread[c.conversationId] = c.unread
+            val now = c.unread
+            // 只对已知卡片判增量（登录/快照重建后新入列的卡片带 unread 只记录不算「到达」）
+            if (prev == null || now <= prev) return@forEach
+            if (c.conversationId == openConversationId) return@forEach // 当前打开不提醒
+            // run.completed 抑制窗内（同一 run 结束，完成通知已含「回来看」信号）吞掉防双响
+            val until = replySuppressUntilNanos[c.conversationId]
+            if (until != null && nowNanos() < until) return@forEach
+            notify(
+                Request(
+                    kind = Kind.REPLY,
+                    conversationId = c.conversationId,
+                    title = "有新回复",
+                    body = "「${displayLabel(c)}」有新的回复",
+                ),
+            )
+        }
+    }
+
+    internal fun handleReset() {
+        primed = false
+        lastUnread.clear()
+        replySuppressUntilNanos.clear()
+        latestConversations = emptyList()
+    }
+
+    private fun notifyApproval(conversationId: String) {
+        val attributed = conversationId.isNotEmpty()
+        // 审批不受回复抑制窗影响、也不受「当前打开」抑制：审批是 run 前置门，出现即需注意（iOS 同口径）
+        val label = if (attributed) labelOf(conversationId) else null
+        notify(
+            Request(
+                kind = Kind.APPROVAL,
+                conversationId = conversationId.takeIf { attributed },
+                title = "有待审批",
+                body = if (label != null) "「$label」有新的审批请求" else "有新的审批请求",
+            ),
+        )
+    }
+
+    private fun notifyRunTerminal(conversationId: String, completed: Boolean) {
+        // 未映射会话：无归属、无法跳转，显式降级不提醒（不编造归属，iOS noteRunTerminal 同纪律）
+        if (conversationId.isEmpty()) return
+        val label = labelOf(conversationId)
+        if (completed) {
+            replySuppressUntilNanos[conversationId] = nowNanos() + REPLY_SUPPRESS_WINDOW_NANOS
+            notify(
+                Request(
+                    kind = Kind.RUN_COMPLETED,
+                    conversationId = conversationId,
+                    title = "运行完成",
+                    body = "「$label」的任务已运行完成",
+                ),
+            )
+        } else {
+            notify(
+                Request(
+                    kind = Kind.RUN_FAILED,
+                    conversationId = conversationId,
+                    title = "运行失败",
+                    body = "「$label」的任务运行失败",
+                ),
+            )
+        }
+    }
+
+    private fun notify(request: Request) {
+        runCatching { notifier.notify(request) } // 通知发送任何失败静默（不重试不崩）
+    }
+
+    /** 卡片显示名（iOS displayLabel 同式：label 空 → agentId → 「会话」兜底）。 */
+    private fun labelOf(conversationId: String): String =
+        latestConversations.firstOrNull { it.conversationId == conversationId }?.let(::displayLabel) ?: "会话"
+
+    private fun displayLabel(c: UiConversation): String =
+        if (c.label.isNotEmpty()) c.label else c.agentId.ifEmpty { "会话" }
+
+    internal companion object {
+        /** run.completed 后的回复抑制窗（iOS noteRunTerminal 同值 3s）。 */
+        internal const val REPLY_SUPPRESS_WINDOW_NANOS: Long = 3_000_000_000L
+    }
+}
+
+/**
+ * wp-18：macOS 本地通知 osascript 封装（`display notification` AppleScript 派发）。
+ *
+ * 选型：Compose Desktop JVM 进程无 bundle id，JNA 直调 UNUserNotificationCenter 需要
+ * NSApplication 运行环与签名 bundle，不可行；osascript 是无签名依赖的既定路径。
+ * 通知归属系统「脚本编辑器」（osascript 载体）：首次派发时系统可能弹授权询问；用户在
+ * 系统设置拒绝后，命令仍以退出码 0 返回但横幅被系统抑制（或 -1743 拒绝非零退出）——
+ * 两种形态本封装都按「静默降级」处理：不重试、不提示、不抛出（验收：通知权限拒绝静默降级）。
+ */
+internal class OsascriptNotifier(
+    private val osascriptPath: String = "/usr/bin/osascript",
+    private val timeoutSeconds: Long = 5,
+) : DesktopNotificationCoordinator.DesktopNotifier {
+    override fun notify(request: DesktopNotificationCoordinator.Request) {
+        runCatching {
+            if (!isMacOs()) return // 非 macOS 平台静默不派发（桌面面只在 mac 出通知）
+            val process = ProcessBuilder(osascriptPath, "-e", buildAppleScript(request.title, request.body))
+                .redirectErrorStream(true)
+                .start()
+            if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) process.destroyForcibly()
+        }
+        // 启动失败/超时/权限拒绝：吞掉（验收硬要求，任何路径不抛）
+    }
+
+    internal companion object {
+        /** AppleScript 派发串（title + body；声音 default，与 iOS .default 同口径）。internal 供单测。 */
+        internal fun buildAppleScript(title: String, body: String): String =
+            "display notification \"${appleScriptEscape(body)}\" with title \"${appleScriptEscape(title)}\" sound name \"default\""
+
+        /** AppleScript 字符串字面量转义：反斜杠与双引号（最小集，通知内容不含控制字符）。 */
+        internal fun appleScriptEscape(s: String): String =
+            s.replace("\\", "\\\\").replace("\"", "\\\"")
+
+        private fun isMacOs(): Boolean =
+            System.getProperty("os.name").orEmpty().contains("mac", ignoreCase = true)
+    }
+}

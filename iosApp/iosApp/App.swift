@@ -5,6 +5,9 @@ import composeApp
 struct AgentReinsApp: App {
     init() {
         BackSwipe.scheduleInstall()
+        // wp-13：进程启动即挂 UNUserNotificationCenter 代理（NotificationCoordinator.shared
+        // 首次访问时安装）——冷启动点通知的 didReceive 路径也必须在首帧渲染前就绪。
+        _ = NotificationCoordinator.shared
     }
 
     var body: some Scene {

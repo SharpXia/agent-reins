@@ -18,8 +18,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 
 /**
- * 桌面壳（wp-6 MVP）：默认窗渲染 Compose Desktop Hub 面（[DesktopHubApp]，登录/会话列表/
- * 会话页/设置四屏，整体落 desktopApp 不动 commonMain 的 App()）。
+ * 桌面壳（wp-6 MVP + wp-10 交互 parity + wp-18 渲染/通知）：默认窗渲染 Compose Desktop Hub 面
+ * （[DesktopHubApp]，登录/会话列表/会话页/设置四屏，整体落 desktopApp 不动 commonMain 的 App()）。
+ * wp-10 交互能力全落 desktopui：消息操作（复制/重发/Stop + activeRunId 降级）、审批卡
+ * （含决策不可用降级态）、空正文防线；wp-18 落 Markdown 渲染（MarkdownText）与 macOS 本地通知
+ * （DesktopNotificationCoordinator，eventTap 旁路 + osascript 派发）。
  *
  * 三条 Hub 验收通道不开窗口、跑完即退出（HUB_BASE / HUB_USER / HUB_PASS 来自环境变量，不落代码）：
  * - `hub-login`：认证两步流 + AUTH-006 + 设备绑定 + 静默恢复轮换 + 撤销，见 [hubLoginProbe]

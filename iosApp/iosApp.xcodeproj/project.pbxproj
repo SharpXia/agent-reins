@@ -25,6 +25,7 @@
 		1A6FBB000000000000000014 /* HubStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000014 /* HubStore.swift */; };
 		1A6FBB000000000000000015 /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000015 /* LoginView.swift */; };
 		1A6FBB000000000000000016 /* HubViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000016 /* HubViews.swift */; };
+		1A6FBB000000000000000017 /* NotificationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000017 /* NotificationCoordinator.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -42,6 +43,7 @@
 		1A6FAA000000000000000014 /* HubStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HubStore.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000015 /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000016 /* HubViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HubViews.swift; sourceTree = "<group>"; };
+		1A6FAA000000000000000017 /* NotificationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationCoordinator.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000003 /* InkTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InkTheme.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000004 /* Format.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Format.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000005 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
@@ -121,6 +123,7 @@
 			isa = PBXGroup;
 			children = (
 				1A6FAA000000000000000014 /* HubStore.swift */,
+				1A6FAA000000000000000017 /* NotificationCoordinator.swift */,
 			);
 			path = Store;
 			sourceTree = "<group>";
@@ -320,6 +323,7 @@
 			files = (
 				1A6FBB000000000000000001 /* App.swift in Sources */,
 				1A6FBB000000000000000014 /* HubStore.swift in Sources */,
+				1A6FBB000000000000000017 /* NotificationCoordinator.swift in Sources */,
 				1A6FBB000000000000000015 /* LoginView.swift in Sources */,
 				1A6FBB000000000000000016 /* HubViews.swift in Sources */,
 				1A6FBB000000000000000003 /* InkTheme.swift in Sources */,

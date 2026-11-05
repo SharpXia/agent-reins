@@ -32,11 +32,15 @@ import androidx.compose.ui.unit.dp
 import dev.sharpxia.agentreins.hub.DefaultHubClient
 import dev.sharpxia.agentreins.hub.HubAuthState
 import dev.sharpxia.agentreins.hub.HubException
+import dev.sharpxia.agentreins.hub.UiApproval
+import dev.sharpxia.agentreins.hub.UiConversation
 import dev.sharpxia.agentreins.hub.auth.DeviceInfo
 import kotlinx.coroutines.launch
 
 /**
- * 设置页（wp-6 验收⑤）：账号/设备概览 + 设备清单管理（撤销他机）+ 登出清库闭环
+ * 设置页（wp-6 验收⑤ + wp-10 审批清单落点）：账号/设备概览 + 设备清单管理（撤销他机）+
+ * 待审批清单（wp-9 的 desktop 呈现：全部 pending 审批含归属未学习行——那里没有会话页可挂，
+ * 唯一可见处在此；对齐 iOS 设置页「待审批」入口）+ 登出清库闭环
  * （stop → runtime.logout（撤销设备 + 清凭据）→ wipeLocalData 七表清空；
  * 重登后从空库 bootstrap，05 §3.5 / 方案 §6-P4）。
  */
@@ -45,6 +49,9 @@ internal fun SettingsScreen(
     client: DefaultHubClient,
     session: HubAuthState.LoggedIn,
     onLoggedOut: () -> Unit,
+    pendingApprovals: List<UiApproval>,
+    conversations: List<UiConversation>,
+    decisions: ApprovalDecisionState,
 ) {
     val scope = rememberCoroutineScope()
     var devices by remember { mutableStateOf<List<DeviceInfo>?>(null) }
@@ -128,6 +135,25 @@ internal fun SettingsScreen(
                             }
                         }
                     }
+                }
+            }
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("待审批", style = MaterialTheme.typography.titleSmall)
+                        Spacer(Modifier.width(8.dp))
+                        if (pendingApprovals.isNotEmpty()) {
+                            TagChip("${pendingApprovals.size} 项待处理", Color(0xFFB7791F))
+                        }
+                    }
+                    PendingApprovalsPanel(
+                        approvals = pendingApprovals,
+                        conversations = conversations,
+                        decisions = decisions,
+                        client = client,
+                        scope = scope,
+                    )
                 }
             }
 

@@ -22,6 +22,8 @@ dependencies {
     implementation(libs.ktor.client.cio)
     implementation(libs.ktor.client.websockets)
     implementation(libs.kotlinx.serialization.json)
+    // wp-10 消息操作规则纯函数单测（jvmTest，随 :desktopApp:build 的 check 生命周期执行）
+    testImplementation(kotlin("test"))
 }
 
 compose.desktop.application {

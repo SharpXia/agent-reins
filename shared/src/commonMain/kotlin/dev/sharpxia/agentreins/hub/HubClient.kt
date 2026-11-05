@@ -9,8 +9,11 @@ import dev.sharpxia.agentreins.hub.command.DefaultCommandClient
 import dev.sharpxia.agentreins.hub.projection.AgentRef
 import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
 import dev.sharpxia.agentreins.hub.projection.CommandReceipt
+import dev.sharpxia.agentreins.hub.projection.ConversationRow
 import dev.sharpxia.agentreins.hub.projection.DefaultEventProjector
+import dev.sharpxia.agentreins.hub.projection.EventEnvelope
 import dev.sharpxia.agentreins.hub.projection.EventProjector
+import dev.sharpxia.agentreins.hub.projection.SnapshotResponse
 import dev.sharpxia.agentreins.hub.db.createHubDriver
 import dev.sharpxia.agentreins.hub.db.openHubDatabase
 import dev.sharpxia.agentreins.hub.sync.DbEventCursorStore
@@ -126,6 +129,14 @@ class DefaultHubClient(
     private val scope: CoroutineScope,
     val runtime: HubRuntime,
     private val db: HubDatabase?,
+    /**
+     * wp-13（additive，可选观察面）：事件旁路回调——投影 applyEvent 之后同步触发（信封为已
+     * 应用且已过幂等/水位裁决的事件）。纯观察：不改变投影语义、游标推进与幂等去重；缺省 null
+     * 时零开销零行为变化（iOS 通知面用其区分 run 终态 completed/failed——投影把三种终态压成
+     * 同一 hasActiveRun=0，Flow 面无法还原事件类型）。回调运行在同步引擎协程线程（本桥传
+     * Dispatchers.Main scope，即主线程）。
+     */
+    private val eventTap: ((EventEnvelope) -> Unit)? = null,
 ) {
     var projection: EventProjector? = null
         private set
@@ -140,7 +151,8 @@ class DefaultHubClient(
     fun start() {
         val stack = runtime.authStack ?: return
         if (scheduler != null || db == null) return
-        projection = DefaultEventProjector(db)
+        val baseProjection = DefaultEventProjector(db)
+        projection = if (eventTap != null) TappedEventProjector(baseProjection, eventTap) else baseProjection
         val cursors = DbEventCursorStore(db)
         engine = DefaultSyncEngine(stack.api, stack.auth, projection!!, cursors)
         commands = DefaultCommandClient(stack.api, stack.auth, db)
@@ -370,5 +382,22 @@ class DefaultHubClient(
         }
 
         private val AGENT_REF_LIST = ListSerializer(AgentRef.serializer())
+    }
+}
+
+/**
+ * wp-13：投影装饰器（[eventTap] 非 null 时才组装）——快照/校准/事件语义逐方法原样透传，
+ * 仅在 applyEvent 委托返回后触发 [tap]（事件此时已应用、事务已提交）。engine 侧的幂等去重
+ * （同 id 丢弃）与水位裁决发生在 applyEvent 之前，tap 只见真实应用的事件，不会重复触发。
+ */
+private class TappedEventProjector(
+    private val base: EventProjector,
+    private val tap: (EventEnvelope) -> Unit,
+) : EventProjector {
+    override fun applySnapshot(snapshot: SnapshotResponse) = base.applySnapshot(snapshot)
+    override fun applyConversations(rows: List<ConversationRow>) = base.applyConversations(rows)
+    override fun applyEvent(envelope: EventEnvelope) {
+        base.applyEvent(envelope)
+        tap(envelope)
     }
 }

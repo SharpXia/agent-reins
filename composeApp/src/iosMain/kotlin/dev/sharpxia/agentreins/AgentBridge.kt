@@ -3,8 +3,11 @@ package dev.sharpxia.agentreins
 import dev.sharpxia.agentreins.hub.DefaultHubClient
 import dev.sharpxia.agentreins.hub.HubAuthState
 import dev.sharpxia.agentreins.hub.HubRuntime
+import dev.sharpxia.agentreins.hub.UiApproval
 import dev.sharpxia.agentreins.hub.UiConversation
+import dev.sharpxia.agentreins.hub.UiGateway
 import dev.sharpxia.agentreins.hub.UiMessage
+import dev.sharpxia.agentreins.hub.UiMessagesPage
 import dev.sharpxia.agentreins.hub.auth.DeviceInfo
 import dev.sharpxia.agentreins.hub.db.createHubDriver
 import dev.sharpxia.agentreins.hub.db.openHubDatabase
@@ -32,6 +35,8 @@ class AgentBridge {
     private var hubClient: DefaultHubClient? = null
     private var hubConvJob: Job? = null
     private var hubMsgJob: Job? = null
+    private var hubApprovalJob: Job? = null
+    private var hubGatewayJob: Job? = null
 
     /** 投影库句柄进程内唯一（登出清表后复用同一连接，重登从空库 bootstrap）。 */
     private val hubDb: HubDatabase? by lazy { openHubDatabase(createHubDriver()) }
@@ -83,6 +88,8 @@ class AgentBridge {
     fun hubLogout() {
         hubConvJob?.cancel(); hubConvJob = null
         hubMsgJob?.cancel(); hubMsgJob = null
+        hubApprovalJob?.cancel(); hubApprovalJob = null
+        hubGatewayJob?.cancel(); hubGatewayJob = null
         val client = hubClient
         hubClient = null
         client?.stop()
@@ -113,6 +120,31 @@ class AgentBridge {
         hubMsgJob?.cancel(); hubMsgJob = null
     }
 
+    /**
+     * 待审批列表订阅（wp-9 审批卡 + 设置页计数入口共用一份 Flow；重复调用先取消旧订阅）。
+     * 仅 status=pending 行：approval.resolved 事件翻终态后行自动离场，卡片状态收敛即由本
+     * Flow 驱动。登录态建立（hubClient 就绪）后订阅才有数据——未登录时收集空流即结束。
+     */
+    fun hubWatchApprovals(onList: (List<UiApproval>) -> Unit) {
+        hubApprovalJob?.cancel()
+        hubApprovalJob = scope.launch {
+            runCatching { hubClient?.observePendingApprovals()?.collect { onList(it) } }
+        }
+    }
+
+    /**
+     * 网关列表订阅（wp-11 网关与 agent 维度展示 + #16 新建会话入口数据面；重复调用先取消旧订阅）。
+     * 数据源 = 投影库 hubGateways Flow：快照整体覆盖（wp-2 填充，agentsJson 含 AgentRef 结构化
+     * 清单）+ gateway.online/offline 事件翻转。Flow 是纯投影库面（不依赖登录态），未登录时为空
+     * 清单、bootstrap 后推送——与 [hubWatchConversations] 同模式，无完成后不再推送之虞。
+     */
+    fun hubWatchGateways(onList: (List<UiGateway>) -> Unit) {
+        hubGatewayJob?.cancel()
+        hubGatewayJob = scope.launch {
+            runCatching { hubClient?.observeGateways()?.collect { onList(it) } }
+        }
+    }
+
     // ---------- 命令（幂等队列） ----------
 
     /** 发送消息（幂等队列 + 乐观行；进度经 command.acked/message.created 事件翻转）。 */
@@ -120,14 +152,57 @@ class AgentBridge {
         scope.launch { runCatching { hubClient?.commands?.sendMessage(conversationId, text) } }
     }
 
+    /**
+     * 取消当前活跃 run（Stop 按钮 → DefaultCommandClient.cancelRun，幂等队列 + REST #11 run.cancel）。
+     * 调用方须先从会话实时行取 activeRunId（wp-5 v4 投影）；缺失时不得调用——映射未学习场景
+     * （DefaultEventProjector.setRun 在 resolveConversation 失败时不落库）降级为 UI 提示态，
+     * 不假设 runId 恒有值。中止后的输出收敛由 Gateway 权威裁决（run.aborted 事件回流投影库）。
+     */
+    fun hubCancelRun(runId: String) {
+        scope.launch { runCatching { hubClient?.commands?.cancelRun(runId) } }
+    }
+
     /** 会话渲染完整后上报已读（readUpTo = 已渲染最大 seq）。 */
     fun hubMarkRead(conversationId: String, readUpTo: Long) {
         scope.launch { runCatching { hubClient?.markRead(conversationId, readUpTo) } }
     }
 
+    /**
+     * 历史翻页（wp-12）：向上翻取更早历史消息（REST #8 `?before=<seq>` 向上翻页），行按
+     * messageId upsert 合并进投影库——observeMessages Flow 即推送合并后 seq 升序全序列，
+     * 调用方无需二次拼装。onDone page null = 请求未成功（未登录/网络不可达/化身更替竞态丢弃，
+     * 见 DefaultHubClient.loadEarlierMessages）——调用方呈现可重试降级态，不静默；非 null 时
+     * hasMore 为服务端权威（「加载更早」按钮可见性唯一依据，翻到头即 false）。
+     */
+    fun hubLoadEarlier(conversationId: String, before: Long, onDone: (UiMessagesPage?) -> Unit) {
+        scope.launch {
+            onDone(runCatching { hubClient?.loadEarlierMessages(conversationId, before) }.getOrNull())
+        }
+    }
+
+    /**
+     * 审批决定（wp-9）：decision ∈ approve/reject，经幂等队列 approval.decide 提交。
+     * onDone true = 已取得 PERSISTED 回执（生效以 approval.resolved 事件收敛）；false = 决策通道
+     * 不可用（Hub FAILED——如 B-4 预检未通过，或网络不可达未提交；approval.decide 不自动重放，
+     * 见 DefaultCommandClient.retryUnfinished）——调用方须显式呈现「决策通道不可用」降级态，不静默。
+     */
+    fun hubDecideApproval(approvalId: String, decision: String, onDone: (Boolean) -> Unit) {
+        scope.launch {
+            val ok = runCatching { hubClient?.decideApproval(approvalId, decision) == true }
+                .getOrDefault(false)
+            onDone(ok)
+        }
+    }
+
     // ---------- v1.1 新端点（#16–#19） ----------
 
-    /** 新开会话（openclaw 原生指令）；结果经回调带回 receipt（null=失败）。 */
+    /**
+     * 新开会话（openclaw 原生指令；wp-11 #16 入口唯一写路径）。#16 聚合语义（2026-11-04 拍板）：
+     * 无主线卡 agent 调用 → 新 session 兜底成卡（入口侧已保证只对无主线卡 agent 开放）；已有
+     * 主线卡 agent 调用 → 新 session 静默（后台任务会话）。结果经回调带回 receipt（null=失败，
+     * 调用方须显式呈现，不静默）；成功后 DefaultHubClient 内部即触发一次会话列表校准，新卡
+     * 秒级入列（兜底成卡的 R4 路径不走周期节拍等待）。
+     */
     fun hubCreateConversation(gatewayId: String, agentId: String, label: String?, onDone: (String?) -> Unit) {
         scope.launch {
             val r = runCatching { hubClient?.createConversation(gatewayId, agentId, label) }

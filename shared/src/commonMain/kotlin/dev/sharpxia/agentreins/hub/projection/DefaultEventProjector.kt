@@ -143,6 +143,7 @@ class DefaultEventProjector(
             snapshot.conversations.forEach { c ->
                 db.hubQueries.upsertConversation(
                     conversationId = c.conversationId,
+                    gatewayId = c.gatewayId, // v5（wp-11）：required 字段落库，不再投影即丢
                     label = c.label,
                     agentId = c.agentId,
                     lastMessagePreview = c.lastMessagePreview,
@@ -183,6 +184,7 @@ class DefaultEventProjector(
             rows.forEach { c ->
                 db.hubQueries.upsertConversation(
                     conversationId = c.conversationId,
+                    gatewayId = c.gatewayId, // v5（wp-11）：校准行同路径透出
                     label = c.label,
                     agentId = c.agentId,
                     lastMessagePreview = c.lastMessagePreview,

@@ -21,8 +21,13 @@ interface CommandClient {
     /** 取消 Run（runId 从事件流获得；已结束后取消为幂等成功）。 */
     suspend fun cancelRun(runId: String)
 
-    /** 审批决定：decision ∈ approve/reject。B-4 假设未验证：预检失败走确定性 FAILED。 */
-    suspend fun decideApproval(approvalId: String, decision: String)
+    /**
+     * 审批决定：decision ∈ approve/reject。B-4 假设未验证：预检失败走确定性 FAILED。
+     * 返回 receipt（PERSISTED 回执，生效以 approval.resolved 事件为准）；返回 null = 决策通道
+     * 不可用（确定性拒绝 → 队列条目 FAILED+错误码，或网络不可达 → PENDING_LOCAL 不自动重放），
+     * 调用方须显式呈现降级态（wp-9），不得静默。
+     */
+    suspend fun decideApproval(approvalId: String, decision: String): CommandReceipt?
 
     /**
      * v1.1 新端点（#16/#17/#19，openclaw 原生指令）：**幂等键由 Hub 生成**（请求体无 idempotencyKey

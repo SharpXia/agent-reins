@@ -9,6 +9,8 @@
 --   REST #11 run.cancel 路径参数必带 runId；hasActiveRun=0 的写路径一律连带清空，防死 runId 残留）；
 --   缺行 message.delta 建 streaming 占位行（wp-1 探针定档无锚 delta，dstream:<runId> 合成身份
 --   与 created 行异锚）+ 权威终态落定时清除同会话其余流式占位行。
+-- v5（2026-11-05 additive，wp-11）：hubConversations 增 gatewayId（契约 ConversationRow required
+--   字段，此前投影落库即丢——卡片无法归属网关，#16 新建会话入口无 (gatewayId, agentId) 可判）。
 -- v1.1 关键契约事实（08 §8.1/§8.5）：REST ConversationRow 撤 sessionKey/sessionId/lifecycleRevision，
 -- 事件信封按域带 sessionKey（eventlog 强制校验：message/session/tool/approval/run 域必带、
 -- gateway/read 域不带）——两域无交集字段。因此：
@@ -27,6 +29,7 @@ CREATE TABLE hubGateways (
 
 CREATE TABLE hubConversations (
     conversationId TEXT NOT NULL PRIMARY KEY,  -- Hub ULID 句柄，化身更替后不变（05 §3.10）
+    gatewayId TEXT NOT NULL DEFAULT '',        -- v5：归属网关（ConversationRow required；wp-11 #16 入口判据 + 网关维度展示）
     sessionKey TEXT,                           -- 映射学习成果（事件路由加速）；快照行无此值
     label TEXT NOT NULL DEFAULT '',
     agentId TEXT NOT NULL DEFAULT '',
@@ -150,13 +153,15 @@ selectGateways:
 SELECT * FROM hubGateways ORDER BY name;
 
 -- 快照/列表落定的卡片灌入（v1.1 行无 sessionKey/revision；conversationId 是主键）。
--- activeRunId 不在快照/校准面上：inactive 校准连带清空（防死 runId 残留），active 时保留事件习得值。
+-- gatewayId 为快照/校准行 required（v5 透出）；activeRunId 不在快照/校准面上：inactive 校准
+-- 连带清空（防死 runId 残留），active 时保留事件习得值。
 upsertConversation:
 INSERT INTO hubConversations
-(conversationId, sessionKey, label, agentId, lastMessagePreview, lastSeq, lastActiveAt,
+(conversationId, gatewayId, sessionKey, label, agentId, lastMessagePreview, lastSeq, lastActiveAt,
  unreadCount, hasActiveRun, reconciling, lifecycleRevision)
-VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, -1)
+VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, -1)
 ON CONFLICT(conversationId) DO UPDATE SET
+  gatewayId = excluded.gatewayId,
   label = excluded.label,
   agentId = excluded.agentId,
   lastMessagePreview = excluded.lastMessagePreview,
@@ -275,7 +280,7 @@ SELECT * FROM hubMessages WHERE conversationId = ? ORDER BY seq;
 
 selectMessagesBefore:
 SELECT * FROM hubMessages WHERE conversationId = ? AND seq < ?
-ORDER BY seq DESC LIMIT ?;
+ORDER BY seq DESC LIMIT :limit;
 
 -- 本地未读重算（与 Hub 口径同式：当前化身内 seq > readUpTo 且 role=assistant 的 final 行；
 -- role="" 合成行不计）

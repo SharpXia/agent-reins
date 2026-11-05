@@ -45,11 +45,11 @@ class DefaultCommandClient(
         }
     }
 
-    override suspend fun decideApproval(approvalId: String, decision: String) {
+    /** 审批决定（wp-9）：同 sendMessage 语义——PERSISTED 回执返回 receipt，确定性拒绝/网络不可达返回 null。 */
+    override suspend fun decideApproval(approvalId: String, decision: String): CommandReceipt? =
         enqueueAndSubmit("approval.decide", null, "$approvalId:$decision") { key ->
             api.decideApproval(approvalId, ApprovalDecisionRequest(idempotencyKey = key, decision = decision))
         }
-    }
 
     override suspend fun createConversation(gatewayId: String, agentId: String, label: String?): CommandReceipt =
         auth.withBearer { api.createConversation(gatewayId, agentId, CreateConversationRequest(label = label)) }

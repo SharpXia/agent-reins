@@ -106,6 +106,45 @@ data class UiAgentRef(
 )
 
 /**
+ * UI 工具调用行（wp-15 工具活动捕获）：tool.started/completed/failed 三态按调用关联键串联的
+ * 本地捕获行——Hub 无工具投影表、断线窗口不补发（06 §10.2），本行只代表**已捕获**部分，
+ * UI 不承诺完整。toolCallKey/runId 均为不透明字符串（ADR-14）。
+ */
+data class UiToolActivity(
+    val gatewayId: String,
+    val runId: String,
+    val toolCallKey: String,
+    /** 工具名；started/终态载荷皆未携带名称（丢失面 + completed 载荷无名称）时为 ''——UI 兜底呈现，不虚构。 */
+    val toolName: String,
+    /** 有界入参摘要（started 携带；可能被截断）。 */
+    val summary: String?,
+    /** running/completed/failed。 */
+    val status: String,
+    val firstTs: String,
+    val lastTs: String,
+)
+
+/**
+ * UI run 阶段行（wp-15 可选项）：run.status（Bridge chat status/aborted 变体映射，06 §3.2
+ * additive）捕获的每 run 最新启动阶段。run 终态即清行（无在途阶段语义）。
+ */
+data class UiRunPhase(
+    val gatewayId: String,
+    val runId: String,
+    /** Gateway 启动阶段枚举原样（waiting_for_state…starting_model；aborted 变体记 aborted）。 */
+    val phase: String,
+    /** 有界附加说明（retry 重试 / aborted errorMessage/stopReason）；缺省 null。 */
+    val detail: String?,
+    val ts: String,
+)
+
+/** UI 工作过程快照（wp-15）：会话页「工作过程」折叠披露条的单一数据面（一次订阅两表合流）。 */
+data class UiWorkActivity(
+    val tools: List<UiToolActivity>,
+    val phases: List<UiRunPhase>,
+)
+
+/**
  * UI 网关行（wp-11）：快照 gateways（wp-2 填充，形状 reader_pg.go Gateways）+ gateway.online/offline
  * 事件维护的 online 时点。agentsJson（hubGateways.agents，只存不显）在此解析为结构化 [UiAgentRef]——
  * 「Agent 清单只取 active 行」由服务端 Gateways 口径保证，客户端原样透出不建关系（Hub.sq 注）。
@@ -174,9 +213,10 @@ class DefaultHubClient(
     }
 
     /**
-     * 清全部本地数据（登出闭环，方案 §6-P4 验收⑤）：七表事务内清空，含 O-01 最小集
-     * （命令队列/游标）与审批累积态——设备已在服务端撤销，本地不残留任何账号数据；
-     * 重登后从空库 bootstrap。须在 [stop] 之后调用（同步循环已停，无在途投影写入）。
+     * 清全部本地数据（登出闭环，方案 §6-P4 验收⑤）：九表事务内清空，含 O-01 最小集
+     * （命令队列/游标）与审批/工具活动累积态（wp-15 v6 两表）——设备已在服务端撤销，
+     * 本地不残留任何账号数据；重登后从空库 bootstrap。须在 [stop] 之后调用（同步循环已停，
+     * 无在途投影写入）。
      */
     fun wipeLocalData() {
         val db = db ?: return
@@ -188,6 +228,8 @@ class DefaultHubClient(
             db.hubQueries.clearReadCursors()
             db.hubQueries.clearCommands()
             db.hubQueries.clearApprovals()
+            db.hubQueries.clearToolEvents()
+            db.hubQueries.clearRunStatus()
             db.hubQueries.clearSyncState()
         }
     }
@@ -219,6 +261,39 @@ class DefaultHubClient(
                 )
             }
         }
+    }
+
+    /**
+     * 会话工作过程订阅（wp-15 工具活动捕获数据面）：hubToolEvents（tool.* 三态）与
+     * hubRunStatus（run.status 阶段帧，可选项）两表合流为单一快照——Swift 侧一次订阅即得
+     * 「工作过程」披露条全部数据。两表都是本地累积捕获态：快照重建/断线重连不清，
+     * 会话删除/化身更替/run 终态才清——重连后披露条保留已捕获部分（wp-15 验收项）；
+     * 断线窗口内的事件天然缺失（06 §10.2 已知丢失面，UI 不承诺完整）。
+     */
+    fun observeWorkActivity(conversationId: String): Flow<UiWorkActivity> {
+        val db = db ?: return flowOf(UiWorkActivity(emptyList(), emptyList()))
+        val tools = db.hubQueries.selectToolEventsByConversation(conversationId).asFlow()
+            .mapToList(scope.coroutineContext)
+            .map { rows ->
+                rows.map {
+                    UiToolActivity(
+                        gatewayId = it.gatewayId, runId = it.runId, toolCallKey = it.toolCallKey,
+                        toolName = it.toolName, summary = it.summary, status = it.status,
+                        firstTs = it.firstTs, lastTs = it.lastTs,
+                    )
+                }
+            }
+        val phases = db.hubQueries.selectRunStatusByConversation(conversationId).asFlow()
+            .mapToList(scope.coroutineContext)
+            .map { rows ->
+                rows.map {
+                    UiRunPhase(
+                        gatewayId = it.gatewayId, runId = it.runId, phase = it.phase,
+                        detail = it.detail, ts = it.ts,
+                    )
+                }
+            }
+        return kotlinx.coroutines.flow.combine(tools, phases) { t, p -> UiWorkActivity(t, p) }
     }
 
     // ── wp-12：历史翻页（REST #8 `?before=<seq>` 向上翻页 + upsert 合并） ──────────

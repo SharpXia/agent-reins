@@ -8,6 +8,7 @@ import dev.sharpxia.agentreins.hub.UiConversation
 import dev.sharpxia.agentreins.hub.UiGateway
 import dev.sharpxia.agentreins.hub.UiMessage
 import dev.sharpxia.agentreins.hub.UiMessagesPage
+import dev.sharpxia.agentreins.hub.UiWorkActivity
 import dev.sharpxia.agentreins.hub.auth.DeviceInfo
 import dev.sharpxia.agentreins.hub.db.createHubDriver
 import dev.sharpxia.agentreins.hub.db.openHubDatabase
@@ -39,6 +40,7 @@ class AgentBridge {
     private var hubMsgJob: Job? = null
     private var hubApprovalJob: Job? = null
     private var hubGatewayJob: Job? = null
+    private var hubWorkActivityJob: Job? = null
 
     /** wp-13：run 终态通知回调（Swift 注册；见 [hubWatchRunTerminal]）。 */
     private var runTerminalSink: ((conversationId: String, runId: String, status: String) -> Unit)? = null
@@ -99,6 +101,7 @@ class AgentBridge {
         hubMsgJob?.cancel(); hubMsgJob = null
         hubApprovalJob?.cancel(); hubApprovalJob = null
         hubGatewayJob?.cancel(); hubGatewayJob = null
+        hubWorkActivityJob?.cancel(); hubWorkActivityJob = null
         val client = hubClient
         hubClient = null
         client?.stop()
@@ -127,6 +130,21 @@ class AgentBridge {
     /** 关闭会话页时取消消息订阅（避免后台继续推已离开会话的列表）。 */
     fun hubStopWatchingMessages() {
         hubMsgJob?.cancel(); hubMsgJob = null
+        // wp-15：工作过程订阅随会话页同生命周期（开/关成对；离开会话页不再推送其工具活动）
+        hubWorkActivityJob?.cancel(); hubWorkActivityJob = null
+    }
+
+    /**
+     * 会话工作过程订阅（wp-15：「工作过程」折叠披露条数据面；打开会话页调用，随
+     * [hubStopWatchingMessages] 成对取消）。快照 = hubToolEvents（tool.* 三态捕获行）+
+     * hubRunStatus（run.status 阶段帧）合流，任一表变更即推送。断线窗口丢失为已知面
+     * （06 §10.2），重连后保留已捕获部分。
+     */
+    fun hubWatchWorkActivity(conversationId: String, onSnapshot: (UiWorkActivity) -> Unit) {
+        hubWorkActivityJob?.cancel()
+        hubWorkActivityJob = scope.launch {
+            runCatching { hubClient?.observeWorkActivity(conversationId)?.collect { onSnapshot(it) } }
+        }
     }
 
     /**

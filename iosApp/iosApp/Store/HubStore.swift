@@ -59,6 +59,14 @@ final class HubStore {
     /// 收敛为准（成功即触发一次校准，秒级；兜底 R4 周期），行在卡出现后自动翻成置灰。
     private(set) var createdConversationFor: Set<String> = []
 
+    // ---------- wp-15：工具活动捕获（「工作过程」折叠披露条数据面） ----------
+
+    /// 当前打开会话的工作过程快照（投影库 Flow 推送：hubToolEvents 捕获行 + hubRunStatus
+    /// 阶段帧合流，AgentBridge.hubWatchWorkActivity）。两表为本地累积捕获态——断线窗口内的
+    /// tool.*/run.status 事件不补发（06 §10.2 已知丢失面），快照只承载已捕获部分，UI 不承诺
+    /// 完整；重连后已捕获部分保留。离开会话页清空（随 open/close 成对）。
+    private(set) var workActivity: UiWorkActivity?
+
     // ---------- wp-12：历史翻页（加载更早） ----------
 
     /// 「加载更早」按钮可见性：初始由「会话 lastSeq > 已载行数」乐观判定（≤50 行会话不出按钮——
@@ -202,6 +210,7 @@ final class HubStore {
         resetMessagesStream()
         resetPagingState()
         messages = []
+        watchWorkActivity(conv)
         bridge.hubWatchMessages(conversationId: conv.conversationId) { [weak self] list in
             self?.ingestMessages(list)
         }
@@ -213,6 +222,7 @@ final class HubStore {
         resetPagingState()
         messages = []
         chatPush = false
+        workActivity = nil
         bridge.hubStopWatchingMessages()
     }
 
@@ -226,8 +236,19 @@ final class HubStore {
         resetPagingState()
         messages = []
         chatPush = true
+        watchWorkActivity(conv)
         bridge.hubWatchMessages(conversationId: conv.conversationId) { [weak self] list in
             self?.ingestMessages(list)
+        }
+    }
+
+    /// wp-15：工作过程订阅（open/openViaPush 共用；随 hubStopWatchingMessages 成对取消，
+    /// 离开会话页不再推送且内存快照清空由 closeConversation 承担）。订阅前置 nil——
+    /// 防上一会话的快照在新会话首帧推送前闪现（Flow 首推有延迟）。
+    private func watchWorkActivity(_ conv: UiConversation) {
+        workActivity = nil
+        bridge.hubWatchWorkActivity(conversationId: conv.conversationId) { [weak self] snap in
+            self?.workActivity = snap
         }
     }
 
@@ -630,6 +651,7 @@ final class HubStore {
         decisionsSubmitted = []
         decisionFailures = []
         gateways = []
+        workActivity = nil
         creatingConversation = false
         createConversationError = nil
         createdConversationFor = []

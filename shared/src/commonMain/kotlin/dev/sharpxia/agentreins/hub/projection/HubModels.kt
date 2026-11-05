@@ -109,8 +109,9 @@ data class EventEnvelope(
     val data: JsonElement,
 ) {
     companion object {
-        // 21 类事件类型（06 §3 注册表镜像，唯一注册清单；新类型只增不改义）。
-        // artifact 域已核准预留、本期不实现。
+        // 事件类型（06 §3 注册表镜像，唯一注册清单；新类型只增不改义）。
+        // artifact 域已核准预留、本期不实现。run.status 为 wp-15 additive（2026-11-06），
+        // 21 类基础上第 22 类——老客户端走 else 忽略分支语义不变（06 §12.2）。
         const val MESSAGE_DELTA = "message.delta"
         const val MESSAGE_CREATED = "message.created"
         const val MESSAGE_REPLACED = "message.replaced"
@@ -119,6 +120,7 @@ data class EventEnvelope(
         const val RUN_COMPLETED = "run.completed"
         const val RUN_FAILED = "run.failed"
         const val RUN_ABORTED = "run.aborted"
+        const val RUN_STATUS = "run.status"
         const val TOOL_STARTED = "tool.started"
         const val TOOL_COMPLETED = "tool.completed"
         const val TOOL_FAILED = "tool.failed"

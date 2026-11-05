@@ -284,6 +284,25 @@ struct HubChatView: View {
     /// return，不落库）置灰为「结束中」提示态，不假设 runId 恒有值、不误触。
     private var canCancelRun: Bool { !(liveConv?.activeRunId ?? "").isEmpty }
 
+    /// wp-14：斜杠命令建议——draft 起手 "/" 且未进入参数书写段时给出目录前缀命中；普通消息、
+    /// URL、多行草稿等其余输入零干扰不触发（筛选细则见 SlashCommandCatalog.suggestions）。
+    private var slashSuggestions: [SlashCommand] {
+        SlashCommandCatalog.suggestions(forDraft: draft)
+    }
+
+    /// wp-14：斜杠命令选中。无参命令即选即发——与发送键同一通道（hub.send → message.send 普通
+    /// 文本，Gateway 原生斜杠语义，Hub/桥/服务端命令面零改动，normalize/index.ts 的 message.send
+    /// 分支把 message 原样透传 chat.send）；带参命令预填命令文本（含尾随空格）续写参数，最终
+    /// 发送仍走同一普通文本通道。
+    private func selectSlashCommand(_ cmd: SlashCommand) {
+        if cmd.takesArgument {
+            draft = cmd.name + " "
+        } else {
+            hub.send(cmd.name)
+            draft = ""
+        }
+    }
+
     /// wp-9：会话页内嵌审批卡的数据源——只挂归属本会话（conversationId 命中）的 pending 审批；
     /// 归属未学习（nil）的审批不得错挂进任意会话页，只在设置页待审批清单出现。
     private var sessionApprovals: [UiApproval] {
@@ -298,6 +317,17 @@ struct HubChatView: View {
             }
         }
         .padding(.horizontal, 14).padding(.top, 10)
+    }
+
+    /// wp-15：工作过程披露条（置顶于时间线上方，与审批横条同位不进滚动区）——只在有已捕获
+    /// 内容时出现（零噪声）；数据 = HubStore.workActivity（当前打开会话，open 时订阅）。
+    /// 无工具活动/阶段帧的会话整条不渲染，历史会话也不虚构（断线窗口丢失面不回填）。
+    @ViewBuilder
+    private var workProcessSection: some View {
+        if let wa = hub.workActivity, !wa.tools.isEmpty || !wa.phases.isEmpty {
+            WorkProcessBar(activity: wa, runActive: isRunActive)
+                .padding(.horizontal, 14).padding(.top, 10)
+        }
     }
 
     /// wp-12：历史翻页顶部行（时间线首行，随滚动区移动）——三态：
@@ -338,6 +368,7 @@ struct HubChatView: View {
             if !sessionApprovals.isEmpty {
                 approvalBanner
             }
+            workProcessSection
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
@@ -403,7 +434,23 @@ struct HubChatView: View {
                 }
                 .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
             }
+            // wp-14：斜杠命令建议面板——draft 由 "/" 起手时悬浮于 composer 上方，选中即动作；
+            // 无命中/进入参数书写段自动收起，其余输入零干扰。
+            if !slashSuggestions.isEmpty {
+                SlashCommandPanel(suggestions: slashSuggestions, onSelect: selectSlashCommand)
+                    .padding(.horizontal, 12).padding(.top, 6)
+            }
             Divider()
+            if isRunActive {
+                // wp-14：队列模式提示文案（本轮仅文案提示）——chat.send 不透传 queueMode 参数
+                //（schema ChatSendParams.queueMode steer/followup/collect/interrupt 本轮不接），
+                // 运行中发送按 Gateway 默认队列语义排队，文案与该实际行为对齐；语义透传留待后续。
+                Label("运行中发送将排队", systemImage: "hourglass")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14).padding(.top, 6)
+            }
             HStack(spacing: 10) {
                 TextField("发消息…", text: $draft, axis: .vertical)
                     .lineLimit(1...4)
@@ -507,6 +554,92 @@ struct HubChatView: View {
         guard let last = hub.messages.last else { return "" }
         let c = last.content
         return "\(hub.messages.count)|\(last.messageId)|\(last.state)|\(c.utf8.count)|\(c.prefix(16))|\(c.suffix(64))"
+    }
+}
+
+// ── wp-14：斜杠命令菜单（本地命令目录 + 建议面板） ──
+
+/// wp-14：斜杠命令条目——客户端自建初版目录（scope 六命令）。
+/// Gateway 原生斜杠语义：选中后的发送只是普通 message.send 文本（桥侧 chat.send 原样透传
+/// message，Hub 命令面零改动、无协议风险），目录描述是客户端提示、不构成 Gateway 行为承诺。
+private struct SlashCommand: Identifiable, Equatable {
+    /// 含前导 "/"（如 "/compact"）；发送文本即此字符串（带参命令再续写参数）。
+    let name: String
+    /// 客户端目录描述（初版自建，非 Gateway 权威文档）。
+    let summary: String
+    /// true = 需接参数：选中预填输入框续写，不直接发送。
+    let takesArgument: Bool
+
+    var id: String { name }
+}
+
+/// wp-14：命令目录初版（客户端自建）。scope 命名的 Gateway 原生斜杠六命令；steer/followup
+/// 对应 chat.send queueMode 词汇族（protocol.schema.json ChatSendParams.queueMode，
+/// research/01:113；research/01:236 注明 sessions.steer 为 queueMode:"interrupt" 废弃别名）。
+/// 目录动态化可后续接 Gateway commands.list（方法注册表在册、scope operator.read）——本轮
+/// 按拍板「零改动」不接，静态目录可增行扩展。
+private enum SlashCommandCatalog {
+    static let all: [SlashCommand] = [
+        SlashCommand(name: "/new", summary: "开启全新会话上下文", takesArgument: false),
+        SlashCommand(name: "/compact", summary: "压缩上下文", takesArgument: false),
+        SlashCommand(name: "/stop", summary: "停止当前运行", takesArgument: false),
+        SlashCommand(name: "/status", summary: "查看会话状态", takesArgument: false),
+        SlashCommand(name: "/steer", summary: "运行中插入引导指令（可接文本）", takesArgument: true),
+        SlashCommand(name: "/followup", summary: "追加队列消息，本轮结束后执行（可接文本）", takesArgument: true),
+    ]
+
+    /// 触发与筛选：draft 以 "/" 起手且尚未出现空白（用户仍在选命令、未写参数）时，按整段
+    /// draft 对命令名做前缀匹配；draft 为单独 "/" 时展示全目录；无命中返回空 = 面板隐藏，
+    /// 不拦自由输入（用户仍可发送任意文本，含未知斜杠命令——Gateway 侧原生裁决）。
+    static func suggestions(forDraft draft: String) -> [SlashCommand] {
+        guard draft.hasPrefix("/") else { return [] }
+        guard !draft.contains(" "), !draft.contains("\t"), !draft.contains("\n") else { return [] }
+        if draft == "/" { return all }
+        return all.filter { $0.name.hasPrefix(draft) }
+    }
+}
+
+/// wp-14：斜杠命令建议面板——composer 上方轻量目录（输入 "/" 即出、选中即动作）。
+/// ScrollView 承载溢出（目录超出可视行数时内滚）；纯本地视图零网络，不劫持键盘焦点。
+private struct SlashCommandPanel: View {
+    let suggestions: [SlashCommand]
+    let onSelect: (SlashCommand) -> Void
+    @Environment(\.inkColors) private var ink
+
+    /// 面板可视高度上限（≈4 行），其余行内滚。
+    private static let panelMaxHeight: CGFloat = 148
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(suggestions.enumerated()), id: \.element.id) { index, cmd in
+                    Button {
+                        onSelect(cmd)
+                    } label: {
+                        HStack(spacing: 10) {
+                            Text(cmd.name)
+                                .font(.callout.monospaced().weight(.semibold))
+                                .foregroundStyle(Color.accentColor)
+                            Text(cmd.summary)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(cmd.name)：\(cmd.summary)")
+                    if index < suggestions.count - 1 {
+                        Divider().padding(.leading, 12)
+                    }
+                }
+            }
+        }
+        .frame(maxHeight: Self.panelMaxHeight)
+        .background(RoundedRectangle(cornerRadius: 12).fill(ink.elevated))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(ink.borderTertiary, lineWidth: 1))
     }
 }
 
@@ -762,6 +895,130 @@ struct ApprovalCardView: View {
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 14).fill(ink.surfaceTertiary))
+    }
+}
+
+// ── wp-15：工作过程折叠披露条（tool.* 客户端捕获，对齐 grokbot「Worked」形态） ──
+
+/// wp-15：会话页「工作过程」披露条。数据面 = HubStore.workActivity（投影库 hubToolEvents +
+/// hubRunStatus 合流快照，AgentBridge.hubWatchWorkActivity 推送）。
+///
+/// 已知丢失面（06 §10.2，UI 诚实义务）：tool.*/run.status 断线窗口或入站限流丢弃**不补发**，
+/// 本条只呈现本地已捕获部分——计数语义是「已捕获 N 次」而非「本次 run 共 N 次调用」，不虚构完整；
+/// 重连后已捕获部分保留（v6 两表快照重建不清）。
+private struct WorkProcessBar: View {
+    @Environment(\.inkColors) private var ink
+    @State private var expanded = false
+    let activity: UiWorkActivity
+    /// 活跃 run 态（会话实时行）：在途工具/阶段配合它呈现「进行中」而非静止图标。
+    let runActive: Bool
+
+    private var runningCount: Int { activity.tools.filter { $0.status == "running" }.count }
+    private var completedCount: Int { activity.tools.filter { $0.status == "completed" }.count }
+    private var failedCount: Int { activity.tools.filter { $0.status == "failed" }.count }
+
+    /// 最新阶段帧（Flow 按 ts 升序推送，取末帧）；run 已终态时投影清行，此处天然为 nil。
+    private var latestPhase: UiRunPhase? { activity.phases.last }
+
+    /// 头部计数摘要（零值段省略；全零但有阶段帧时只显阶段）。
+    private var countSummary: String {
+        var parts: [String] = []
+        if runningCount > 0 { parts.append("进行中 \(runningCount)") }
+        if completedCount > 0 { parts.append("完成 \(completedCount)") }
+        if failedCount > 0 { parts.append("失败 \(failedCount)") }
+        return parts.joined(separator: " · ")
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            DisclosureGroup(isExpanded: $expanded) {
+                VStack(alignment: .leading, spacing: 8) {
+                    if let phase = latestPhase {
+                        phaseRow(phase)
+                    }
+                    ForEach(activity.tools, id: \.toolCallKey) { t in
+                        toolRow(t)
+                    }
+                }
+                .padding(.top, 6)
+            } label: {
+                HStack(spacing: 8) {
+                    Label("工作过程", systemImage: "wrench.and.screwdriver")
+                        .font(.subheadline.weight(.medium))
+                    if runActive, runningCount > 0 || latestPhase != nil {
+                        ProgressView().controlSize(.mini)
+                    }
+                    if !countSummary.isEmpty {
+                        Text(countSummary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+            .font(.subheadline)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 12).fill(ink.surfaceTertiary))
+    }
+
+    /// 阶段行：Gateway 启动 phase 枚举的人读呈现（闭集映射 + 原样兜底，非身份字段不涉 ADR-14）。
+    private func phaseRow(_ p: UiRunPhase) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: p.phase == "aborted" ? "exclamationmark.triangle" : "gearshape.2")
+                .font(.caption)
+                .foregroundStyle(p.phase == "aborted" ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(Self.phaseText(p.phase)).font(.caption.weight(.medium))
+                if let detail = p.detail, !detail.isEmpty {
+                    Text(detail).font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    /// 工具行：状态徽标 + 工具名（缺省「工具调用」，不虚构名称）+ 有界入参摘要单行。
+    private func toolRow(_ t: UiToolActivity) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            switch t.status {
+            case "completed":
+                Image(systemName: "checkmark.circle.fill").font(.caption).foregroundStyle(.green).padding(.top, 2)
+            case "failed":
+                Image(systemName: "xmark.octagon.fill").font(.caption).foregroundStyle(.red).padding(.top, 2)
+            default: // running（含未知值保守呈现为在途）
+                ProgressView().controlSize(.mini).padding(.top, 2)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(t.toolName.isEmpty ? "工具调用" : t.toolName)
+                    .font(.caption.weight(.medium))
+                if let summary = t.summary, !summary.isEmpty {
+                    Text(summary)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+        }
+    }
+
+    /// Gateway 启动阶段闭集 → 人读文本（protocol.schema.json ChatEvent status 变体 phase 枚举）；
+    /// 未知值原样透出（加易读性的命名替换即可，不改语义）。
+    private static func phaseText(_ phase: String) -> String {
+        switch phase {
+        case "waiting_for_state": return "等待会话状态"
+        case "preparing_workspace": return "准备工作区"
+        case "naming_worktree": return "命名工作树"
+        case "creating_worktree": return "创建工作树"
+        case "running_setup": return "运行初始化"
+        case "provisioning_environment": return "准备运行环境"
+        case "preparing_context": return "准备上下文"
+        case "memory_flushing": return "整理记忆"
+        case "starting_model": return "启动模型"
+        case "aborted": return "已中止"
+        default: return phase.isEmpty ? "运行中" : phase
+        }
     }
 }
 

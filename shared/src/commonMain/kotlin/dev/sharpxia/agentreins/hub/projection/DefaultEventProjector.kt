@@ -5,6 +5,8 @@ import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlin.concurrent.Volatile
 
@@ -93,6 +95,40 @@ private data class DataCommandFailed(
 
 @Serializable
 private data class DataReadUpdated(val conversationId: String, val reader: String, val readUpTo: Long)
+
+/** wp-15 可选项：run.status 载荷（additive 06 §3.2）。phase 期望为 Gateway 启动阶段枚举，
+ *  宽松解析为字符串——异常 phase 不整帧丢弃（未知字段容忍纪律）。 */
+@Serializable
+private data class DataRunStatus(
+    val phase: String? = null,
+    val retry: DataRunStatusRetry? = null,
+    val errorMessage: String? = null,
+    val stopReason: String? = null,
+)
+
+@Serializable
+private data class DataRunStatusRetry(val attempt: Int? = null, val maxAttempts: Int? = null, val reason: String? = null)
+
+/**
+ * wp-15：tool.* 载荷（双形状宽松解码）。契约注册形状（hub-wss-frames-v1.schema.json
+ * DataToolStarted：toolName/toolCallKey/inputSummary）与 Bridge 实际透传形状
+ * （normalize/index.ts normalizeToolEvent：name/toolCallId/args/result）并存——
+ * 投影取并集键宽容解析，缺键降级（toolName 空串、summary null），不整帧丢弃：
+ * 事件内容是非权威呈现面（计数与状态优先于名称），丢弃反而制造缺失。
+ */
+@Serializable
+private data class DataToolEvent(
+    val toolName: String? = null,
+    val name: String? = null,
+    val toolCallKey: String? = null,
+    val toolCallId: String? = null,
+    val inputSummary: String? = null,
+) {
+    /** 取名称：契约键优先、Bridge 键兜底；两者皆缺 = ''（UI 兜底呈现，不虚构）。 */
+    val resolvedName: String get() = toolName ?: name ?: ""
+    /** 取调用关联键：契约键优先、Bridge 键兜底；两者皆缺 = null（该帧不可定位调用，跳过）。 */
+    val resolvedKey: String? get() = toolCallKey ?: toolCallId
+}
 
 /** 快照落定 / 事件应用时投影仪对外可见的统计（验收取证用）。 */
 class ProjectionStats {
@@ -213,6 +249,14 @@ class DefaultEventProjector(
                 EventEnvelope.RUN_FAILED,
                 EventEnvelope.RUN_ABORTED,
                 -> setRun(envelope, false)
+                // wp-15 可选项（additive）：run.status = Bridge chat status/aborted 变体的 Run 阶段帧
+                //（06 §3.2 additive 注册）；老服务端不发本类型，缺省走 else 忽略分支语义不变。
+                EventEnvelope.RUN_STATUS -> onRunStatus(envelope)
+                // wp-15：tool.* 本地捕获（v6 hubToolEvents）——Hub 无工具投影表、断线窗口不补发
+                //（06 §10.2），会话页「工作过程」披露条只呈现本地已捕获部分，不承诺完整。
+                EventEnvelope.TOOL_STARTED -> onToolStarted(envelope)
+                EventEnvelope.TOOL_COMPLETED -> onToolFinished(envelope, "completed")
+                EventEnvelope.TOOL_FAILED -> onToolFinished(envelope, "failed")
                 EventEnvelope.SESSION_CREATED -> onSessionCreated(envelope)
                 EventEnvelope.SESSION_UPDATED -> onSessionUpdated(envelope)
                 EventEnvelope.SESSION_REMOVED -> onSessionRemoved(envelope)
@@ -231,7 +275,7 @@ class DefaultEventProjector(
                 EventEnvelope.COMMAND_ACKED -> onCommandAcked(envelope)
                 EventEnvelope.COMMAND_FAILED -> onCommandFailed(envelope)
                 EventEnvelope.READ_UPDATED -> onReadUpdated(envelope)
-                else -> Unit // 未注册类型/tool.*：忽略内容，照常推进游标（06 §12.2 义务 2）
+                else -> Unit // 未注册类型：忽略内容，照常推进游标（06 §12.2 义务 2）
             }
         }
         stats.eventsApplied++
@@ -379,12 +423,98 @@ class DefaultEventProjector(
             // 活跃 run 结束即清会话全部流式行——正常完成时占位行已被 created 清除，此处兜底
             // 防幽灵流式气泡；单活跃 run 模型下终态时刻不存在合法在途流。
             db.hubQueries.deleteStreamingRows(convId)
+            // wp-15（v6）：run 终态连带清该 run 的阶段帧——终态后无在途阶段语义，
+            // 「工作过程」披露条不再显示过期 phase。
+            (envelope.runId ?: dataRunId(envelope))?.let {
+                db.hubQueries.deleteRunStatusByRunId(envelope.gatewayId, it)
+            }
         }
     }
 
     /** run 域载荷 runId 兜底（信封缺省时；与 Hub 引擎 applyRun 的取序一致）。 */
     private fun dataRunId(envelope: EventEnvelope): String? =
         runCatching { envelope.data.jsonObject["runId"]?.toString()?.trim('"')?.takeIf { it.isNotEmpty() } }.getOrNull()
+
+    // ── tool / run.status 域（wp-15 v6：本地捕获，已知丢失面 06 §10.2——不补发不承诺完整） ──
+
+    /** tool.started：建 running 行（同键重报不改状态，防重复投递把已完成调用翻回在途）。 */
+    private fun onToolStarted(envelope: EventEnvelope) {
+        val d = decode(DataToolEvent.serializer(), envelope.data) ?: return skip()
+        val callKey = d.resolvedKey ?: return skip() // 无调用关联键无法串联三态，跳过（丢弃计数）
+        val convId = resolveConversation(envelope, null)
+        db.hubQueries.upsertToolStarted(
+            gatewayId = envelope.gatewayId,
+            runId = envelope.runId ?: return skip(), // tool 域信封必带 runId（06 §2.2）；缺即毒帧跳过
+            toolCallKey = callKey,
+            conversationId = convId,
+            toolName = d.resolvedName,
+            summary = toolSummary(envelope.data),
+            firstTs = envelope.ts,
+            lastTs = envelope.ts,
+        )
+        pruneToolEvents(convId)
+    }
+
+    /** tool.completed/failed：状态翻转；started 缺失（丢失面）时落终态行——计数不缺项，名称缺省 ''。 */
+    private fun onToolFinished(envelope: EventEnvelope, status: String) {
+        val d = decode(DataToolEvent.serializer(), envelope.data) ?: return skip()
+        val callKey = d.resolvedKey ?: return skip()
+        val convId = resolveConversation(envelope, null)
+        db.hubQueries.upsertToolFinished(
+            gatewayId = envelope.gatewayId,
+            runId = envelope.runId ?: return skip(),
+            toolCallKey = callKey,
+            conversationId = convId,
+            toolName = d.resolvedName,
+            status = status,
+            firstTs = envelope.ts,
+            lastTs = envelope.ts,
+        )
+        pruneToolEvents(convId)
+    }
+
+    /** wp-15 可选项：run.status（Bridge chat status/aborted 变体）→ 每 run 最新阶段帧。 */
+    private fun onRunStatus(envelope: EventEnvelope) {
+        val d = decode(DataRunStatus.serializer(), envelope.data) ?: return skip()
+        val runId = envelope.runId ?: dataRunId(envelope) ?: return skip()
+        val convId = resolveConversation(envelope, null)
+        db.hubQueries.upsertRunStatus(
+            gatewayId = envelope.gatewayId,
+            runId = runId,
+            conversationId = convId,
+            phase = d.phase ?: "",
+            detail = runStatusDetail(d),
+            ts = envelope.ts,
+        )
+    }
+
+    /** run.status 附加说明（有界）：retry 重试 > aborted/错误说明 > stopReason；皆缺省 NULL。 */
+    private fun runStatusDetail(d: DataRunStatus): String? {
+        d.retry?.let { r ->
+            if (r.attempt != null && r.maxAttempts != null) {
+                return ("重试 ${r.attempt}/${r.maxAttempts}" + (r.reason?.let { "（$it）" } ?: "")).take(SUMMARY_MAX)
+            }
+        }
+        d.errorMessage?.let { return it.take(SUMMARY_MAX) }
+        d.stopReason?.let { return it.take(SUMMARY_MAX) }
+        return null
+    }
+
+    /**
+     * tool 入参摘要（有界）：契约 inputSummary 字符串优先；Bridge 实际形状 args 对象在
+     * 序列化后截断（呈现面非权威，截断不破坏正确性）。皆缺省 NULL（行可无摘要）。
+     */
+    private fun toolSummary(data: JsonElement): String? {
+        val obj = runCatching { data.jsonObject }.getOrNull() ?: return null
+        (obj["inputSummary"] as? JsonPrimitive)?.takeIf { it.isString }?.let { return it.content.take(SUMMARY_MAX) }
+        val args = obj["args"] as? JsonObject ?: return null
+        return args.toString().take(SUMMARY_MAX) // JsonElement.toString() 即 JSON 文本
+    }
+
+    /** 每会话累积上限（防无界增长）：只保留最近 TOOL_EVENTS_MAX_PER_CONV 行。 */
+    private fun pruneToolEvents(convId: String?) {
+        if (convId != null) db.hubQueries.pruneToolEvents(convId, TOOL_EVENTS_MAX_PER_CONV)
+    }
 
     private fun onSessionCreated(envelope: EventEnvelope) {
         // v1.1：事件不带 conversationId，不建卡（卡片唯一来源 = 快照/列表校准），且新会话的
@@ -402,6 +532,9 @@ class DefaultEventProjector(
             db.hubQueries.deleteMessagesByConversation(convId)
             db.hubQueries.deleteReadCursor(convId)
             db.hubQueries.resetConversationIncarnation(convId)
+            // wp-15（v6）：化身更替与消息同口径——旧代次工具活动/阶段帧一并封存移出
+            db.hubQueries.deleteToolEventsByConversation(convId)
+            db.hubQueries.deleteRunStatusByConversation(convId)
         }
         db.hubQueries.updateConversationIdentity(
             label = d.label,
@@ -420,6 +553,8 @@ class DefaultEventProjector(
         db.hubQueries.deleteConversation(convId)
         db.hubQueries.deleteMessagesByConversation(convId)
         db.hubQueries.deleteReadCursor(convId)
+        db.hubQueries.deleteToolEventsByConversation(convId)
+        db.hubQueries.deleteRunStatusByConversation(convId)
         db.hubQueries.deleteConvKey(g, sk)
     }
 
@@ -525,6 +660,12 @@ class DefaultEventProjector(
         internal const val UI_FAILED = "failed"
         internal const val ROLE_SYNTHETIC = ""
         internal const val PREVIEW_MAX = 120
+
+        /** wp-15：tool 入参摘要/run.status 说明的有界截断（呈现面非权威，与审批摘要同纪律）。 */
+        internal const val SUMMARY_MAX = 300
+
+        /** wp-15：每会话工具活动累积上限（「工作过程」披露条呈现的是近期工作，非全量账本）。 */
+        internal const val TOOL_EVENTS_MAX_PER_CONV: Long = 200
 
         private val ListSerializerAgentRef =
             kotlinx.serialization.builtins.ListSerializer(AgentRef.serializer())

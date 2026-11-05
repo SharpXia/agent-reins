@@ -11,6 +11,12 @@
 --   与 created 行异锚）+ 权威终态落定时清除同会话其余流式占位行。
 -- v5（2026-11-05 additive，wp-11）：hubConversations 增 gatewayId（契约 ConversationRow required
 --   字段，此前投影落库即丢——卡片无法归属网关，#16 新建会话入口无 (gatewayId, agentId) 可判）。
+-- v6（2026-11-06 additive，wp-15 工具活动捕获）：
+--   hubToolEvents = tool.started/completed/failed 事件本地捕获（会话页「工作过程」折叠披露条数据面）；
+--   hubRunStatus = run.status 事件捕获的当前启动阶段（wp-15 可选项：Bridge chat status/aborted
+--   变体 → run.status additive，06 §3.2）。两表都是**累积捕获态**（与 hubApprovals 同族）：
+--   快照重建不清（快照不含工具事件，清了即丢；断线窗口丢失面见 06 §10.2，UI 不承诺完整），
+--   登出 wipeLocalData 清、会话删除/化身更替清、run 终态清对应 hubRunStatus 行。
 -- v1.1 关键契约事实（08 §8.1/§8.5）：REST ConversationRow 撤 sessionKey/sessionId/lifecycleRevision，
 -- 事件信封按域带 sessionKey（eventlog 强制校验：message/session/tool/approval/run 域必带、
 -- gateway/read 域不带）——两域无交集字段。因此：
@@ -102,6 +108,39 @@ CREATE TABLE hubApprovals (
     updatedAt TEXT NOT NULL
 );
 
+-- wp-15 工具活动捕获（v6）：tool.* 三态按调用关联键累积。toolCallKey 是 Bridge 派生的调用
+-- 关联标识（06 §3.3），客户端按不透明字符串处理（ADR-14）——主键含 (gatewayId, runId) 防跨
+-- 网关/跨 run 复用碰撞，不解析内部结构。toolName/summary 宽松来源：契约注册形状
+-- DataToolStarted{toolName, toolCallKey, inputSummary} 与 Bridge 实际透传形状
+-- {name, toolCallId, args}（normalize/index.ts normalizeToolEvent）双兼容，投影层取并集键。
+CREATE TABLE hubToolEvents (
+    gatewayId TEXT NOT NULL,
+    runId TEXT NOT NULL,
+    toolCallKey TEXT NOT NULL,
+    conversationId TEXT,                    -- 事件路由学习成果（hubConvKeys 命中）；未映射 NULL
+    toolName TEXT NOT NULL DEFAULT '',      -- 契约 toolName / Bridge name；缺失 ''（UI 兜底呈现）
+    summary TEXT,                           -- 有界入参摘要（started 携带；输入侧契约 inputSummary / 实际 args）
+    status TEXT NOT NULL,                   -- running/completed/failed
+    firstTs TEXT NOT NULL,
+    lastTs TEXT NOT NULL,
+    PRIMARY KEY (gatewayId, runId, toolCallKey)
+);
+CREATE INDEX hubToolEvents_byConv ON hubToolEvents(conversationId);
+
+-- wp-15 可选项（v6）：run.status 事件捕获的 Run 当前启动阶段（06 §3.2 additive）。
+-- 每 (gatewayId, runId) 只留最新一帧（upsert 覆盖；retry 重报同 phase 帧直接覆盖）；run 终态
+-- （run.completed/failed/aborted）连带清行——终态后无在途阶段语义。
+CREATE TABLE hubRunStatus (
+    gatewayId TEXT NOT NULL,
+    runId TEXT NOT NULL,
+    conversationId TEXT,                    -- 事件路由学习成果；未映射 NULL
+    phase TEXT NOT NULL DEFAULT '',         -- Gateway 启动 phase 枚举原样（waiting_for_state…starting_model；aborted 变体记 aborted）
+    detail TEXT,                            -- 有界附加说明（retry attempt/max/reason 或 aborted errorMessage/stopReason；缺省 NULL）
+    ts TEXT NOT NULL,
+    PRIMARY KEY (gatewayId, runId)
+);
+CREATE INDEX hubRunStatus_byConv ON hubRunStatus(conversationId);
+
 -- O-01 持久化最小集：eventCursor（全局事件 ULID 单调不减）、snapshotWatermark。
 CREATE TABLE hubSyncState (
     key TEXT NOT NULL PRIMARY KEY,
@@ -117,8 +156,10 @@ VALUES (?, ?, ?, ?, ?);
 setGatewayOnline:
 UPDATE hubGateways SET online = ?, lastSeenAt = ? WHERE gatewayId = ?;
 
--- 快照整体覆盖：投影表事务内清空（hubConvKeys/hubCommands/hubSyncState/hubApprovals 不清——
--- 映射与 O-01 持久化最小集、审批累积态跨重建保留，05 §3.6；映射失效项由下句清理）
+-- 快照整体覆盖：投影表事务内清空（hubConvKeys/hubCommands/hubSyncState/hubApprovals/
+-- hubToolEvents/hubRunStatus 不清——映射与 O-01 持久化最小集、审批/工具活动累积态跨重建
+-- 保留，05 §3.6；快照不含工具事件，清了即丢已捕获部分，06 §10.2 已知丢失面不叠加人为丢失；
+-- 映射失效项由下句清理）
 clearGateways:
 DELETE FROM hubGateways;
 
@@ -135,8 +176,8 @@ clearReadCursors:
 DELETE FROM hubReadCursors;
 
 -- 登出全清（P4 验收⑤：登出 = 撤销当前设备 + 清全部本地数据）。与快照重建不同，
--- 此处连映射、O-01 最小集（命令队列/游标）与审批累积态一并清：设备已撤销，本地不应残留
--- 任何账号数据；重登后从空库 bootstrap。
+-- 此处连映射、O-01 最小集（命令队列/游标）与审批/工具活动累积态（wp-15 v6）一并清：
+-- 设备已撤销，本地不应残留任何账号数据；重登后从空库 bootstrap。
 clearConvKeys:
 DELETE FROM hubConvKeys;
 
@@ -145,6 +186,12 @@ DELETE FROM hubCommands;
 
 clearApprovals:
 DELETE FROM hubApprovals;
+
+clearToolEvents:
+DELETE FROM hubToolEvents;
+
+clearRunStatus:
+DELETE FROM hubRunStatus;
 
 clearSyncState:
 DELETE FROM hubSyncState;
@@ -330,6 +377,62 @@ UPDATE hubApprovals SET status = ?, decidedBy = ?, updatedAt = ? WHERE approvalI
 
 selectPendingApprovals:
 SELECT * FROM hubApprovals WHERE status = 'pending' ORDER BY updatedAt;
+
+-- ── wp-15 工具活动捕获（v6） ─────────────────────────────────────────────────
+
+-- tool.started：新调用建 running 行；重报（同键）不改终态（ON CONFLICT 只更新时间戳，
+-- 已完成/失败调用被迟到的重报 started 翻回 running 属重复投递场景——引擎 id 去重已挡，防御性保守）
+upsertToolStarted:
+INSERT INTO hubToolEvents(gatewayId, runId, toolCallKey, conversationId, toolName, summary, status, firstTs, lastTs)
+VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)
+ON CONFLICT(gatewayId, runId, toolCallKey) DO UPDATE SET
+  conversationId = COALESCE(excluded.conversationId, hubToolEvents.conversationId),
+  toolName = CASE WHEN excluded.toolName != '' THEN excluded.toolName ELSE hubToolEvents.toolName END,
+  summary = COALESCE(excluded.summary, hubToolEvents.summary),
+  lastTs = excluded.lastTs;
+
+-- tool.completed/failed：状态翻转。行不存在（started 丢失面，06 §10.2）即建行——
+-- toolName 缺失 ''（completed/failed 载荷无名称字段时），计数与呈现不虚构成具体工具名
+upsertToolFinished:
+INSERT INTO hubToolEvents(gatewayId, runId, toolCallKey, conversationId, toolName, summary, status, firstTs, lastTs)
+VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)
+ON CONFLICT(gatewayId, runId, toolCallKey) DO UPDATE SET
+  conversationId = COALESCE(excluded.conversationId, hubToolEvents.conversationId),
+  status = excluded.status,
+  toolName = CASE WHEN excluded.toolName != '' THEN excluded.toolName ELSE hubToolEvents.toolName END,
+  lastTs = excluded.lastTs;
+
+-- 会话页「工作过程」数据面：按首见时间升序（工作日志序）
+selectToolEventsByConversation:
+SELECT * FROM hubToolEvents WHERE conversationId = ? ORDER BY firstTs, rowid;
+
+-- 每会话累积上限裁剪（防无界增长）：保留最近 N 行，更早的清除
+pruneToolEvents:
+DELETE FROM hubToolEvents WHERE conversationId = :conversationId AND rowid NOT IN (
+  SELECT rowid FROM hubToolEvents WHERE conversationId = :conversationId ORDER BY rowid DESC LIMIT :limit
+);
+
+deleteToolEventsByConversation:
+DELETE FROM hubToolEvents WHERE conversationId = ?;
+
+-- run.status：每 (gatewayId, runId) 只留最新阶段帧（upsert 覆盖）
+upsertRunStatus:
+INSERT INTO hubRunStatus(gatewayId, runId, conversationId, phase, detail, ts)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(gatewayId, runId) DO UPDATE SET
+  conversationId = COALESCE(excluded.conversationId, hubRunStatus.conversationId),
+  phase = excluded.phase,
+  detail = excluded.detail,
+  ts = excluded.ts;
+
+selectRunStatusByConversation:
+SELECT * FROM hubRunStatus WHERE conversationId = ? ORDER BY ts;
+
+deleteRunStatusByRunId:
+DELETE FROM hubRunStatus WHERE gatewayId = ? AND runId = ?;
+
+deleteRunStatusByConversation:
+DELETE FROM hubRunStatus WHERE conversationId = ?;
 
 upsertSyncState:
 INSERT OR REPLACE INTO hubSyncState(key, value) VALUES (?, ?);

@@ -1,5 +1,6 @@
 package dev.sharpxia.agentreins.hub
 
+import dev.sharpxia.agentreins.hub.auth.ApnsTokenRequest
 import dev.sharpxia.agentreins.hub.auth.DeviceRegistrationOk
 import dev.sharpxia.agentreins.hub.auth.DeviceRegistrationRequest
 import dev.sharpxia.agentreins.hub.auth.DevicesPage
@@ -69,6 +70,16 @@ class DefaultHubApi(
 
     override suspend fun deleteDevice(deviceId: String) {
         val resp = http.delete(config.baseUrl + "/devices/" + deviceId) { bearer() }
+        ensureSuccess(resp)
+    }
+
+    /** #20（v1.1 additive）：204 无响应体（ApnsTokenUpdated）——与 deleteDevice 同款，不走 decode()。 */
+    override suspend fun registerApnsToken(req: ApnsTokenRequest) {
+        val resp = http.post(config.baseUrl + "/devices/apns-token") {
+            bearer()
+            contentType(ContentType.Application.Json)
+            setBody(req)
+        }
         ensureSuccess(resp)
     }
 

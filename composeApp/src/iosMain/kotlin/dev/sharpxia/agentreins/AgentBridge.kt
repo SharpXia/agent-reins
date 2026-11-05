@@ -298,6 +298,15 @@ class AgentBridge {
         scope.launch { onDone(runCatching { hubClient?.compactConversation(conversationId) }.isSuccess) }
     }
 
+    /**
+     * wp-17：APNs 设备 token 上报（REST #20，204 幂等覆盖写；hex 串，实际 128 字符）。尽力而为
+     * 的一次性上报，不经回调——失败（未登录/网络不可达/撤销设备 403 HUB-AUTH-004）静默吞掉，
+     * 不得影响登录与同步主路径；APNs 换发 token 时系统会再次注册，届时重报收敛。
+     */
+    fun hubReportApnsToken(token: String) {
+        scope.launch { runCatching { hubClient?.reportApnsToken(token) } }
+    }
+
     // ---------- 设备管理 ----------
 
     /** 设备清单（设备管理页）。 */

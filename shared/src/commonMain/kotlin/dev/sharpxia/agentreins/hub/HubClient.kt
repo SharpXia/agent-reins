@@ -2,6 +2,7 @@ package dev.sharpxia.agentreins.hub
 
 import app.cash.sqldelight.coroutines.asFlow
 import app.cash.sqldelight.coroutines.mapToList
+import dev.sharpxia.agentreins.hub.auth.ApnsTokenRequest
 import dev.sharpxia.agentreins.hub.auth.CredentialStore
 import dev.sharpxia.agentreins.hub.auth.platformCredentialStore
 import dev.sharpxia.agentreins.hub.command.CommandClient
@@ -442,6 +443,18 @@ class DefaultHubClient(
     suspend fun agentStatus(gatewayId: String, agentId: String): AgentStatusResponse {
         val stack = runtime.authStack ?: throw IllegalStateException("未登录")
         return stack.auth.withBearer { stack.api.agentStatus(gatewayId, agentId) }
+    }
+
+    /**
+     * 设备 APNs token 上报（wp-17 推送面，REST #20 POST /v1/devices/apns-token，v1.1 additive）：
+     * 204 无响应体、幂等覆盖写——不经幂等队列（与命令类端点不同，无 CommandReceipt 回执可追，
+     * 单发即达；上报失败由调用方静默降级）。token 空串 = 清除/退订；客户端仅在 APNs 明确要求时
+     * 使用，登出不发退订——登出即撤销当前设备，撤销设备拒绝上报（403 HUB-AUTH-004），服务端
+     * 推送目标按 devices.status=active 筛选，撤销即时停止推送，客户端退订是多余的。
+     */
+    suspend fun reportApnsToken(token: String) {
+        val stack = runtime.authStack ?: throw IllegalStateException("未登录")
+        return stack.auth.withBearer { stack.api.registerApnsToken(ApnsTokenRequest(token)) }
     }
 
     companion object {

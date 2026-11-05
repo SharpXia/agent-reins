@@ -249,6 +249,7 @@ private class FakeHubApi(
     override suspend fun registerDevice(req: dev.sharpxia.agentreins.hub.auth.DeviceRegistrationRequest) = unused()
     override suspend fun listDevices() = unused()
     override suspend fun deleteDevice(deviceId: String) = unused()
+    override suspend fun registerApnsToken(req: dev.sharpxia.agentreins.hub.auth.ApnsTokenRequest) = unused()
     override suspend fun gateways() = unused()
     override suspend fun conversations(limit: Int?, cursor: String?) = unused()
     override suspend fun messages(conversationId: String, before: Long?, limit: Int?) = unused()

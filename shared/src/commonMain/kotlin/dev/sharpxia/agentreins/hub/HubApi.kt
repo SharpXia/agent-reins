@@ -1,5 +1,6 @@
 package dev.sharpxia.agentreins.hub
 
+import dev.sharpxia.agentreins.hub.auth.ApnsTokenRequest
 import dev.sharpxia.agentreins.hub.auth.DeviceRegistrationOk
 import dev.sharpxia.agentreins.hub.auth.DeviceRegistrationRequest
 import dev.sharpxia.agentreins.hub.auth.DevicesPage
@@ -51,6 +52,12 @@ interface HubApi {
 
     /** 撤销设备（可撤任意自有设备含当前）：该设备全部 Token 即时失效，其 WSS 被服务端关闭（204 无体）。 */
     suspend fun deleteDevice(deviceId: String)
+
+    /**
+     * 设备推送 token 上报（#20，v1.1 additive wp-17；204 无响应体，与 deleteDevice 同款 no-body）：
+     * 幂等覆盖写，token 空串 = 清除/退订。仅绑定设备可调用（撤销设备 403 HUB-AUTH-004）。
+     */
+    suspend fun registerApnsToken(req: ApnsTokenRequest)
 
     // ── 网关（#6，08 §4.1【MVP 必需】） ──────────────────────────────────
     /** 网关与 Agent 列表；无分页。冷启动优先用快照自带 gateways 数组，此端点用于校准/刷新。 */

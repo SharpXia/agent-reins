@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import UserNotifications
 
 /// wp-13：iOS 本地通知协调器——UNUserNotificationCenter 的唯一出入口。
@@ -6,11 +7,12 @@ import UserNotifications
 /// 职责边界：授权请求（登录态建立时一次）、通知派发（内容最小化：只有 kind 会话名，
 /// 不携带审批 payload 与消息正文）、前台横幅呈现（验收要求前台也收到审批与回复通知）、
 /// 点按回调（userInfo.conversationId → HubStore 跳会话）。触发判定（非当前打开/静音/
-/// 去重）全部在 HubStore 差异面，本类不做业务判定。
+/// 去重）全部在 HubStore 差异面，本类不做业务判定。wp-17 增补：远程通知注册入口
+/// （token 取得与上报在 AppDelegate，见 App.swift）。
 ///
 /// 静默降级纪律（验收硬要求）：权限拒绝（denied）/未决定（notDetermined）时派发静默
 /// no-op；`UNUserNotificationCenter.add` 失败只吞错误，任何路径不抛不崩。macOS 通知面
-/// 在 wp-18、APNs 远程推送在 wp-17，均不在本类范围。
+/// 在 wp-18，不在本类范围。
 final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate {
 
     static let shared = NotificationCoordinator()
@@ -30,6 +32,15 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
     func requestAuthorizationIfNeeded() {
         let center = UNUserNotificationCenter.current()
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    /// wp-17：注册远程通知（登录态建立时与 [requestAuthorizationIfNeeded] 同一时机调用）。
+    /// 注册结果不经本类：成功/失败由系统回调 AppDelegate 的
+    /// didRegisterForRemoteNotificationsWithDeviceToken / didFailToRegister…（App.swift），
+    /// token 取得后经 HubStore → 桥上报（REST #20 POST /v1/devices/apns-token）。未勾选
+    /// aps-environment entitlement 时系统走失败回调静默降级，本调用本身无前置校验。
+    func registerForRemoteNotifications() {
+        UIApplication.shared.registerForRemoteNotifications()
     }
 
     // ---------- 派发（通知内容最小化：标题 + 会话名，零正文/payload 摘要） ----------

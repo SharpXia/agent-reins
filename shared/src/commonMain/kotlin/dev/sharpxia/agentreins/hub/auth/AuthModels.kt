@@ -45,6 +45,14 @@ data class DeviceRegistrationRequest(
 @Serializable
 data class DeviceRegistrationOk(val deviceId: String, val refreshToken: String, val refreshExpiresIn: Long)
 
+/**
+ * 设备 APNs token 上报（#20，v1.1 additive wp-17）：token 必填（hex 串，实际 64 字节 = 128 hex
+ * 字符，上限 512）。幂等覆盖写；空串 = 清除/退订。注册远程通知成功后上报，token 变更时重报
+ * （APNs 在系统恢复或 App 更新后可能换发 token）。目标设备恒为调用方自身（Bearer 绑定 Token）。
+ */
+@Serializable
+data class ApnsTokenRequest(val token: String)
+
 @Serializable
 data class DeviceInfo(
     val deviceId: String,

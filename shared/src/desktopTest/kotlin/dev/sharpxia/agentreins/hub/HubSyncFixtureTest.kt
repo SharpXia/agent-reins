@@ -500,6 +500,7 @@ private open class StubHubApi : HubApi {
     override suspend fun registerDevice(req: dev.sharpxia.agentreins.hub.auth.DeviceRegistrationRequest) = TODO()
     override suspend fun listDevices() = TODO()
     override suspend fun deleteDevice(deviceId: String) = TODO()
+    override suspend fun registerApnsToken(req: dev.sharpxia.agentreins.hub.auth.ApnsTokenRequest) = TODO()
     override suspend fun gateways() = TODO()
     override suspend fun conversations(limit: Int?, cursor: String?) = TODO()
     override suspend fun messages(conversationId: String, before: Long?, limit: Int?) = TODO()

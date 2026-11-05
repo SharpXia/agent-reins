@@ -592,6 +592,9 @@ final class HubStore {
                 self.watchApprovals()
                 // wp-13：登录态建立即请求通知授权（系统只在首次未决定时弹窗；拒绝后静默降级）。
                 self.notifications.requestAuthorizationIfNeeded()
+                // wp-17：同一时机注册远程通知；token 由 AppDelegate 注册回调取到后经
+                // [reportApnsToken] 上报（REST #20，幂等覆盖写）。
+                self.notifications.registerForRemoteNotifications()
             }
         }
         if !baseUrl.isEmpty {
@@ -636,6 +639,14 @@ final class HubStore {
             password: password,
             deviceName: UIDevice.current.name
         )
+    }
+
+    /// wp-17：APNs 设备 token 上报（AppDelegate 注册回调 → 本方法 → 桥）。必须走本实例自持的
+    /// bridge：桥内 hubClient 与登录态同生命周期，另起 AgentBridge 实例没有登录栈，上报会被
+    /// 静默丢弃。失败（未登录/网络不可达/撤销设备 403）在桥侧静默吞掉——尽力而为的增强面。
+    /// 登出不主动上报空串退订（设备已撤销，上报必 403），见 App.swift AppDelegate 注释。
+    func reportApnsToken(_ token: String) {
+        bridge.hubReportApnsToken(token: token)
     }
 
     /// 登出闭环（方案 §6-P4 验收⑤）= 撤销当前设备（服务端 Token 即时失效）+ 清 Keychain

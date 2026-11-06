@@ -6,5 +6,11 @@
 	     profile 自动注入 production 环境，此处按惯例声明 development。 -->
 	<key>aps-environment</key>
 	<string>development</string>
+	<!-- 数据保护 keychain（refreshToken 持久化，HubPlatform.ios.kt）需要显式 keychain
+	     访问组：自定义 entitlements 会替换 Xcode 默认生成的全组，缺此键真机 -34018。 -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)dev.sharpxia.agentreins</string>
+	</array>
 </dict>
 </plist>

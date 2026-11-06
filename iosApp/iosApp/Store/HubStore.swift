@@ -180,8 +180,10 @@ final class HubStore {
     /// 订阅连接相位（wp-10 连接提示条数据面；登录态建立时机调用——与 watchApprovals 同模式，
     /// 重复调用由桥侧换订阅。linked = 已连接且已追平，提示条唯一消失相位）。
     func watchPhase() {
+        // 防御性小写归一（beta-0.5.4 真机缺陷教训）：桥契约是小写字符串，任何上游漂移
+        // 在此归一，避免横条恒琥珀+恒无文字（switch 全落 default）。
         bridge.hubWatchPhase { [weak self] phase in
-            self?.syncPhase = phase
+            self?.syncPhase = phase.lowercased()
         }
     }
 

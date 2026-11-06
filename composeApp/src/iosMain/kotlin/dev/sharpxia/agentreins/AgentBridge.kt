@@ -186,7 +186,9 @@ class AgentBridge {
     fun hubWatchPhase(onPhase: (String) -> Unit) {
         hubPhaseJob?.cancel()
         hubPhaseJob = scope.launch {
-            runCatching { hubClient?.syncPhase?.collect { onPhase(it.name) } }
+            // TF beta-0.5.4 真机缺陷修复：name 是 PascalCase 枚举名（"Catching"），Swift 侧按
+            // 小写契约比较（注释上行）——恒不匹配导致提示条永不消失、文字恒空、恒琥珀底。
+            runCatching { hubClient?.syncPhase?.collect { onPhase(it.name.lowercase()) } }
         }
     }
 

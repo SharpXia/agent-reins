@@ -40,13 +40,16 @@ import dev.sharpxia.agentreins.hub.auth.DeviceInfo
 import kotlinx.coroutines.launch
 
 /**
- * 设置页（wp-6 验收⑤ + wp-10 审批清单落点 + wp-11 网关入口 + wp-9 通知偏好面）：账号/设备概览
+ * 设置页（wp-6 验收⑤ + wp-10 审批清单落点 + wp-11 网关入口 + wp-9 通知偏好面 + wp-14 关闭行为
+ * 面）：账号/设备概览
  * + 设备清单管理（撤销他机；清单失败错误态 + 撤销失败显式降级文案可重试，wp-11 设备管理错误态）
  * + 网关与 Agent 入口卡（wp-11：快照计数摘要，点击跳网关独立页——
  * iOS 设置页 Section("网关") NavigationLink parity）+ 待审批清单（wp-9 的 desktop 呈现：全部
  * pending 审批含归属未学习行——那里没有会话页可挂，唯一可见处在此；对齐 iOS 设置页「待审批」
  * 入口）+ 通知偏好节（wp-9：总开关 + 已静音会话清单管理，静音为本地偏好跨登出保留，iOS
- * HubStore.mutedConversations 同口径）+ 登出清库闭环（stop → runtime.logout（撤销设备 + 清凭据）
+ * HubStore.mutedConversations 同口径）+ 关闭行为卡（wp-14：关窗最小化到托盘 / 关窗退出，
+ * 本地偏好跨登出保留，缺省关窗最小化；托盘「退出」菜单不受开关影响始终真退出）+
+ * 登出清库闭环（stop → runtime.logout（撤销设备 + 清凭据）
  * → wipeLocalData 七表清空；重登后从空库 bootstrap，05 §3.5 / 方案 §6-P4；静音偏好不在清库面，
  * 跨登出保留）。
  */
@@ -63,6 +66,9 @@ internal fun SettingsScreen(
     onNotificationsEnabled: (Boolean) -> Unit,
     mutedIds: Set<String>,
     onUnmute: (conversationId: String) -> Unit,
+    // wp-14：关闭行为开关（onMinimizeToTrayOnClose = null = 不挂卡，旧装配兼容）
+    minimizeToTrayOnClose: Boolean = true,
+    onMinimizeToTrayOnClose: ((Boolean) -> Unit)? = null,
 ) {
     val scope = rememberCoroutineScope()
     var devices by remember { mutableStateOf<List<DeviceInfo>?>(null) }
@@ -187,6 +193,16 @@ internal fun SettingsScreen(
                 onUnmute = onUnmute,
             )
 
+            // wp-14：关闭行为卡（开 = 关窗最小化到托盘，进程与同步/通知面保持运行，托盘
+            // 「显示主窗」唤回；关 = 关窗直接退出进程。托盘「退出」菜单始终真退出）。
+            val closeBehaviorHandler = onMinimizeToTrayOnClose
+            if (closeBehaviorHandler != null) {
+                CloseBehaviorCard(
+                    minimizeToTrayOnClose = minimizeToTrayOnClose,
+                    onMinimizeToTrayOnClose = closeBehaviorHandler,
+                )
+            }
+
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -242,6 +258,39 @@ internal fun SettingsScreen(
             }
 
             Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+/**
+ * wp-14：关闭行为卡——窗口关闭按钮的行为开关（默认开 = 关窗最小化到系统托盘：进程与同步/
+ * 通知面保持运行，托盘「显示主窗」可唤回；关 = 关窗直接退出进程）。行为是本地用户偏好
+ * （DesktopWindowPreferences，跨登出保留，权威由 main.kt onCloseRequest 实时读取，开关
+ * 即时生效）。托盘菜单的「退出」不受本开关影响，始终真正退出进程。
+ */
+@Composable
+private fun CloseBehaviorCard(
+    minimizeToTrayOnClose: Boolean,
+    onMinimizeToTrayOnClose: (Boolean) -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("关闭行为", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                Text(
+                    if (minimizeToTrayOnClose) "最小化到托盘" else "直接退出",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (minimizeToTrayOnClose) Color(0xFF2E9E44) else Color(0xFF999999),
+                )
+                Spacer(Modifier.width(8.dp))
+                Switch(checked = minimizeToTrayOnClose, onCheckedChange = onMinimizeToTrayOnClose)
+            }
+            Text(
+                "开启后点窗口关闭按钮会隐藏到系统托盘（后台同步与通知保持运行，托盘「显示主窗」" +
+                    "可唤回，菜单「退出」真正退出）；关闭后关窗将直接退出应用。",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF777777),
+            )
         }
     }
 }

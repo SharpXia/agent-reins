@@ -50,9 +50,11 @@ import kotlinx.coroutines.cancel
  * （[ApprovalDecisionState]）壳层持有、随行离场收敛清理，会话页/设置页共用同一份。
  * wp-18：客户端按 eventTap 构造（iOS AgentBridge 同模式）——通知协调器消费 shared 事件流
  * （审批/run 终态走事件旁路、回复走会话列表 Flow 差异面），助手行走 [MarkdownText]。
+ * wp-14：关窗行为偏好（[DesktopWindowPreferences]）由 main.kt 创建传入（同一实例喂窗口
+ * onCloseRequest 与设置页开关）；缺省 null = 不挂「关闭行为」卡（旧装配兼容）。
  */
 @Composable
-fun DesktopHubApp() {
+internal fun DesktopHubApp(windowPrefs: DesktopWindowPreferences? = null) {
     // 数据面 scope：与窗口同生命周期（合成器销毁即取消）；全在 Dispatchers.Default，不占 UI 线程
     val scope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Default) }
     DisposableEffect(Unit) { onDispose { scope.cancel() } }
@@ -115,7 +117,7 @@ fun DesktopHubApp() {
     MaterialTheme {
         when {
             authState is HubAuthState.LoggedIn -> {
-                HubShell(client, authState as HubAuthState.LoggedIn, coordinator, mutePrefs)
+                HubShell(client, authState as HubAuthState.LoggedIn, coordinator, mutePrefs, windowPrefs)
             }
             authState is HubAuthState.NeedsLogin ||
                 (authState is HubAuthState.Idle && restoreAttempted) || submitting -> {
@@ -149,13 +151,18 @@ private fun BootLoadingScreen() {
 
 private enum class HubPane { Conversations, Gateways, Settings }
 
-/** 已登录主壳：左栏（账号头 + 会话列表 + 导航）+ 右内容区（会话页 / 设置页）。 */
+/** 已登录主壳：左栏（账号头 + 会话列表 + 导航）+ 右内容区（会话页 / 设置页）。
+ *  wp-7：会话操作面（列表右键重命名/压缩 + 新建会话入口）在 [ConversationListPanel] 内自持
+ *  瞬态并直调 shared v1.1 门面，壳层只传 client，不承接会话操作状态。
+ *  wp-14：关窗行为偏好（[DesktopWindowPreferences] 内存镜像权威，UI 镜像只喂设置页开关，
+ *  窗口 onCloseRequest 决策在 main.kt 实时读权威值）。 */
 @Composable
 private fun HubShell(
     client: DefaultHubClient,
     session: HubAuthState.LoggedIn,
     coordinator: DesktopNotificationCoordinator,
     mutePrefs: DesktopMutePreferences,
+    windowPrefs: DesktopWindowPreferences?,
 ) {
     val conversations by client.observeConversations().collectAsState(initial = emptyList())
     // wp-10：待审批单点订阅 + 决策瞬态（壳层持有跨面板存活；行离场 approval.resolved 时收敛清理）
@@ -175,6 +182,13 @@ private fun HubShell(
     fun setNotificationsEnabled(enabled: Boolean) {
         mutePrefs.setNotificationsEnabled(enabled)
         notificationsEnabled = mutePrefs.notificationsEnabled
+    }
+    // wp-14：关窗行为 UI 镜像（权威在 windowPrefs——main.kt onCloseRequest 决策实时读它，
+    // 这里的镜像只喂设置页开关；windowPrefs = null（旧装配）不挂卡）。
+    var minimizeToTrayOnClose by remember { mutableStateOf(windowPrefs?.minimizeToTrayOnClose ?: true) }
+    fun setMinimizeToTrayOnClose(enabled: Boolean) {
+        windowPrefs?.setMinimizeToTrayOnClose(enabled)
+        minimizeToTrayOnClose = windowPrefs?.minimizeToTrayOnClose ?: enabled
     }
     // wp-18 通知规则数据面：会话列表推送喂回复差异面（unread 增量）；当前打开会话供
     // 「非当前打开」判定（iOS HubStore.selected 同口径）。规则态由协调器消费协程独占，
@@ -207,6 +221,10 @@ private fun HubShell(
                     conversations = conversations,
                     selectedId = selectedId.takeIf { pane == HubPane.Conversations },
                     onSelect = { selectedId = it; pane = HubPane.Conversations },
+                    // wp-7：会话操作面（右键重命名/压缩 + 新建会话入口）直接消费 shared 门面
+                    // （createConversation/renameConversation/compactConversation，
+                    // HubClient.kt v1.1 门面段）；createConversation 自动携带 mainSession=true
+                    client = client,
                     mutedIds = mutedIds,
                     onToggleMute = ::setMuted,
                     modifier = Modifier.weight(1f),
@@ -243,6 +261,9 @@ private fun HubShell(
                         onNotificationsEnabled = ::setNotificationsEnabled,
                         mutedIds = mutedIds,
                         onUnmute = { id -> setMuted(id, false) },
+                        // wp-14：关闭行为开关（缺省关窗最小化到托盘；windowPrefs = null 不挂卡）
+                        minimizeToTrayOnClose = minimizeToTrayOnClose,
+                        onMinimizeToTrayOnClose = ::setMinimizeToTrayOnClose.takeIf { windowPrefs != null },
                     )
                     // wp-11：网关与 Agent 独立页（observeGateways 零消费 → 结构化清单呈现）
                     HubPane.Gateways -> GatewaysPanel(client)

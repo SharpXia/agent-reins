@@ -1,10 +1,23 @@
 package dev.sharpxia.agentreins
 
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Tray
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import dev.sharpxia.agentreins.desktopui.DesktopHubApp
+import dev.sharpxia.agentreins.desktopui.DesktopWindowPreferences
 import dev.sharpxia.agentreins.hub.HubConfig
 import dev.sharpxia.agentreins.hub.HubException
 import dev.sharpxia.agentreins.hub.auth.CredentialStore
@@ -14,15 +27,23 @@ import io.ktor.client.request.header
 import io.ktor.http.HttpHeaders
 import io.ktor.http.takeFrom
 import io.ktor.websocket.Frame
+import java.awt.Window
+import kotlin.math.cos
+import kotlin.math.sin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 
 /**
- * 桌面壳（wp-6 MVP + wp-10 交互 parity + wp-18 渲染/通知）：默认窗渲染 Compose Desktop Hub 面
- * （[DesktopHubApp]，登录/会话列表/会话页/设置四屏，整体落 desktopApp 不动 commonMain 的 App()）。
- * wp-10 交互能力全落 desktopui：消息操作（复制/重发/Stop + activeRunId 降级）、审批卡
- * （含决策不可用降级态）、空正文防线；wp-18 落 Markdown 渲染（MarkdownText）与 macOS 本地通知
- * （DesktopNotificationCoordinator，eventTap 旁路 + osascript 派发）。
+ * 桌面壳（wp-6 MVP + wp-10 交互 parity + wp-18 渲染/通知 + wp-14 托盘常驻）：默认窗渲染
+ * Compose Desktop Hub 面（[DesktopHubApp]，登录/会话列表/会话页/设置四屏，整体落 desktopApp
+ * 不动 commonMain 的 App()）。wp-10 交互能力全落 desktopui：消息操作（复制/重发/Stop +
+ * activeRunId 降级）、审批卡（含决策不可用降级态）、空正文防线；wp-18 落 Markdown 渲染
+ * （MarkdownText）与 macOS 本地通知（DesktopNotificationCoordinator，eventTap 旁路 +
+ * osascript 派发）。
+ * wp-14：系统托盘常驻（[Tray]，图标 = [HubTrayIcon] 资源无关几何绘制；菜单 = 显示主窗/退出）
+ * + 关窗行为开关（DesktopWindowPreferences，默认关窗最小化到托盘：仅隐藏 AWT 窗不退出进程，
+ * 同步/通知面随进程存活——wp-9 通知面在关窗后仍有意义的前提）；关窗退出开关关闭行为回到
+ * 旧语义（exitApplication），托盘「退出」菜单始终真正退出进程。
  *
  * 三条 Hub 验收通道不开窗口、跑完即退出（HUB_BASE / HUB_USER / HUB_PASS 来自环境变量，不落代码）：
  * - `hub-login`：认证两步流 + AUTH-006 + 设备绑定 + 静默恢复轮换 + 撤销，见 [hubLoginProbe]
@@ -43,12 +64,79 @@ fun main(args: Array<String>) {
         return
     }
     application {
+        val windowState = rememberWindowState(width = 1280.dp, height = 800.dp)
+        // wp-14：关窗行为偏好（内存镜像权威 + java.util.prefs best-effort 持久化，缺省 =
+        // 关窗最小化）。同一实例喂 onCloseRequest 决策与 DesktopHubApp（设置页开关）。
+        val windowPrefs = remember { DesktopWindowPreferences() }
+        // 主窗 AWT 引用：托盘「显示主窗」与关窗最小化共用（SideEffect 在窗口内容里捕获；
+        // 未捕获 null 时关窗走退出兜底——不应发生，防御）。
+        var awtWindow by remember { mutableStateOf<Window?>(null) }
+        fun showMainWindow() {
+            awtWindow?.let { w ->
+                // 最小化态关窗后唤回：只清 ICONIFIED 位（不动 MAXIMIZED，保住最大化状态）
+                (w as? java.awt.Frame)?.let { f ->
+                    f.extendedState = f.extendedState and java.awt.Frame.ICONIFIED.inv()
+                }
+                w.isVisible = true
+                w.toFront()
+            }
+        }
+        // wp-14：托盘常驻（菜单 action 在 AWT EDT 回调，AWT 属性读写恰在其线程语义内）。
+        // Tray 图标全程在挂（不受关窗行为开关影响）；关闭行为 = 仅退出时是否驻留的差异面。
+        Tray(
+            icon = HubTrayIcon,
+            tooltip = "AgentReins Hub",
+            menu = {
+                Item("显示主窗") { showMainWindow() }
+                Separator()
+                Item("退出") { exitApplication() }
+            },
+        )
         Window(
             title = "AgentReins Hub",
-            onCloseRequest = ::exitApplication,
-            state = rememberWindowState(width = 1280.dp, height = 800.dp),
+            state = windowState,
+            onCloseRequest = {
+                if (windowPrefs.minimizeToTrayOnClose) {
+                    // wp-14 验收：关窗 = 隐藏到托盘（进程与同步/通知面存活，托盘可唤回）；
+                    // 仅置 AWT 不可见，不 dispose 窗口——Compose 组合与 DesktopHubApp 数据面
+                    // scope 均不销毁，后台继续跑。窗口引用未捕获（不应发生）走退出兜底。
+                    val w = awtWindow
+                    if (w != null) w.isVisible = false else exitApplication()
+                } else {
+                    exitApplication()
+                }
+            },
         ) {
-            DesktopHubApp()
+            SideEffect { awtWindow = window }
+            DesktopHubApp(windowPrefs)
+        }
+    }
+}
+
+/**
+ * wp-14 托盘图标（资源无关几何绘制，零 PNG 依赖）：蓝底圆角方 + 白色「中枢」三点连线
+ * （hub-and-spoke 喻会话聚合面）。Compose Painter 供 AWT TrayIcon 按 DPI 渲染；22dp 逻辑
+ * 尺寸为托盘面常规口径。纯 DrawScope 几何（圆/线/圆角矩形），不依赖 TextMeasurer/资源。
+ */
+private object HubTrayIcon : Painter() {
+    override val intrinsicSize: Size = Size(22f, 22f)
+
+    override fun DrawScope.onDraw() {
+        drawRoundRect(
+            color = Color(0xFF2B6CB0),
+            cornerRadius = CornerRadius(size.minDimension * 0.23f, size.minDimension * 0.23f),
+        )
+        val center = Offset(size.width / 2f, size.height / 2f)
+        val spoke = size.minDimension * 0.31f
+        drawCircle(color = Color.White, radius = size.minDimension * 0.13f, center = center)
+        repeat(3) { i ->
+            val angle = Math.toRadians(-90.0 + i * 120.0)
+            val p = Offset(
+                center.x + (spoke * cos(angle)).toFloat(),
+                center.y + (spoke * sin(angle)).toFloat(),
+            )
+            drawLine(color = Color.White, start = center, end = p, strokeWidth = size.minDimension * 0.07f)
+            drawCircle(color = Color.White, radius = size.minDimension * 0.09f, center = p)
         }
     }
 }

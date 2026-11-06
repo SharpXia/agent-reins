@@ -333,9 +333,20 @@ final class HubStore {
         lastMessagesFlushAt = nil
     }
 
+    /// #5（2026-11-06 UX 轮）：own-send 强制贴底信号——send() 置位，timeline 在下一帧
+    /// 消息变化时消费（无论当时阅读位置）；仅 onChange 回调读写，不参与 body 依赖。
+    private var ownSendScrollPending = false
+
     func send(_ text: String) {
         guard let c = selected else { return }
+        ownSendScrollPending = true
         bridge.hubSend(conversationId: c.conversationId, text: text)
+    }
+
+    /// 消费 own-send 贴底信号（timeline 专用；读后即清，仅触发一次滚动）。
+    func consumeOwnSendScrollPending() -> Bool {
+        defer { ownSendScrollPending = false }
+        return ownSendScrollPending
     }
 
     /// 当前打开会话的实时行（wp-8②）：selected 是打开时刻的快照，hasActiveRun/activeRunId 会随

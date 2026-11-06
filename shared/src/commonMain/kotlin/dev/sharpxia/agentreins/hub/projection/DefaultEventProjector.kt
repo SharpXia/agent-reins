@@ -40,19 +40,24 @@ private data class DataMessageFailed(val messageId: String, val reason: String? 
 
 @Serializable
 private data class DataSessionCreated(
-    val sessionKey: String,
+    /** 容缺（2026-11-06，同 DataSessionUpdated）：桥现网载荷身份字段在信封、其余常缺省。 */
+    val sessionKey: String = "",
     val agentId: String,
-    val label: String,
-    val hasActiveRun: Boolean,
+    val label: String = "",
+    val hasActiveRun: Boolean = false,
 )
 
 /** v1.1：sessionId 已撤；lifecycleRevision 保留 = 化身更替信号（客户端据此失效本地缓存，05 §3.10）。 */
 @Serializable
 private data class DataSessionUpdated(
-    val sessionKey: String,
+    val sessionKey: String = "",
     val agentId: String,
-    val label: String,
-    val lifecycleRevision: Long,
+    /** 可选（2026-11-06 容缺）：桥现网载荷不挂数据内 label/sessionKey/lifecycleRevision
+     *  （sessionKey 走信封；label 仅有 chat.title 变更帧携带；revision 从不出场）——必填
+     *  解码曾整族失败 → session.updated 全 drop，两跳暂存/归属学习在真机从未生效。缺省
+     *  语义：label="" = 不变更（upsert NULLIF 守卫）；revision=null = 不变更（COALESCE）。 */
+    val label: String = "",
+    val lifecycleRevision: Long? = null,
     val hasActiveRun: Boolean,
     val activeRunIds: JsonElement? = null,
 )
@@ -600,9 +605,10 @@ class DefaultEventProjector(
         }
         val existing = db.hubQueries.selectConversation(convId).executeAsOneOrNull() ?: return skip()
         // 化身更替（05 §3.10）：revision 持久基准（列，-1=未知/快照行）——基准未知时只记录不重置；
-        // 已知且变化 = 更替：旧代次消息封存移出、seq 从 1 重计、未读清零、readCursor 重置
+        // 已知且变化 = 更替：旧代次消息封存移出、seq 从 1 重计、未读清零、readCursor 重置。
+        // 载荷缺 revision（桥现网形状，2026-11-06 容缺）= 不变更，不得与既有基准比较。
         val prior = existing.lifecycleRevision
-        if (prior >= 0 && prior != d.lifecycleRevision) {
+        if (prior >= 0 && d.lifecycleRevision != null && prior != d.lifecycleRevision) {
             db.hubQueries.deleteMessagesByConversation(convId)
             db.hubQueries.deleteReadCursor(convId)
             db.hubQueries.resetConversationIncarnation(convId)
@@ -672,8 +678,17 @@ class DefaultEventProjector(
         val d = decode(DataCommandAcked.serializer(), envelope.data) ?: return skip()
         db.hubQueries.updateCommandState(d.status, null, envelope.ts, d.idempotencyKey)
         db.hubQueries.updateCommandId(d.commandId, envelope.ts, d.idempotencyKey)
-        // 发送行 UI 翻转：正向迁移即已投递（COMPLETED 由 message.created 权威内容收敛）
-        db.hubQueries.setMessageUiStateByIdem(UI_DELIVERED, d.idempotencyKey)
+        // 发送行 UI 翻转（2026-11-06 UX 轮 #6 修正）：此前任何 ack（含 PERSISTED/DELIVERING）
+        // 一律翻 delivered——乐观行发出毫秒级即呈 ✓，「发送中」徽标从未可见；网关迟后报失败
+        // （实测 chat 启动超时 ~15s，PERSISTED→DELIVERING→FAILED trigger=gateway）即成
+        // 「✓ 又发送失败」观感。改为仅在网关确认后翻已投递：PERSISTED/DELIVERING 保持
+        // sending（发送中徽标可见窗口），GATEWAY_ACKED/COMPLETED → delivered；COMPLETED
+        // 语义仍由 message.created 权威内容收敛（此处只做保底）。
+        when (d.status) {
+            "GATEWAY_ACKED", "COMPLETED" ->
+                db.hubQueries.setMessageUiStateByIdem(UI_DELIVERED, d.idempotencyKey)
+            else -> Unit
+        }
         learnMappingFromCommand(envelope, d.idempotencyKey)
     }
 

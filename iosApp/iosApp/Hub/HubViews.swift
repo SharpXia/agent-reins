@@ -68,9 +68,24 @@ struct HubRootView: View {
 struct HubSyncPhaseBanner: View {
     let phase: String
 
+    /// #7（2026-11-06 UX 轮）：非 linked 相位的同步 icon 持续旋转——用户可感知「在动 =
+    /// 加载中」；wifi.slash/superseded 静态（语义是状态不是进度）。repeatForever 驱动，
+    /// 横条随 linked 消失时动画随视图一并卸载。
+    @State private var spinning = false
+
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: iconName)
+            if rotates {
+                Image(systemName: iconName)
+                    .rotationEffect(.degrees(spinning ? 360 : 0))
+                    .animation(
+                        .linear(duration: 1.2).repeatForever(autoreverses: false),
+                        value: spinning,
+                    )
+                    .onAppear { spinning = true }
+            } else {
+                Image(systemName: iconName)
+            }
             Text(text)
             Spacer(minLength: 0)
         }
@@ -82,6 +97,11 @@ struct HubSyncPhaseBanner: View {
         .background(backgroundColor)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("连接状态：\(text)")
+    }
+
+    /// 进度语义相位（转圈）；状态语义相位（wifi.slash/superseded）不转。
+    private var rotates: Bool {
+        phase == "catching" || phase == "rebuilding"
     }
 
     private var text: String {
@@ -497,10 +517,17 @@ struct HubChatView: View {
                 // wp-7①：跟随条件 = 尾部变化 且 用户在底部（上翻阅读时不拉回）。
                 // 尾签覆盖行数、尾行身份/状态/内容量——比旧「只看 messages.count」
                 // 多覆盖流式行原位增长与占位行收敛。
-                guard atBottom else { return }
+                // #5（2026-11-06 UX 轮）：自己发送例外——无论阅读位置强制贴底，保证
+                // 刚发出的消息与随后的服务端回复立即可见（聊天产品的自我消息语义）。
+                let ownSend = hub.consumeOwnSendScrollPending()
+                guard atBottom || ownSend else { return }
                 proxy.scrollTo("bottom", anchor: .bottom)
             }
             .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
+            // #4（2026-11-06 UX 轮）：键盘收起双通道——滑动列表渐进收起（interactively，
+            // 系统键盘伴随）；点时间线空白处一次性收起（tap 不与长按菜单/按钮冲突）。
+            .scrollDismissesKeyboard(.interactively)
+            .onTapGesture { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
         }
     }
 

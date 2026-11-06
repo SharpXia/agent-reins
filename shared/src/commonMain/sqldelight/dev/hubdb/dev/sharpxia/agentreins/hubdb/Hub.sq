@@ -236,7 +236,11 @@ ON CONFLICT(conversationId) DO UPDATE SET
   label = excluded.label,
   agentId = excluded.agentId,
   lastMessagePreview = excluded.lastMessagePreview,
-  lastSeq = excluded.lastSeq,
+  -- MAX 合并（2026-11-06 UX 轮）：lastSeq 现含客户端 fallback 分配值（事件缺
+  -- sourceMessageSeq 时 = lastSeq+1，可与服务端域瞬时偏离）。校准回填不得回退
+  -- 该水位——回退会让下一轮 fallback 重新从低位起算，新行排序倒挂进历史区间。
+  -- 化身更替走 resetConversationIncarnation 显式清零，MAX 不阻碍重计。
+  lastSeq = MAX(hubConversations.lastSeq, excluded.lastSeq),
   lastActiveAt = excluded.lastActiveAt,
   unreadCount = excluded.unreadCount,
   hasActiveRun = excluded.hasActiveRun,
@@ -307,7 +311,7 @@ UPDATE hubConversations SET
   label = CASE WHEN :label = '' THEN label ELSE :label END,
   hasActiveRun = :hasActiveRun,
   activeRunId = CASE WHEN :hasActiveRun = 0 THEN NULL ELSE activeRunId END,
-  lifecycleRevision = :revision
+  lifecycleRevision = COALESCE(:revision, lifecycleRevision)
 WHERE conversationId = :conversationId;
 
 -- run.* 事件（v4）：hasActiveRun 翻转 + 当前活跃 runId 捕获/清空（wp-8 Stop 按钮取值；
@@ -387,18 +391,32 @@ WHERE conversationId = ? AND role = 'user' AND seq = 9223372036854775807
 selectMessage:
 SELECT * FROM hubMessages WHERE messageId = ?;
 
+-- 无信息量行显示过滤（2026-11-06 UX 轮 #3；时间线/未读/翻页三查询同规则）：
+-- ① assistant 空正文与「无回复」——OpenClaw 心跳模板的协议性无事答复（30 分钟一次，
+--    main 会话实测 129 行「无回复」+46 行空正文，模型原文非系统合成）；
+-- ② role='' 合成行中 content 带 <!-- 注释头的心跳模板行（真 compaction/reset 行不带）。
+-- 行照常落库（快照/翻页 seq 数学不受影响），仅显示与未读计数面过滤；服务端 unread
+-- 口径（reader listConversations）与推送面（push pushAlert）同规则收口，三面对齐。
 selectMessages:
-SELECT * FROM hubMessages WHERE conversationId = ? ORDER BY seq;
+SELECT * FROM hubMessages
+WHERE conversationId = ?
+  AND (role != 'assistant' OR (TRIM(content) != '' AND TRIM(content) != '无回复'))
+  AND (role != '' OR content NOT LIKE '<!--%')
+ORDER BY seq;
 
 selectMessagesBefore:
-SELECT * FROM hubMessages WHERE conversationId = ? AND seq < ?
+SELECT * FROM hubMessages
+WHERE conversationId = ? AND seq < ?
+  AND (role != 'assistant' OR (TRIM(content) != '' AND TRIM(content) != '无回复'))
+  AND (role != '' OR content NOT LIKE '<!--%')
 ORDER BY seq DESC LIMIT :limit;
 
 -- 本地未读重算（与 Hub 口径同式：当前化身内 seq > readUpTo 且 role=assistant 的 final 行；
 -- role="" 合成行不计）
 countUnread:
 SELECT COUNT(*) FROM hubMessages
-WHERE conversationId = ? AND seq > ? AND role = 'assistant' AND state = 'final';
+WHERE conversationId = ? AND seq > ? AND role = 'assistant' AND state = 'final'
+  AND TRIM(content) NOT IN ('', '无回复');
 
 deleteMessagesByConversation:
 DELETE FROM hubMessages WHERE conversationId = ?;

@@ -11,6 +11,13 @@ actual fun createHubDriver(): SqlDriver? {
             .getMethod("currentApplication")
             .invoke(null) as? android.content.Context
     }.getOrNull() ?: return null
+    val first = runCatching {
+        AndroidSqliteDriver(HubDatabase.Schema, context, "agentreins-hub.db")
+    }.getOrNull()
+    if (first != null) return first
+    // 同 iOS 愈合路径（0.5.4 真机死库教训）：PRAGMA 被 0.5.4 旧守卫污染（=7 ≠ Schema.version 1）时
+    // OpenHelper 打开即迁移失败关库——删库重开（投影可弃，O-01 随重建重取）。
+    runCatching { context.deleteDatabase("agentreins-hub.db") }
     return runCatching {
         AndroidSqliteDriver(HubDatabase.Schema, context, "agentreins-hub.db")
     }.getOrNull()

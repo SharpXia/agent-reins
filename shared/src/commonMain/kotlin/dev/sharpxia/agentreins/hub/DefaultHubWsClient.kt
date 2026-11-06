@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -129,8 +130,17 @@ class DefaultHubWsClient(
     override suspend fun close() {
         receiver?.cancel()
         receiver = null
-        runCatching { session?.close() }
+        val s = session
         session = null
+        if (s != null) {
+            runCatching { s.close() }
+            // 崩溃防护（0.5.4 真机锁屏解锁 SIGABRT 根因）：等会话真正收尾再返回——
+            // Ktor Darwin 引擎的 didComplete(error) 回调在 URLSession 线程同步构造异常并
+            // completeExceptionally；若此时会话尚未终结（父调用上下文已退出/取消），该异常
+            // 无人消费 → Kotlin/Native terminateWithUnhandledException → 进程 abort。
+            // 会话先收尾，迟到的 didComplete 落在已终结 job 上只被静默丢弃。
+            withTimeoutOrNull(2_000) { runCatching { s.closeReason.await() } }
+        }
     }
 
     internal fun decodeFrame(text: String): HubServerFrame? {

@@ -82,6 +82,15 @@ struct RootView: View {
         .inkTheme()
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { BackSwipe.attach() }
+            // 崩溃防护（2026-11-07 UX 轮，0.5.4 真机锁屏解锁 SIGABRT）：离开前台即优雅断开
+            // 同步栈（WSS 主动收尾，杜绝挂起竞态下 URLSession 错误回调落在半终结 Ktor 会话
+            // 上产生无人消费异常）；回前台恢复重连。inactive（控制中心/通知中心/锁屏过程）与
+            // background 都覆盖——锁屏必然先经 inactive。未登录/未启动在桥侧幂等空转。
+            switch phase {
+            case .background, .inactive: hub.suspendSync()
+            case .active: hub.resumeSync()
+            @unknown default: break
+            }
         }
     }
 }

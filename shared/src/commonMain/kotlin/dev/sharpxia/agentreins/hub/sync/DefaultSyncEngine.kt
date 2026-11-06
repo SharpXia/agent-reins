@@ -204,6 +204,10 @@ class DefaultSyncScheduler(
                     collector.cancel()
                 }
             } catch (e: CancellationException) {
+                // stop()（含 iOS 后台暂停）取消路径必须收尾 WS 会话：此前会话泄漏存续，
+                // 挂起竞态下底层 URLSession 错误回调落在半终结会话上（Ktor Darwin
+                // didComplete 异常无人消费）→ 进程 abort（0.5.4 真机锁屏解锁 SIGABRT）。
+                runCatching { ws.close() }
                 throw e
             } catch (_: Exception) {
                 // 建连/帧循环失败：走下方统一恢复节拍（R5 轮询退化）

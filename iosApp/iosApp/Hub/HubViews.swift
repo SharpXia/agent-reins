@@ -343,6 +343,11 @@ struct HubChatView: View {
     @State private var probeBox = ScrollProbeBox()
     /// wp-7①：当前滚动相是否用户驱动（tracking/interacting/decelerating）。
     @State private var userDrivenScroll = false
+    /// #4（2026-11-07 UX 轮）：软键盘可见态（keyboardWillChangeFrame 驱动）——键盘弹出
+    /// 改变滚动几何但不经用户手势（userDrivenScroll=false），配合贴底跟随补滚动（见 timeline）。
+    @State private var keyboardVisible = false
+    /// #3（2026-11-07 UX 轮）：待删除确认的本地消息（长按菜单入口 → 会话页二次确认弹层）。
+    @State private var pendingDeleteMessage: UiMessage?
     @Environment(\.inkColors) private var ink
     let conv: UiConversation
 
@@ -475,11 +480,14 @@ struct HubChatView: View {
                         .frame(maxWidth: .infinity, alignment: .center)
                     }
                     ForEach(hub.messages, id: \.messageId) { m in
-                        HubMessageRow(m: m).id(m.messageId)
+                        HubMessageRow(m: m, onDelete: { pendingDeleteMessage = m }).id(m.messageId)
                     }
-                    Color.clear.frame(height: 4).id("bottom")
+                    // #6（2026-11-07 UX 轮）：底部贴距收窄——原 vertical 10 + 高度 4 垫行合计
+                    // 视觉空隙 ~24pt 偏大；改 top 10 / bottom 0 + 垫行 2，尾行距输入区分隔线
+                    // ≈12pt（靠近但不贴死）。
+                    Color.clear.frame(height: 2).id("bottom")
                 }
-                .padding(.horizontal, 14).padding(.vertical, 10)
+                .padding(.horizontal, 14).padding(.top, 10)
             }
             .onScrollGeometryChange(for: ScrollProbe.self) { geo in
                 ScrollProbe(offsetY: geo.contentOffset.y,
@@ -528,6 +536,17 @@ struct HubChatView: View {
             // 系统键盘伴随）；点时间线空白处一次性收起（tap 不与长按菜单/按钮冲突）。
             .scrollDismissesKeyboard(.interactively)
             .onTapGesture { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
+            // #4（2026-11-07 UX 轮）：键盘唤起 → 内容区随系统避让收缩（输入区顶起、时间线
+            // 撑满剩余空间，默认避让已 resize）；此处补尾部跟随——键盘弹出不记为用户滚动，
+            // 在底部时自动滚到最底，保证输入时看得见最新消息；上翻阅读中不拉回。
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
+                guard let f = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue else { return }
+                keyboardVisible = f.minY < UIScreen.main.bounds.height - 1
+            }
+            .onChange(of: keyboardVisible) { _, visible in
+                guard visible, atBottom else { return }
+                proxy.scrollTo("bottom", anchor: .bottom)
+            }
         }
     }
 
@@ -607,6 +626,10 @@ struct HubChatView: View {
         }
         .navigationTitle(title(conv))
         .navigationBarTitleDisplayMode(.inline)
+        // #2（2026-11-07 UX 轮）：会话详情页隐藏底部 Tab 栏——IM 详情页惯例（聊天内容+输入区
+        // 独占全屏），pop 回列表自动恢复；详情仍走 NavigationStack 推栈，导航纪律不变
+        //（不必单开 WindowGroup/Scene：多 Scene 会引入窗口生命周期与状态同步复杂度，收益不抵）。
+        .toolbar(.hidden, for: .tabBar)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
@@ -645,6 +668,24 @@ struct HubChatView: View {
                 hub.rename(conv, to: t)
             }
             Button("取消", role: .cancel) {}
+        }
+        // #3（2026-11-07 UX 轮）：本地删除二次确认——仅清本机投影行（脏数据清理出口），
+        // 不影响服务端历史；服务端数据经快照/校准回流可能重新出现（弹层文案明示）。
+        .confirmationDialog(
+            "删除这条本地消息？",
+            isPresented: Binding(
+                get: { pendingDeleteMessage != nil },
+                set: { if !$0 { pendingDeleteMessage = nil } },
+            ),
+            titleVisibility: .visible,
+        ) {
+            Button("删除本地消息", role: .destructive) {
+                if let m = pendingDeleteMessage { hub.deleteLocalMessage(m) }
+                pendingDeleteMessage = nil
+            }
+            Button("取消", role: .cancel) { pendingDeleteMessage = nil }
+        } message: {
+            Text("仅从本机删除显示；服务端历史不受影响，重新同步后可能重新出现。")
         }
         .onAppear { hub.open(conv) }
         .onDisappear { if hub.selected?.conversationId == conv.conversationId { hub.closeConversation() } }
@@ -782,6 +823,9 @@ private final class ScrollProbeBox {
 
 private struct HubMessageRow: View {
     let m: UiMessage
+    /// #3（2026-11-07 UX 轮）：删除入口回调——二次确认弹层挂在会话页（pendingDeleteMessage），
+    /// 行内只负责发起，不自带弹层（LazyVStack 行级弹层生命周期不可靠）。
+    let onDelete: () -> Void
     @State private var hub = HubStore.shared
     @Environment(\.inkColors) private var ink
 
@@ -883,6 +927,13 @@ private struct HubMessageRow: View {
             } label: {
                 Label("重发", systemImage: "arrow.clockwise")
             }
+        }
+        // #3（2026-11-07 UX 轮）：本地删除入口（长按菜单）——二次确认在会话页弹层，
+        // 仅清本机投影行（脏数据清理出口），不影响服务端历史。
+        Button(role: .destructive) {
+            onDelete()
+        } label: {
+            Label("删除本地消息", systemImage: "trash")
         }
     }
 

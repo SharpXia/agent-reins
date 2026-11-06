@@ -100,28 +100,37 @@ private struct LiteTableView: View {
     let header: [AttributedString]
     let rows: [[AttributedString]]
 
+    /// #5（2026-11-07 UX 轮）：单元格最大宽度——超出即换行，超长不可断词（URL/哈希）不截断
+    /// （横向滚动兜底可见），替代原 maxWidth:.infinity 均分列宽导致的「…」截断。
+    private static let maxCellWidth: CGFloat = 280
+
     var body: some View {
         let columns = max(header.count, rows.map(\.count).max() ?? 0)
-        Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
-            if !header.isEmpty {
-                GridRow {
-                    ForEach(0..<columns, id: \.self) { i in
-                        cell(i < header.count ? header[i] : AttributedString(), bold: true)
+        // #5（2026-11-07 UX 轮）：表格自然宽度超出气泡即横向滑动看全，不再挤压列宽截断；
+        // 窄表仍按内容收宽（minWidth 64 保证短列不至于挤成竖条）。边框/圆角随内容移动。
+        ScrollView(.horizontal, showsIndicators: true) {
+            Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
+                if !header.isEmpty {
+                    GridRow {
+                        ForEach(0..<columns, id: \.self) { i in
+                            cell(i < header.count ? header[i] : AttributedString(), bold: true)
+                        }
+                    }
+                    .background(c.surfaceTertiary)
+                }
+                ForEach(rows.indices, id: \.self) { r in
+                    Rectangle().fill(c.borderPrimary).frame(height: 1).gridCellUnsizedAxes(.horizontal)
+                    GridRow {
+                        ForEach(0..<columns, id: \.self) { i in
+                            cell(i < rows[r].count ? rows[r][i] : AttributedString(), bold: false)
+                        }
                     }
                 }
-                .background(c.surfaceTertiary)
             }
-            ForEach(rows.indices, id: \.self) { r in
-                Rectangle().fill(c.borderPrimary).frame(height: 1).gridCellUnsizedAxes(.horizontal)
-                GridRow {
-                    ForEach(0..<columns, id: \.self) { i in
-                        cell(i < rows[r].count ? rows[r][i] : AttributedString(), bold: false)
-                    }
-                }
-            }
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(c.borderPrimary, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
         }
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(c.borderPrimary, lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func cell(_ s: AttributedString, bold: Bool) -> some View {
@@ -129,7 +138,7 @@ private struct LiteTableView: View {
             .font(.system(size: 14, weight: bold ? .semibold : .regular))
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(minWidth: 64, maxWidth: Self.maxCellWidth, alignment: .leading)
     }
 }
 

@@ -272,6 +272,23 @@ class DefaultHubClient(
     }
 
     /**
+     * 后台/锁屏暂停同步栈（2026-11-07 UX 轮崩溃防护，iOS scenePhase 驱动）：停连接循环并
+     * 收尾 WSS（scheduler 保留可 [resumeNetwork] 原地重启）。动机：进程挂起竞态下，底层
+     * URLSession 错误回调（didComplete）可能在 Ktor Darwin 会话半终结窗口送达，其同步构造
+     * 的异常无人消费 → Kotlin/Native abort（0.5.4 真机锁屏解锁 SIGABRT 九连实证）。锁屏前
+     * 主动优雅断开，错误回调要么不发生（已收尾）要么落在已终结 job 上被静默丢弃。
+     */
+    fun suspendNetwork() {
+        scheduler?.stop()
+        phaseState.value = SyncPhase.Catching
+    }
+
+    /** 回前台恢复同步栈（与 [suspendNetwork] 成对；未 start 过/已 stop 登出态为幂等空转）。 */
+    fun resumeNetwork() {
+        scheduler?.start()
+    }
+
+    /**
      * 清全部本地数据（登出闭环，方案 §6-P4 验收⑤）：十一表事务内清空，含 O-01 最小集
      * （命令队列/游标）、审批/工具活动累积态（wp-15 v6 两表）与两跳归属暂存（v7 wp-4）；
      * 同时重置 run 发起登记表（wp-4 修法二，内存态不跨登出复用）。设备已在服务端撤销，
@@ -297,6 +314,15 @@ class DefaultHubClient(
     }
 
     // ── UI 查询（投影库 Flow；写路径由 projector/commands 承担） ──
+
+    /**
+     * 本地删除单条消息（2026-11-07 UX 轮）：脏数据清理出口——仅删投影库本地行，不发任何
+     * 服务端命令；observeMessages Flow 即推删除后列表。语义边界：服务端权威数据仍会经
+     * 快照重建/校准回流（重建后行可能复活），本操作是本地清理不是服务端撤回。
+     */
+    fun deleteLocalMessage(conversationId: String, messageId: String) {
+        db?.hubQueries?.deleteLocalMessage(conversationId, messageId)
+    }
 
     fun observeConversations(): Flow<List<UiConversation>> {
         val db = db ?: return flowOf(emptyList())

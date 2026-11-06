@@ -343,6 +343,26 @@ final class HubStore {
         bridge.hubSend(conversationId: c.conversationId, text: text)
     }
 
+    // ---------- 崩溃防护 + 本地清理（2026-11-07 UX 轮） ----------
+
+    /// 后台/锁屏暂停同步栈（App.swift scenePhase 离开 active 驱动）：桥侧停连接循环并优雅
+    /// 收尾 WSS，防挂起竞态下 Ktor Darwin 会话错误回调 abort（0.5.4 真机锁屏解锁 SIGABRT）。
+    func suspendSync() {
+        bridge.hubSuspendSync()
+    }
+
+    /// 回前台恢复同步栈（与 suspendSync 成对；幂等）。
+    func resumeSync() {
+        bridge.hubResumeSync()
+    }
+
+    /// 本地删除单条消息（脏数据清理出口）：仅清投影库行，Flow 即推删除后列表；无服务端命令，
+    /// 服务端权威数据经快照/校准可能回流（语义=本地清理，非服务端撤回）。
+    func deleteLocalMessage(_ m: UiMessage) {
+        guard let c = selected else { return }
+        bridge.hubDeleteLocalMessage(conversationId: c.conversationId, messageId: m.messageId)
+    }
+
     /// 消费 own-send 贴底信号（timeline 专用；读后即清，仅触发一次滚动）。
     func consumeOwnSendScrollPending() -> Bool {
         defer { ownSendScrollPending = false }

@@ -367,6 +367,11 @@ DELETE FROM hubMessages WHERE conversationId = ? AND state = 'streaming' AND mes
 deleteStreamingRows:
 DELETE FROM hubMessages WHERE conversationId = ? AND state = 'streaming';
 
+-- 本地删除单条消息（2026-11-07 UX 轮）：脏数据清理出口——仅删投影库本地行，不发任何
+-- 服务端命令；服务端权威数据仍会经快照重建/校准回流（重建后行可能复活，语义=本地清理）
+deleteLocalMessage:
+DELETE FROM hubMessages WHERE conversationId = ? AND messageId = ?;
+
 -- 用户行回执到达：同 idempotencyKey 的本地乐观行（messageId=临时键）整体提升为服务端行，
 -- 避免乐观行+服务端行双行并存（05 §3.9 义务 4 的 UI 翻转语义）
 promoteLocalEcho:

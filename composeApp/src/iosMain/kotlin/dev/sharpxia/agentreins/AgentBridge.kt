@@ -257,6 +257,28 @@ class AgentBridge {
     }
 
     /**
+     * 后台/锁屏暂停同步栈（2026-11-07 UX 轮崩溃防护；iOS scenePhase 离开 active 时调用）：
+     * 停连接循环并优雅收尾 WSS——挂起竞态下 URLSession 错误回调落在半终结会话上会 abort
+     * （0.5.4 真机锁屏解锁 SIGABRT）。未登录/未启动为幂等空转。
+     */
+    fun hubSuspendSync() {
+        scope.launch { runCatching { hubClient?.suspendNetwork() } }
+    }
+
+    /** 回前台恢复同步栈（与 [hubSuspendSync] 成对；幂等）。 */
+    fun hubResumeSync() {
+        scope.launch { runCatching { hubClient?.resumeNetwork() } }
+    }
+
+    /**
+     * 本地删除单条消息（2026-11-07 UX 轮）：仅清投影库行（脏数据清理出口），无服务端命令；
+     * observeMessages Flow 即推删除后列表。服务端权威数据经快照/校准可能回流（语义=本地清理）。
+     */
+    fun hubDeleteLocalMessage(conversationId: String, messageId: String) {
+        scope.launch { runCatching { hubClient?.deleteLocalMessage(conversationId, messageId) } }
+    }
+
+    /**
      * 取消当前活跃 run（Stop 按钮 → DefaultCommandClient.cancelRun，幂等队列 + REST #11 run.cancel）。
      * 调用方须先从会话实时行取 activeRunId（wp-5 v4 投影）；缺失时不得调用——映射未学习场景
      * （DefaultEventProjector.setRun 在 resolveConversation 失败时不落库）降级为 UI 提示态，

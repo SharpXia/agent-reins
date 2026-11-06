@@ -2,6 +2,7 @@ package dev.sharpxia.agentreins
 
 import dev.sharpxia.agentreins.hub.DefaultHubClient
 import dev.sharpxia.agentreins.hub.HubAuthState
+import dev.sharpxia.agentreins.hub.HubException
 import dev.sharpxia.agentreins.hub.HubRuntime
 import dev.sharpxia.agentreins.hub.UiApproval
 import dev.sharpxia.agentreins.hub.UiConversation
@@ -41,6 +42,7 @@ class AgentBridge {
     private var hubApprovalJob: Job? = null
     private var hubGatewayJob: Job? = null
     private var hubWorkActivityJob: Job? = null
+    private var hubPhaseJob: Job? = null
 
     /** wp-13：run 终态通知回调（Swift 注册；见 [hubWatchRunTerminal]）。 */
     private var runTerminalSink: ((conversationId: String, runId: String, status: String) -> Unit)? = null
@@ -102,6 +104,7 @@ class AgentBridge {
         hubApprovalJob?.cancel(); hubApprovalJob = null
         hubGatewayJob?.cancel(); hubGatewayJob = null
         hubWorkActivityJob?.cancel(); hubWorkActivityJob = null
+        hubPhaseJob?.cancel(); hubPhaseJob = null
         val client = hubClient
         hubClient = null
         client?.stop()
@@ -172,6 +175,21 @@ class AgentBridge {
         }
     }
 
+    /**
+     * 连接相位订阅（wp-10 两端连接提示条数据面；Swift 登录态建立时机调用，重复调用换订阅）：
+     * onPhase 为 phase.name 字符串 ∈ catching/linked/reconnecting/rebuilding/superseded
+     * （SyncScheduler.phase，[SyncPhase] 纯观察面——不改变同步语义与恢复流程）。linked =
+     * 已连接且已追平，是提示条唯一消失相位。数据源 = hubClient.syncPhase 稳定流（HubClient
+     * 组装时注入 phaseSink，UI 订阅不随 scheduler start/stop 换源）；hubClient 未就绪时本订阅
+     * 空转（与 [hubWatchApprovals] 同语义），重挂时机由登录态回调承担。
+     */
+    fun hubWatchPhase(onPhase: (String) -> Unit) {
+        hubPhaseJob?.cancel()
+        hubPhaseJob = scope.launch {
+            runCatching { hubClient?.syncPhase?.collect { onPhase(it.name) } }
+        }
+    }
+
     // ---------- wp-13：通知面（iOS 本地通知触发面） ----------
 
     /**
@@ -203,7 +221,11 @@ class AgentBridge {
      * completed/failed——run.aborted 是用户主动 Stop 的自致结果，不提醒——与
      * approval.requested（回复通知仍走投影库 Flow 面：unread 增量与「非当前打开」判定都在
      * Swift 会话列表态）。conversationId 经 hubConvKeys 直查（信封 gatewayId + sessionKey，
-     * run/approval 域必带 sessionKey）；未映射 = 空串透传，由 Swift 侧显式降级。
+     * run/approval 域必带 sessionKey；wp-4 起两跳连结行也在此解析出——通知面放开两跳归属）；
+     * 未映射 = 空串透传，由 Swift 侧显式降级。
+     * wp-4 修法二发起方门（两端协调器同口径 = RunOriginRegistry.isRunLocal 消费）：run 终态仅
+     * 「本端发起」（message.send 登记）提醒；他端发起 / compact 触发静默（未读增量仍由会话列表
+     * 承载）。registry 缺省（未 start）时事件不流动，此处不判空放行为不可达回退。
      */
     private fun onBridgeEvent(envelope: EventEnvelope) {
         val sk = envelope.sessionKey ?: return
@@ -216,6 +238,8 @@ class AgentBridge {
                 val runId = envelope.runId
                     ?: envelope.data.jsonObject["runId"]?.toString()?.trim('"')?.takeIf { it.isNotEmpty() }
                     ?: return
+                val registry = hubClient?.runOriginRegistry
+                if (registry != null && !registry.isRunLocal(envelope.gatewayId, runId)) return
                 runTerminalSink?.invoke(conversationId, runId, status)
             }
             EventEnvelope.APPROVAL_REQUESTED -> approvalRequestedSink?.invoke(conversationId)
@@ -309,25 +333,45 @@ class AgentBridge {
 
     // ---------- 设备管理 ----------
 
-    /** 设备清单（设备管理页）。 */
-    fun hubDevices(onList: (List<DeviceInfo>) -> Unit) {
+    /**
+     * 设备清单（设备管理页）。wp-11 设备管理错误态：onDone devices 非 null = 成功；null =
+     * 拉取失败（未登录 / 网络不可达 / Hub FAILED），error = 人读失败原因（契约错误为
+     * code+message）——调用方须显式呈现「错误 + 重试」降级态，不静默。此前失败不回调，
+     * 清单页永「加载中…」（与同页审批卡显式降级纪律不一致，本版收敛）。
+     */
+    fun hubDevices(onDone: (devices: List<DeviceInfo>?, error: String?) -> Unit) {
         scope.launch {
-            runCatching {
-                val stack = hubRuntime.authStack ?: return@launch
-                val page = stack.auth.withBearer { stack.api.listDevices() }
-                onList(page.devices)
+            val r = runCatching {
+                val stack = hubRuntime.authStack ?: throw HubException.notLoggedIn()
+                stack.auth.withBearer { stack.api.listDevices() }
+            }
+            val page = r.getOrNull()
+            if (page != null) {
+                onDone(page.devices, null)
+            } else {
+                onDone(null, describeError(r.exceptionOrNull()))
             }
         }
     }
 
-    /** 撤销设备（可撤任意自有设备含当前；撤当前即远端登出，本地随后清凭据重登录）。 */
-    fun hubRevokeDevice(deviceId: String, onDone: () -> Unit) {
+    /**
+     * 撤销设备（可撤任意自有设备含当前；撤当前即远端登出，本地随后清凭据重登录）。
+     * wp-11 设备管理错误态：onDone ok true = DELETE 已成功（生效以服务端为准）；false =
+     * 撤销未送达（未登录 / 网络不可达 / Hub FAILED）——调用方须显式呈现失败提示 + 可重试，
+     * 不静默。此前 onDone 恒调、失败被 runCatching 吞掉。
+     */
+    fun hubRevokeDevice(deviceId: String, onDone: (ok: Boolean) -> Unit) {
         scope.launch {
-            runCatching {
-                val stack = hubRuntime.authStack ?: return@launch
+            val ok = runCatching {
+                val stack = hubRuntime.authStack ?: throw HubException.notLoggedIn()
                 stack.auth.withBearer { stack.api.deleteDevice(deviceId) }
-            }
-            onDone()
+            }.isSuccess
+            onDone(ok)
         }
     }
+
+    /** 失败原因人读化（契约错误 code+message，其余取 message；与 desktop 同式）。 */
+    private fun describeError(e: Throwable?): String =
+        (e as? HubException)?.let { "${it.payload.code} ${it.payload.message}" }
+            ?: (e?.message ?: "未知错误")
 }

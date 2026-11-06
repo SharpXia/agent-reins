@@ -140,11 +140,17 @@ class ProjectionStats {
 /**
  * [EventProjector] 的 SQLite 落库实现（05 §3.11 合并规则，契约 v1.1 路由）。
  *
- * 路由模型（Hub.sq v4 文件头）：卡片主键 = conversationId（快照/列表是卡片唯一来源）；
- * 事件→卡片经 hubConvKeys 映射 (gatewayId, sessionKey) → conversationId。映射只经两条
- * 强通道学习（弱键如 label 不做，宁可慢不可错绑）：① 自发送回执链（message.created 的
- * idempotencyKey → 命令队列/乐观行携带的 conversationId）；② 自命令 ack（信封 sessionKey +
- * 队列条目）。未映射事件不建卡：skip 并靠 R4 周期校准兜底。
+ * 路由模型（Hub.sq v4/v7 文件头）：卡片主键 = conversationId（快照/列表是卡片唯一来源）；
+ * 事件→卡片经 hubConvKeys 映射 (gatewayId, sessionKey) → conversationId。映射三条学习通道：
+ * ① 自发送回执链（message.created 的 idempotencyKey → 命令队列/乐观行携带的 conversationId）；
+ * ② 自命令 ack（信封 sessionKey + 队列条目）；③ 两跳归属（v7 wp-4）——session.created/updated
+ * 载荷 (sessionKey, agentId) 未映射时暂存 hubSessionAgents，卡片行 (gatewayId, agentId) 到位后
+ * 连结写 hubConvKeys（twoHop=1）。**两跳行分域消费**：只供 run 终态（setRun(false)）与
+ * approval.requested 的归属面；message.*（时间线/未读）、session.updated 身份（label/hasActiveRun/
+ * 化身）、run.started 活跃翻转、tool.* 与 run.status 捕获只认自学习行——同 agent 的 channel/TG
+ * 会话与任务会话由此不混入主线卡（app 主会话隔离，2026-11-06 聚合轮 allowlist 收口的客户端
+ * 对位；ADR-14 不解析键形态，以「学习通道」作隔离边界）。
+ * 未映射事件不建卡：skip 并靠 R4 周期校准兜底。
  * 幂等性边界（INV-1）：本类所有写路径除 delta append/占位行创建外均为 upsert/幂等 UPDATE；
  * delta 的重复防护由调用方（事件 id 去重 + 水位裁决）承担。
  */
@@ -187,6 +193,10 @@ class DefaultEventProjector(
                     lastActiveAt = c.lastActiveAt,
                     unreadCount = c.unreadCount.toLong(),
                     hasActiveRun = if (c.hasActiveRun) 1L else 0L,
+                    // v6（wp-3 活跃 run 权威回填）：快照行带出服务端 runs RUNNING 权威 runId
+                    //（老服务端行无此字段即 null，upsert 三级合并保留事件习得值）——冷启动后
+                    // Stop 按钮即刻可用，与事件路径 setConversationActiveRun 共用同一列。
+                    activeRunId = c.activeRunId,
                     reconciling = if (c.reconciling) 1L else 0L,
                 )
                 snapshot.messages[c.conversationId]?.forEach { m ->
@@ -208,13 +218,17 @@ class DefaultEventProjector(
                     db.hubQueries.upsertReadCursor(c.conversationId, up)
                 }
             }
-            // 映射表跨重建保留（conversationId 化身更替后不变），失效项（卡已不存在）清掉
+            // 映射表跨重建保留（conversationId 化身更替后不变），失效项（卡已不存在）清掉；
+            // 两跳暂存行（跨重建保留）按快照卡行 (gatewayId, agentId) 再连结——快照后映射即全量可用，
+            // 不等下一次 R4 校准
+            joinStagedSessionAgents(snapshot.conversations)
             db.hubQueries.clearConvKeysOrphan()
         }
         stats.snapshotsApplied++
     }
 
-    /** 会话列表校准（08 §4.2）：upsert 合并，不清表、不碰 hubConvKeys（映射跨校准保留）。 */
+    /** 会话列表校准（08 §4.2）：upsert 合并，不清表、不碰自学习映射（跨校准保留）；
+     *  两跳暂存行按校准卡行 (gatewayId, agentId) 连结（v7 wp-4——新卡首条 run/审批由此即刻有归属）。 */
     override fun applyConversations(rows: List<ConversationRow>) {
         db.transaction {
             rows.forEach { c ->
@@ -228,9 +242,12 @@ class DefaultEventProjector(
                     lastActiveAt = c.lastActiveAt,
                     unreadCount = c.unreadCount.toLong(),
                     hasActiveRun = if (c.hasActiveRun) 1L else 0L,
+                    // v6（wp-3）：校准路径同口径回填 activeRunId（快照路径同注释）
+                    activeRunId = c.activeRunId,
                     reconciling = if (c.reconciling) 1L else 0L,
                 )
             }
+            joinStagedSessionAgents(rows)
             db.hubQueries.clearConvKeysOrphan()
         }
     }
@@ -244,11 +261,14 @@ class DefaultEventProjector(
                 EventEnvelope.MESSAGE_CREATED -> onMessageCreated(envelope)
                 EventEnvelope.MESSAGE_REPLACED -> onMessageReplaced(envelope)
                 EventEnvelope.MESSAGE_FAILED -> onMessageFailed(envelope)
-                EventEnvelope.RUN_STARTED -> setRun(envelope, true)
+                // run.started 只认自学习映射（v7 分域）：两跳归属的他端/channel run 不得翻转卡片
+                // 活跃态（hasActiveRun/activeRunId 是本端 Stop 按钮与活跃标记的权威面）
+                EventEnvelope.RUN_STARTED -> setRun(envelope, true, allowTwoHop = false)
+                // run 终态允许两跳归属（通知面消费；写面由 setRun 终态守卫保护本地在途 run 状态）
                 EventEnvelope.RUN_COMPLETED,
                 EventEnvelope.RUN_FAILED,
                 EventEnvelope.RUN_ABORTED,
-                -> setRun(envelope, false)
+                -> setRun(envelope, false, allowTwoHop = true)
                 // wp-15 可选项（additive）：run.status = Bridge chat status/aborted 变体的 Run 阶段帧
                 //（06 §3.2 additive 注册）；老服务端不发本类型，缺省走 else 忽略分支语义不变。
                 EventEnvelope.RUN_STATUS -> onRunStatus(envelope)
@@ -293,7 +313,8 @@ class DefaultEventProjector(
             // 主路径，直接 skip 即流式面上游缺口。门卫：仅会话存在活跃 run 时建占位（run.started
             // 先于 delta 同序到达/快照 hasActiveRun=1）；无活跃 run 的缺行 delta = 迟到重放噪声
             // （合并器 final 后抑制驱逐兜底放行/run 终态清除后再到），skip 防幽灵气泡复活。
-            val convId = resolveConversation(envelope, null) ?: return skip() // 未映射不建卡（卡片唯一来源 = 快照/校准）
+            // 只认自学习映射（v7 分域）：两跳行是同 agent 其它会话（channel/任务），不得写入主线卡时间线
+            val convId = resolveConversation(envelope, null, allowTwoHop = false) ?: return skip() // 未映射不建卡（卡片唯一来源 = 快照/校准）
             val conv = db.hubQueries.selectConversation(convId).executeAsOneOrNull() ?: return skip()
             if (conv.hasActiveRun == 0L) return skip()
             db.hubQueries.upsertMessage(
@@ -326,7 +347,9 @@ class DefaultEventProjector(
 
     private fun onMessageCreated(envelope: EventEnvelope) {
         val d = decode(DataMessageCreated.serializer(), envelope.data) ?: return skip()
-        val convId = resolveConversation(envelope, d.idempotencyKey) ?: return skip()
+        // 只认自学习映射（v7 分域，注释同 onMessageDelta）：同 agent 的 channel/任务会话消息
+        // 不得写入主线卡时间线、不得推未读（app 主会话隔离）
+        val convId = resolveConversation(envelope, d.idempotencyKey, allowTwoHop = false) ?: return skip()
         val isUser = d.role == "user"
         // 用户行回执：同 idempotencyKey 的本地乐观行（PENDING_LOCAL 期 messageId=幂等键）整体提升，
         // 避免乐观行与服务端行双行并存（05 §3.9 义务 4 的 UI 翻转语义）
@@ -406,13 +429,29 @@ class DefaultEventProjector(
 
     // ── run / session 域 ─────────────────────────────────────────────────────
 
-    private fun setRun(envelope: EventEnvelope, active: Boolean) {
-        val convId = resolveConversation(envelope, null) ?: return
+    /**
+     * run.* 事件：hasActiveRun 翻转 + 当前活跃 runId 捕获/清空（wp-8 Stop 按钮取值）。
+     * v7 分域：run.started 只走自学习映射（[allowTwoHop]=false 调用）；终态允许两跳归属
+     * （通知面消费；写面由下方终态守卫保护本端在途 run 状态）。
+     */
+    private fun setRun(envelope: EventEnvelope, active: Boolean, allowTwoHop: Boolean) {
+        val convId = resolveConversation(envelope, null, allowTwoHop) ?: return
         // v4（wp-5③）：捕获当前活跃 runId（wp-8 Stop 按钮 → REST #11 run.cancel 路径参数必带
         // runId，hub-api-v1.yaml:500-511）。信封 run 域必带 runId（06 §2.2）；防御性再读
         // data.runId（与 Hub 引擎 applyRun 同序）。终态一律置 NULL——hasActiveRun=0 的写路径
         // 不残留死 runId。
         val runId = envelope.runId ?: dataRunId(envelope)
+        if (!active) {
+            // v7 wp-4 终态守卫：两跳归属的终态（同 agent 其它会话的他端/channel run）与乱序旧终态
+            // 不得清掉卡片正在跟踪的活跃 run——activeRunId 与本终态 runId 不一致时只清本 run 的
+            // 阶段帧，不翻转 hasActiveRun/activeRunId、不清流式行（防误杀本地在途 run 的 Stop 面
+            // 与流式气泡）。
+            val existing = db.hubQueries.selectConversation(convId).executeAsOneOrNull()
+            if (existing != null && existing.activeRunId != null && existing.activeRunId != runId) {
+                runId?.let { db.hubQueries.deleteRunStatusByRunId(envelope.gatewayId, it) }
+                return
+            }
+        }
         db.hubQueries.setConversationActiveRun(
             hasActiveRun = if (active) 1L else 0L,
             activeRunId = if (active) runId else null,
@@ -437,11 +476,12 @@ class DefaultEventProjector(
 
     // ── tool / run.status 域（wp-15 v6：本地捕获，已知丢失面 06 §10.2——不补发不承诺完整） ──
 
-    /** tool.started：建 running 行（同键重报不改状态，防重复投递把已完成调用翻回在途）。 */
+    /** tool.started：建 running 行（同键重报不改状态，防重复投递把已完成调用翻回在途）。
+     *  只认自学习映射（v7 分域）：channel/任务会话的工具活动不挂进主线卡「工作过程」。 */
     private fun onToolStarted(envelope: EventEnvelope) {
         val d = decode(DataToolEvent.serializer(), envelope.data) ?: return skip()
         val callKey = d.resolvedKey ?: return skip() // 无调用关联键无法串联三态，跳过（丢弃计数）
-        val convId = resolveConversation(envelope, null)
+        val convId = resolveConversation(envelope, null, allowTwoHop = false)
         db.hubQueries.upsertToolStarted(
             gatewayId = envelope.gatewayId,
             runId = envelope.runId ?: return skip(), // tool 域信封必带 runId（06 §2.2）；缺即毒帧跳过
@@ -459,7 +499,7 @@ class DefaultEventProjector(
     private fun onToolFinished(envelope: EventEnvelope, status: String) {
         val d = decode(DataToolEvent.serializer(), envelope.data) ?: return skip()
         val callKey = d.resolvedKey ?: return skip()
-        val convId = resolveConversation(envelope, null)
+        val convId = resolveConversation(envelope, null, allowTwoHop = false)
         db.hubQueries.upsertToolFinished(
             gatewayId = envelope.gatewayId,
             runId = envelope.runId ?: return skip(),
@@ -473,11 +513,12 @@ class DefaultEventProjector(
         pruneToolEvents(convId)
     }
 
-    /** wp-15 可选项：run.status（Bridge chat status/aborted 变体）→ 每 run 最新阶段帧。 */
+    /** wp-15 可选项：run.status（Bridge chat status/aborted 变体）→ 每 run 最新阶段帧。
+     *  只认自学习映射（v7 分域，同 tool.* 注释）。 */
     private fun onRunStatus(envelope: EventEnvelope) {
         val d = decode(DataRunStatus.serializer(), envelope.data) ?: return skip()
         val runId = envelope.runId ?: dataRunId(envelope) ?: return skip()
-        val convId = resolveConversation(envelope, null)
+        val convId = resolveConversation(envelope, null, allowTwoHop = false)
         db.hubQueries.upsertRunStatus(
             gatewayId = envelope.gatewayId,
             runId = runId,
@@ -516,14 +557,28 @@ class DefaultEventProjector(
         if (convId != null) db.hubQueries.pruneToolEvents(convId, TOOL_EVENTS_MAX_PER_CONV)
     }
 
+    /**
+     * session.created（v7 wp-4 两跳学习）：不建卡（卡片唯一来源 = 快照/列表校准铁律不变），且
+     * 新会话的 conversationId 未知——未映射时按载荷 (sessionKey, agentId) 暂存 hubSessionAgents
+     * 并即时尝试连结（卡片已在则本事件即通，未到则等 applyConversations/applySnapshot 连结），
+     * 卡片由 R4 校准拉入。
+     */
     private fun onSessionCreated(envelope: EventEnvelope) {
-        // v1.1：事件不带 conversationId，不建卡（卡片唯一来源 = 快照/列表校准），且新会话的
-        // conversationId 未知、映射无从学习——静默忽略（非解析失败，不计 skip），卡片由 R4 校准拉入。
+        val d = decode(DataSessionCreated.serializer(), envelope.data) ?: return // 静默忽略（非解析失败，不计 skip）
+        val sk = envelope.sessionKey ?: d.sessionKey
+        stageAndJoinSessionAgent(envelope.gatewayId, sk, d.agentId)
     }
 
     private fun onSessionUpdated(envelope: EventEnvelope) {
         val d = decode(DataSessionUpdated.serializer(), envelope.data) ?: return skip()
-        val convId = resolveConversation(envelope, null) ?: return skip()
+        // 身份更新只认自学习映射（v7 分域）：channel/任务会话的 label/hasActiveRun/化身不得写入
+        // 主线卡。未映射 → 暂存 + 尝试连结（两跳行只供 run 终态/审批归属面，身份更新仍 skip）。
+        val convId = resolveConversation(envelope, null, allowTwoHop = false)
+        if (convId == null) {
+            val sk = envelope.sessionKey ?: d.sessionKey
+            stageAndJoinSessionAgent(envelope.gatewayId, sk, d.agentId)
+            return skip()
+        }
         val existing = db.hubQueries.selectConversation(convId).executeAsOneOrNull() ?: return skip()
         // 化身更替（05 §3.10）：revision 持久基准（列，-1=未知/快照行）——基准未知时只记录不重置；
         // 已知且变化 = 更替：旧代次消息封存移出、seq 从 1 重计、未读清零、readCursor 重置
@@ -544,11 +599,23 @@ class DefaultEventProjector(
         )
     }
 
+    /**
+     * session.removed（v7 wp-4 调整）：暂存行无条件清（session 已移除，两跳暂存失效）；
+     * 级联删卡**只对自学习行**——两跳连结行属于同 agent 的其它会话（channel/任务），若跟随删卡
+     * 会把主线卡连带误删（TG 会话删除 = 主线卡消失）。两跳行此处清映射、卡片保留（卡片唯一来源
+     * = 快照/校准，由服务端聚合口径收敛）。
+     */
     private fun onSessionRemoved(envelope: EventEnvelope) {
         val d = decode(DataSessionRemoved.serializer(), envelope.data) ?: return skip()
         val g = envelope.gatewayId
         val sk = d.sessionKey.ifEmpty { envelope.sessionKey } ?: return skip()
-        val key = db.hubQueries.selectConversationByKey(g, sk).executeAsOneOrNull() ?: return skip()
+        db.hubQueries.deleteSessionAgent(g, sk)
+        val key = db.hubQueries.selectConversationByKey(g, sk).executeAsOneOrNull()
+            ?: return skip()
+        if (key.twoHop == 1L) {
+            db.hubQueries.deleteConvKey(g, sk)
+            return skip()
+        }
         val convId = key.conversationId
         db.hubQueries.deleteConversation(convId)
         db.hubQueries.deleteMessagesByConversation(convId)
@@ -560,9 +627,11 @@ class DefaultEventProjector(
 
     // ── approval / command / read 域 ─────────────────────────────────────────
 
+    /** approval.requested：允许两跳归属（v7 分域）——他端/channel run 的审批具行动性，
+     *  归属到主线卡后通知/审批卡可带会话名且能按会话静音。 */
     private fun onApprovalRequested(envelope: EventEnvelope) {
         val d = decode(DataApprovalRequested.serializer(), envelope.data) ?: return skip()
-        val convId = resolveConversation(envelope, null)
+        val convId = resolveConversation(envelope, null, allowTwoHop = true)
         db.hubQueries.upsertApproval(
             approvalId = d.approvalId,
             runId = d.runId,
@@ -611,13 +680,16 @@ class DefaultEventProjector(
 
     /**
      * 事件 → 卡片路由 + 映射学习：
-     * ① hubConvKeys 直查；② 自发送回执链——message.created 的 idempotencyKey 在本地命令队列
-     * （或乐观行）中携带 conversationId，学习后写映射；③ 仍无 → null（skip，校准兜底）。
+     * ① hubConvKeys 直查（[allowTwoHop]=false 时两跳连结行不参与路由——分域消费，见类注释）；
+     * ② 自发送回执链——message.created 的 idempotencyKey 在本地命令队列（或乐观行）中携带
+     * conversationId，学习后写映射（自学习即翻回 twoHop=0）；③ 仍无 → null（skip，校准兜底）。
      */
-    private fun resolveConversation(envelope: EventEnvelope, idempotencyKey: String?): String? {
+    private fun resolveConversation(envelope: EventEnvelope, idempotencyKey: String?, allowTwoHop: Boolean): String? {
         val sk = envelope.sessionKey ?: return null
         val g = envelope.gatewayId
-        db.hubQueries.selectConversationByKey(g, sk).executeAsOneOrNull()?.let { return it.conversationId }
+        db.hubQueries.selectConversationByKey(g, sk).executeAsOneOrNull()?.let { row ->
+            if (allowTwoHop || row.twoHop == 0L) return row.conversationId
+        }
         if (idempotencyKey != null) {
             db.hubQueries.selectCommandByKey(idempotencyKey).executeAsOneOrNull()?.conversationId
                 ?.let { convId ->
@@ -631,6 +703,28 @@ class DefaultEventProjector(
                 }
         }
         return null
+    }
+
+    /**
+     * v7 wp-4 两跳学习入口：未映射的 session 域载荷 (sessionKey, agentId) 暂存 hubSessionAgents，
+     * 并即时尝试连结（同 (gatewayId, agentId) 卡片已在 → 映射立即可路由；未到则等
+     * applyConversations/applySnapshot 连结）。
+     */
+    private fun stageAndJoinSessionAgent(gatewayId: String, sessionKey: String, agentId: String) {
+        if (sessionKey.isEmpty() || agentId.isEmpty()) return
+        db.hubQueries.upsertSessionAgent(gatewayId, sessionKey, agentId)
+        db.hubQueries.selectConversationIdByAgent(gatewayId, agentId).executeAsOneOrNull()?.let { convId ->
+            db.hubQueries.upsertConvKeyTwoHop(gatewayId, sessionKey, convId)
+        }
+    }
+
+    /** 快照/校准卡行到位后的两跳批量连结（每张卡收编其同 (gatewayId, agentId) 暂存行）。 */
+    private fun joinStagedSessionAgents(rows: List<ConversationRow>) {
+        rows.forEach { c ->
+            db.hubQueries.selectSessionAgentsByCard(c.gatewayId, c.agentId).executeAsList().forEach { staged ->
+                db.hubQueries.upsertConvKeyTwoHop(staged.gatewayId, staged.sessionKey, c.conversationId)
+            }
+        }
     }
 
     /** 自命令 ack 的映射学习（通道②）：信封 (gatewayId, sessionKey) + 队列条目 conversationId。 */

@@ -16,6 +16,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.concurrent.Volatile
@@ -131,6 +133,10 @@ class DefaultSyncEngine(
  * - R5 轮询退化：WSS 建连失败/反复断开时按 max(pollIntervalMs, 30s) 节拍 catchUp 兜底
  * - R6 服务端断开不是错误：一律重连恢复；仅 1000+superseded 停轮询等 [triggerRecovery]
  * - 活性看门狗：90s 无任何帧判死主动重连（库级 ping 在 Darwin 不可用时兜底，R6）
+ *
+ * wp-10（纯观察面）：相位 [phase] 只在上述既有分支落点翻转（循环头 catching / Ready+追平
+ * linked / 断开窗口 reconnecting / HUB-SYNC-001/002 rebuilding / superseded 等待），
+ * 不改任何恢复语义。
  */
 class DefaultSyncScheduler(
     private val scope: CoroutineScope,
@@ -139,7 +145,15 @@ class DefaultSyncScheduler(
     private val cursors: EventCursorStore,
     private val calibrationIntervalMs: Long = 300_000,
     private val watchdogTimeoutMs: Long = 90_000,
+    /**
+     * wp-10 相位落点（additive，可选）：缺省自持内部流（单测/直连组装场景）。DefaultHubClient
+     * 组装时传入自有稳定流（phaseSink）——scheduler 每次 start/stop 会重建，UI 订阅面若直接
+     * 指向 scheduler 自持流会随重建换源，注入客户端级稳定流后 collect 永不换源。
+     */
+    private val phaseSink: MutableStateFlow<SyncPhase> = MutableStateFlow(SyncPhase.Catching),
 ) : SyncScheduler {
+
+    override val phase: StateFlow<SyncPhase> get() = phaseSink
 
     private var main: Job? = null
     private val recovery = Channel<Unit>(Channel.CONFLATED)
@@ -149,6 +163,11 @@ class DefaultSyncScheduler(
 
     @Volatile private var running = false
     @Volatile private var pollIntervalMs: Long = 30_000
+
+    /** 相位翻转（wp-10 观察面）：StateFlow 同值合流，重复写零副作用。 */
+    private fun setPhase(p: SyncPhase) {
+        phaseSink.value = p
+    }
 
     override fun start() {
         if (running) return
@@ -170,6 +189,7 @@ class DefaultSyncScheduler(
         var backoffMs = 1_000L
         while (currentCoroutineContext().isActive && running) {
             var superseded = false
+            setPhase(SyncPhase.Catching) // wp-10：连接段在途（引导/建连/追平）
             try {
                 if (cursors.eventCursor() == null) engine.bootstrap()
                 // 帧收集先于 connect 启动：建连即发 resume，ready/事件可能在订阅建立前到达
@@ -188,14 +208,17 @@ class DefaultSyncScheduler(
             } catch (_: Exception) {
                 // 建连/帧循环失败：走下方统一恢复节拍（R5 轮询退化）
             }
+            // 断开（含建连失败）窗口：HTTP 补拉 + 退避重连——wp-10「重连中」提示条
             val closed = ws.closed.value
             if (closed?.superseded == true) {
                 // 同设备新连接接管（08 §5.5）：本进程不重连，等显式恢复信号
                 superseded = true
             } else {
+                setPhase(SyncPhase.Reconnecting)
                 runCatching { engine.catchUp() } // 断开窗口先 HTTP 补一轮（完整性凭证通道）
             }
             if (superseded) {
+                setPhase(SyncPhase.Superseded)
                 recovery.receive()
                 continue
             }
@@ -217,7 +240,8 @@ class DefaultSyncScheduler(
                 break
             }
             if (last != 0L && now - last >= calibrationIntervalMs) {
-                runCatching { engine.catchUp() } // R4 周期校准（不阻塞帧消费循环节奏）
+                // R4 周期校准（不阻塞帧消费循环节奏）；追平成功即收敛 linked（wp-10 提示条消失相位兜底）
+                if (runCatching { engine.catchUp() }.getOrDefault(false)) setPhase(SyncPhase.Linked)
             }
         }
     }
@@ -227,12 +251,15 @@ class DefaultSyncScheduler(
         when (frame) {
             is HubServerFrame.Ready -> {
                 frame.pollIntervalMs?.let { if (it > 0) pollIntervalMs = it }
-                runCatching { engine.catchUp() } // R3 先连后补（ready 后立即对账一次）
+                val ok = runCatching { engine.catchUp() } // R3 先连后补（ready 后立即对账一次）
+                // wp-10：追平成功 → linked（提示条消失相位）；未追平/失败保持 catching（帧仍在流）
+                if (ok.getOrDefault(false)) setPhase(SyncPhase.Linked)
             }
             is HubServerFrame.Event -> engine.onEventArrived(frame.event)
             is HubServerFrame.Error -> when (frame.code) {
                 "HUB-SYNC-001", "HUB-SYNC-002" -> {
                     // cursor 过期/非法 → 全量重建（保留发送队列），重建后外层循环重连
+                    setPhase(SyncPhase.Rebuilding) // wp-10：重建态提示条（验收③ 410 重建）
                     runCatching { engine.rebuild() }
                 }
                 else -> Unit // HUB-BIZ-003 限流帧等：依赖下一轮校准/重连收敛

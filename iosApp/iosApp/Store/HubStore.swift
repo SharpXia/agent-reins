@@ -67,6 +67,14 @@ final class HubStore {
     /// 完整；重连后已捕获部分保留。离开会话页清空（随 open/close 成对）。
     private(set) var workActivity: UiWorkActivity?
 
+    // ---------- wp-10：连接相位面（顶部连接提示条数据源） ----------
+
+    /// 同步连接相位（AgentBridge.hubWatchPhase 推送，phase.name）：catching / linked /
+    /// reconnecting / rebuilding / superseded。linked = 已连接且已追平，是 HubRootView 顶部
+    /// 连接提示条唯一消失相位；catching = 引导/追平在途（弱提示）；reconnecting / rebuilding /
+    /// superseded = 连接降级（警示）。纯观察面，登出复位 catching。
+    private(set) var syncPhase: String = "catching"
+
     // ---------- wp-12：历史翻页（加载更早） ----------
 
     /// 「加载更早」按钮可见性：初始由「会话 lastSeq > 已载行数」乐观判定（≤50 行会话不出按钮——
@@ -97,6 +105,18 @@ final class HubStore {
     private var restoreArmed = false
 
     private var devicesCache: [DeviceInfo]? = nil
+
+    // ---------- wp-11：设备管理错误态（与同页审批卡显式降级纪律一致） ----------
+
+    /// 设备清单拉取失败（hubDevices devices null = 未登录/网络不可达/Hub FAILED）：设置页设备
+    /// 节显式呈现「错误 + 重试」，不再永「加载中…」（wp-11 设备管理错误态）。成功即清；
+    /// 已有缓存清单时刷新失败，错误行与缓存行并存（缓存仍可用，重试按钮补拉）。
+    private(set) var devicesError: String?
+
+    /// 撤销设备失败（hubRevokeDevice ok false = 撤销未送达）：设置页设备节显式降级文案 +
+    /// 可重试（再点「撤销」），不静默（wp-11 设备管理错误态；此前 onDone 恒调、失败被吞）。
+    /// 成功即清。
+    private(set) var revokeFailure: String?
 
     // ---------- wp-13：通知面（iOS 本地通知 + 按会话静音） ----------
 
@@ -154,6 +174,14 @@ final class HubStore {
             // 收敛清理：已兜底成卡的 (gatewayId, agentId) 移出「已提交」瞬态（行翻置灰由主线卡判据接管）
             let cardKeys = Set(self.conversations.map { Self.entryKey(gatewayId: $0.gatewayId, agentId: $0.agentId) })
             self.createdConversationFor.formIntersection(cardKeys)
+        }
+    }
+
+    /// 订阅连接相位（wp-10 连接提示条数据面；登录态建立时机调用——与 watchApprovals 同模式，
+    /// 重复调用由桥侧换订阅。linked = 已连接且已追平，提示条唯一消失相位）。
+    func watchPhase() {
+        bridge.hubWatchPhase { [weak self] phase in
+            self?.syncPhase = phase
         }
     }
 
@@ -323,9 +351,17 @@ final class HubStore {
         bridge.hubCancelRun(runId: runId)
     }
 
-    /// 渲染完成后上报已读（取已渲染最大 seq）。
+    /// wp-12：持续已读上报基线（桌面 ConversationScreen reportedReadUpTo 同型；会话期状态，
+    /// 随 open/close/登出经 resetPagingState 重置）。只推进不回退：同值重复不重发（渲染侧
+    /// onChange 逐消息批触发，基线吞掉同值避免幂等队列噪声命令），列表回退（会话期快照重建
+    /// 清行只回灌尾页）不回退游标——游标是「看到哪」的单调水位，回退只会制造假未读。
+    private var reportedReadUpTo: Int64 = 0
+
+    /// 上报已读（会话页渲染侧持续驱动，seq = 已渲染最大真实 seq）：只推进不回退（wp-12）。
+    /// 每次推进 = 幂等队列 read.cursor 新意图新键（ADR-07）；桥侧失败静默（尽力而为增强面）。
     func markReadUpTo(_ seq: Int64) {
-        guard let c = selected else { return }
+        guard seq > reportedReadUpTo, let c = selected else { return }
+        reportedReadUpTo = seq
         bridge.hubMarkRead(conversationId: c.conversationId, readUpTo: seq)
     }
 
@@ -445,7 +481,8 @@ final class HubStore {
 
     // ---------- wp-12：历史翻页（加载更早） ----------
 
-    /// 会话打开/关闭/登出时重置翻页态（游标与锁存随会话期，不跨会话残留）。
+    /// 会话打开/关闭/登出时重置翻页态与已读基线（游标、锁存与只推进水位均随会话期，
+    /// 不跨会话残留——wp-12 持续已读上报基线同批重置，重开会话首帧照报）。
     private func resetPagingState() {
         earlierExhausted = false
         earlierCursor = nil
@@ -454,19 +491,36 @@ final class HubStore {
         restoreAnchorMessageId = nil
         restoreArmed = false
         canLoadEarlier = false
+        reportedReadUpTo = 0
     }
 
+    /// 乐观行占位 seq（DefaultCommandClient message.send 插行 seq=Long.MAX_VALUE，message.created
+    /// 回执后才取得服务端 seq）——已读上报与翻页判据均不得把该行计入（桌面
+    /// ConversationScreen.OPTIMISTIC_SEQ_SENTINEL 同值同语义，wp-12 两端 parity）。
+    static let optimisticSeqSentinel = Int64.max
+
     /// 重算「加载更早」入口可见性：翻到头锁存后恒隐藏；否则按「会话 lastSeq（实时行，随 run/
-    /// 消息事件推进）> 已载行数」乐观判定——快照尾页 50 行 + 长会话（>50 行）即出按钮，首翻后
-    /// 由服务端 hasMore 接管（loadEarlier 回执）。列表未落地（空）时不出口：翻页游标取自最老
-    /// 已载行，空列表无游标可依（尾页由快照承担）。
+    /// 消息事件推进）> 已载**真实 final 行数**」乐观判定（wp-12 修正：分母不再用 messages.count
+    /// ——合成行（role=""，压缩/重置标记）与乐观行（占位 seq）计入 count 会虚高分母，合成行
+    /// 密集会话首翻前少出按钮；真实 final 行数只数 state="final" 的服务端行）——快照尾页 50 行
+    /// + 长会话（>50 行）即出按钮，首翻后由服务端 hasMore 接管（loadEarlier 回执）。列表未落地
+    /// （空）时不出口：翻页游标取自最老已载行，空列表无游标可依（尾页由快照承担）。
     private func refreshCanLoadEarlier() {
         guard !earlierExhausted, let c = selected, !messages.isEmpty else {
             canLoadEarlier = false
             return
         }
         let lastSeq = liveSelected?.lastSeq ?? c.lastSeq
-        canLoadEarlier = lastSeq > Int64(messages.count)
+        canLoadEarlier = lastSeq > Int64(realLoadedRowCount)
+    }
+
+    /// 已载真实服务端 final 行数（翻页乐观判据分母）：state="final" 且非合成行（role 非空）
+    /// 且非乐观行（真实 seq）。streaming 占位行（seq 尚未服务端定档）与 failed 行不计——
+    /// 分母低估只会让按钮偏保守早出（首翻后 hasMore 权威接管），偏保守方向安全。
+    private var realLoadedRowCount: Int {
+        messages.filter {
+            $0.state == "final" && !$0.role.isEmpty && $0.seq != Self.optimisticSeqSentinel
+        }.count
     }
 
     /// 加载更早（wp-12）：按 oldestSeq 翻页（REST #8 before=游标，行经 upsertMessage 合并进
@@ -538,14 +592,35 @@ final class HubStore {
         bridge.hubCompactConversation(conversationId: conv.conversationId, onDone: { ok in onDone?(ok.boolValue) })
     }
 
-    /// 设备清单（设备管理页；每次进入拉新）。
+    /// 设备清单（设备管理页；每次进入拉新）。devices null = 拉取失败 → devicesError 显式
+    /// 呈现（wp-11 设备管理错误态，不静默）；非 null 成功即清错误态。
     func refreshDevices() {
-        bridge.hubDevices { [weak self] list in self?.devicesCache = list }
+        bridge.hubDevices { [weak self] list, error in
+            guard let self else { return }
+            if let list {
+                self.devicesCache = list
+                self.devicesError = nil
+            } else {
+                self.devicesError = error ?? "设备清单加载失败"
+            }
+        }
     }
 
     var devices: [DeviceInfo]? { devicesCache }
 
-    func revokeDevice(_ deviceId: String) { bridge.hubRevokeDevice(deviceId: deviceId) { [weak self] in self?.refreshDevices() } }
+    /// 撤销设备。ok false = 撤销未送达（网络/服务不可达）→ revokeFailure 显式降级，可再点
+    /// 「撤销」重试；成功即清失败态并刷新清单（wp-11 设备管理错误态）。
+    func revokeDevice(_ deviceId: String) {
+        bridge.hubRevokeDevice(deviceId: deviceId) { [weak self] ok in
+            guard let self else { return }
+            if ok.boolValue {
+                self.revokeFailure = nil
+                self.refreshDevices()
+            } else {
+                self.revokeFailure = "撤销未送达（网络或服务不可达），可重试"
+            }
+        }
+    }
 
     var baseUrl: String {
         didSet { UserDefaults.standard.set(baseUrl, forKey: Self.baseUrlKey) }
@@ -590,6 +665,9 @@ final class HubStore {
             // 不挂在视图 .task（与 watchConversations 不同）：审批计数在设置页也要活，须跟登录态走。
             if kind == "loggedIn" {
                 self.watchApprovals()
+                // wp-10：登录态建立（hubClient 就绪）即挂连接相位订阅——提示条随相位翻转，
+                // 断连/重建可见、追平（linked）消失。重复回调由桥侧换订阅。
+                self.watchPhase()
                 // wp-13：登录态建立即请求通知授权（系统只在首次未决定时弹窗；拒绝后静默降级）。
                 self.notifications.requestAuthorizationIfNeeded()
                 // wp-17：同一时机注册远程通知；token 由 AppDelegate 注册回调取到后经
@@ -667,7 +745,11 @@ final class HubStore {
         createConversationError = nil
         createdConversationFor = []
         devicesCache = nil
+        devicesError = nil
+        revokeFailure = nil
         chatPush = false
+        // wp-10：连接相位复位（同步栈已停转，重登后 watchPhase 重新挂订阅）
+        syncPhase = "catching"
         // wp-13：通知差异面基线随投影数据一并作废（重登 bootstrap 快照不是新事件）；
         // mutedConversations 为本地偏好，跨登出保留。
         conversationsPrimed = false

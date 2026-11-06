@@ -4,9 +4,11 @@ import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import dev.sharpxia.agentreins.hub.projection.AgentRef
 import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
 import dev.sharpxia.agentreins.hub.projection.ConversationRow
+import dev.sharpxia.agentreins.hub.projection.ConversationsPage
 import dev.sharpxia.agentreins.hub.projection.CreateConversationRequest
 import dev.sharpxia.agentreins.hub.projection.DefaultEventProjector
 import dev.sharpxia.agentreins.hub.projection.EventEnvelope
+import dev.sharpxia.agentreins.hub.projection.EventsPage
 import dev.sharpxia.agentreins.hub.projection.GatewaySummary
 import dev.sharpxia.agentreins.hub.projection.MessageRow
 import dev.sharpxia.agentreins.hub.projection.RenameConversationRequest
@@ -14,7 +16,12 @@ import dev.sharpxia.agentreins.hub.projection.SnapshotResponse
 import dev.sharpxia.agentreins.hub.auth.TokenManager
 import dev.sharpxia.agentreins.hub.sync.DbEventCursorStore
 import dev.sharpxia.agentreins.hub.sync.DefaultSyncEngine
+import dev.sharpxia.agentreins.hub.sync.DefaultSyncScheduler
+import dev.sharpxia.agentreins.hub.sync.SyncPhase
 import dev.sharpxia.agentreins.hubdb.HubDatabase
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -454,6 +461,161 @@ class HubSyncFixtureTest {
         assertNull(db.hubQueries.selectMessage("01JMSG00000000000000000003").executeAsOne().reason)
     }
 
+    // ── ⑧ v6 wp-3（2026-11-06 活跃 run 权威回填）：快照/校准两路径写 hubConversations.activeRunId ──
+    //
+    // 服务端 ConversationRow 增可选 activeRunId（runs RUNNING 权威行 native_run_id），此前
+    // 快照/校准不带 runId，冷启动后活跃 run 会话的 Stop 恒「结束中」（事件路径 run.started
+    // 补齐前无取值）。upsert 三级合并：inactive 清空 > 服务端权威值 > 缺省保留事件习得值。
+
+    @Test
+    fun activeRunIdBackfillFromSnapshotAndCalibration() {
+        val db = newDb()
+        // 宽解析容忍缺省（additive 老客户端同义务）：老服务端快照行无 activeRunId 字段照常解码
+        val lenient = kotlinx.serialization.json.Json { ignoreUnknownKeys = true; isLenient = true }
+        val legacy = lenient.decodeFromString(
+            ConversationRow.serializer(),
+            """{"conversationId":"$CONV","gatewayId":"$GW","label":"主线","agentId":"main",""" +
+                """"lastMessagePreview":"","lastSeq":1,"lastActiveAt":"$T0","unreadCount":0,""" +
+                """"hasActiveRun":true,"reconciling":false}""",
+        )
+        assertNull(legacy.activeRunId)
+
+        DefaultEventProjector(db).applySnapshot(
+            SnapshotResponse(
+                snapshotWatermark = WM,
+                generatedAt = T0,
+                gateways = listOf(GatewaySummary(gatewayId = GW, name = "mini", online = false)),
+                conversations = listOf(
+                    ConversationRow(
+                        conversationId = CONV, gatewayId = GW, label = "主线", agentId = "main",
+                        lastMessagePreview = "", lastSeq = 1L, lastActiveAt = T0,
+                        unreadCount = 0, hasActiveRun = true, activeRunId = "run-snap", reconciling = false,
+                    ),
+                ),
+                messages = emptyMap(),
+                readCursors = emptyMap(),
+            ),
+        )
+        // ① 快照路径：RUNNING 行带出 → activeRunId 落列（冷启动 Stop 可取）
+        val snap = db.hubQueries.selectConversation(CONV).executeAsOne()
+        assertEquals(1L, snap.hasActiveRun)
+        assertEquals("run-snap", snap.activeRunId)
+
+        // ② 校准路径：服务端权威值覆盖（run 切换场景，新 RUNNING run 取代旧值）
+        DefaultEventProjector(db).applyConversations(
+            listOf(
+                ConversationRow(
+                    conversationId = CONV, gatewayId = GW, label = "主线", agentId = "main",
+                    lastMessagePreview = "", lastSeq = 2L, lastActiveAt = T0,
+                    unreadCount = 0, hasActiveRun = true, activeRunId = "run-cal", reconciling = false,
+                ),
+            ),
+        )
+        assertEquals("run-cal", db.hubQueries.selectConversation(CONV).executeAsOne().activeRunId)
+
+        // ③ 校准缺省合并：老服务端行（activeRunId=null）且 active → 保留事件习得值
+        //（防御：事件路径 setConversationActiveRun 先于校准落列时不被校准清掉）
+        db.hubQueries.setConversationActiveRun(hasActiveRun = 1L, activeRunId = "run-event", conversationId = CONV)
+        DefaultEventProjector(db).applyConversations(
+            listOf(
+                ConversationRow(
+                    conversationId = CONV, gatewayId = GW, label = "主线", agentId = "main",
+                    lastMessagePreview = "", lastSeq = 3L, lastActiveAt = T0,
+                    unreadCount = 0, hasActiveRun = true, reconciling = false,
+                ),
+            ),
+        )
+        assertEquals("run-event", db.hubQueries.selectConversation(CONV).executeAsOne().activeRunId)
+
+        // ④ inactive 校准连带清空（v4 语义不变）：hasActiveRun=false 即清，防死 runId 残留
+        DefaultEventProjector(db).applyConversations(
+            listOf(
+                ConversationRow(
+                    conversationId = CONV, gatewayId = GW, label = "主线", agentId = "main",
+                    lastMessagePreview = "", lastSeq = 3L, lastActiveAt = T0,
+                    unreadCount = 0, hasActiveRun = false, reconciling = false,
+                ),
+            ),
+        )
+        val conv = db.hubQueries.selectConversation(CONV).executeAsOne()
+        assertEquals(0L, conv.hasActiveRun)
+        assertNull(conv.activeRunId)
+    }
+
+    // ── ⑨ wp-10：连接相位观察面——断连→reconnecting→linked 相位翻转 ──
+    //
+    // DefaultSyncScheduler 单主循环的相位落点走虚拟时钟断言（runTest backgroundScope +
+    // StandardTestDispatcher）：
+    //   ① 连接就绪 + Ready 后 R3 catchUp 追平 → linked（提示条唯一消失相位）
+    //   ② closed 置位（模拟断网）→ 下个 5s 巡检 tick → 断开窗口 → reconnecting
+    //   ③ 退避重连成功 → 再次 Ready + 追平 → linked（恢复后提示条自动消失）
+    // catchUp 追平判据由 StubHubApi 提供空页且 nextCursor == currentWatermark == 游标。
+
+    @Test
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class) // 虚拟时钟 testScheduler.runCurrent/advanceTimeBy
+    fun phaseFlipsLinkedReconnectingLinked() = runTest {
+        val db = newDb()
+        val p = DefaultEventProjector(db)
+        val cursors = DbEventCursorStore(db)
+        val api = StubHubApi(snapshot = fixtureSnapshot(), eventsWatermark = WM)
+        val engine = DefaultSyncEngine(api, StubAuth(), p, cursors)
+        val ws = PhaseFakeWs()
+        val scheduler = DefaultSyncScheduler(backgroundScope, engine, ws, cursors)
+
+        scheduler.start()
+        testScheduler.runCurrent() // runLoop 至首个挂起点（bootstrap→connect→consumeUntilClosed 5s tick），帧收集器已订阅
+        assertEquals(SyncPhase.Catching, scheduler.phase.value) // 连接段在途（提示条弱提示）
+
+        ws.emit(HubServerFrame.Ready(WM))
+        testScheduler.runCurrent() // Ready → R3 先连后补 → 追平
+        assertEquals(SyncPhase.Linked, scheduler.phase.value) // ① 追平 → linked
+
+        ws.closed.value = HubWsClosed(1006.toShort(), "abnormal closure") // 模拟断网
+        testScheduler.advanceTimeBy(5_001) // 巡检 tick@5s 判定 closed → 断开窗口
+        assertEquals(SyncPhase.Reconnecting, scheduler.phase.value) // ② 断连 → reconnecting
+
+        testScheduler.advanceTimeBy(2_001) // 退避（backoff 1s）到 → 重连 → 新消费循环挂起（尚未 ready）
+        assertEquals(SyncPhase.Catching, scheduler.phase.value) // 重连在途 = catching（提示条保持）
+
+        ws.emit(HubServerFrame.Ready(WM))
+        testScheduler.runCurrent()
+        assertEquals(SyncPhase.Linked, scheduler.phase.value) // ③ 恢复 → 再次追平 → linked
+
+        scheduler.stop()
+    }
+
+    // ── ⑩ wp-10：HUB-SYNC-001 重建相位——linked → rebuilding → reconnecting ──
+
+    @Test
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class) // 虚拟时钟 testScheduler.runCurrent/advanceTimeBy
+    fun phaseFlipsRebuildingOnSyncCursorExpired() = runTest {
+        val db = newDb()
+        val p = DefaultEventProjector(db)
+        val cursors = DbEventCursorStore(db)
+        val api = StubHubApi(snapshot = fixtureSnapshot(), eventsWatermark = WM)
+        val engine = DefaultSyncEngine(api, StubAuth(), p, cursors)
+        val ws = PhaseFakeWs()
+        val scheduler = DefaultSyncScheduler(backgroundScope, engine, ws, cursors)
+
+        scheduler.start()
+        testScheduler.runCurrent()
+        ws.emit(HubServerFrame.Ready(WM))
+        testScheduler.runCurrent()
+        assertEquals(SyncPhase.Linked, scheduler.phase.value)
+
+        // HUB-SYNC-001（410 cursor 过期）错误帧 → rebuilding 重建态（验收③ 410 重建提示）
+        ws.emit(HubServerFrame.Error("HUB-SYNC-001", "cursor expired", retryable = false))
+        testScheduler.runCurrent()
+        assertEquals(SyncPhase.Rebuilding, scheduler.phase.value)
+        assertEquals(WM, cursors.eventCursor()) // 重建 = 游标已重置回快照水位
+
+        // 错误帧后服务端关闭连接 → 下个巡检 tick → 重连窗口（rebuilding → reconnecting 连续翻转）
+        ws.closed.value = HubWsClosed(1000.toShort(), "server close")
+        testScheduler.advanceTimeBy(5_001)
+        assertEquals(SyncPhase.Reconnecting, scheduler.phase.value)
+        scheduler.stop()
+    }
+
     // ── fixture 工厂 ──
 
     private fun ev(
@@ -494,7 +656,15 @@ class HubSyncFixtureTest {
     }
 }
 
-private open class StubHubApi : HubApi {
+/**
+ * 同步层 stub API。wp-10 相位测试注入两个可运行面：`snapshot`（bootstrap/重建用）与
+ * `events`（catchUp 追平判据：空页 + nextCursor == currentWatermark 即判追平）、
+ * `conversations`（R4 校准）。其余端点保持 TODO（对应单测不触网）。
+ */
+private open class StubHubApi(
+    private val snapshot: SnapshotResponse? = null,
+    private val eventsWatermark: String = "",
+) : HubApi {
     override suspend fun login(req: dev.sharpxia.agentreins.hub.auth.LoginRequest) = TODO()
     override suspend fun refresh(req: dev.sharpxia.agentreins.hub.auth.RefreshRequest) = TODO()
     override suspend fun registerDevice(req: dev.sharpxia.agentreins.hub.auth.DeviceRegistrationRequest) = TODO()
@@ -502,7 +672,8 @@ private open class StubHubApi : HubApi {
     override suspend fun deleteDevice(deviceId: String) = TODO()
     override suspend fun registerApnsToken(req: dev.sharpxia.agentreins.hub.auth.ApnsTokenRequest) = TODO()
     override suspend fun gateways() = TODO()
-    override suspend fun conversations(limit: Int?, cursor: String?) = TODO()
+    override suspend fun conversations(limit: Int?, cursor: String?) =
+        ConversationsPage(conversations = emptyList())
     override suspend fun messages(conversationId: String, before: Long?, limit: Int?) = TODO()
     override suspend fun sendMessage(conversationId: String, req: dev.sharpxia.agentreins.hub.projection.SendMessageRequest) = TODO()
     override suspend fun markRead(conversationId: String, req: dev.sharpxia.agentreins.hub.projection.ReadCursorRequest) = TODO()
@@ -512,15 +683,29 @@ private open class StubHubApi : HubApi {
     override suspend fun renameConversation(conversationId: String, req: RenameConversationRequest) = TODO()
     override suspend fun cancelRun(runId: String, req: dev.sharpxia.agentreins.hub.projection.CancelRunRequest) = TODO()
     override suspend fun decideApproval(approvalId: String, req: dev.sharpxia.agentreins.hub.projection.ApprovalDecisionRequest) = TODO()
-    override suspend fun snapshot() = TODO()
-    override suspend fun events(cursor: String, limit: Int?) = TODO()
+    override suspend fun snapshot(): SnapshotResponse = snapshot ?: TODO()
+    override suspend fun events(cursor: String, limit: Int?) =
+        EventsPage(events = emptyList(), nextCursor = cursor, hasMore = false, currentWatermark = eventsWatermark)
 }
 
 private open class StubAuth : TokenManager {
     override suspend fun login(username: String, password: String, mfaCode: String?) = TODO()
     override suspend fun registerCurrentDevice(displayName: String, platform: String, model: String?, appVersion: String?) = TODO()
     override suspend fun restoreFromStoredRefreshToken() = false
-    override suspend fun <T> withBearer(block: suspend (String) -> T): T = TODO()
+    override suspend fun <T> withBearer(block: suspend (String) -> T): T = block("wp10-test-token")
     override fun currentAccessToken(): String? = null
     override suspend fun clearCredentials() {}
+}
+
+/** wp-10 相位测试用 WSS 假件：帧经 MutableSharedFlow 投喂（无 replay，先订阅后投喂）。 */
+private class PhaseFakeWs : HubWsClient {
+    private val outgoing = MutableSharedFlow<HubServerFrame>(extraBufferCapacity = 16)
+    override val closed = MutableStateFlow<HubWsClosed?>(null)
+    override suspend fun connect(cursor: String) {}
+    override suspend fun close() {}
+    override fun frames(): Flow<HubServerFrame> = outgoing
+
+    fun emit(frame: HubServerFrame) {
+        check(outgoing.tryEmit(frame)) { "fake ws emit buffer overflow" }
+    }
 }

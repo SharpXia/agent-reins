@@ -37,6 +37,15 @@ data class ConversationRow(
     /** Hub 投影计算值（排除本用户行/合成行/未落定流式行），客户端不得发明第二套计数（05 §3.7）。 */
     val unreadCount: Int,
     val hasActiveRun: Boolean,
+    /**
+     * 可选（v1.1 additive，2026-11-06，wp-3 活跃 run 权威回填）：会话当前 RUNNING run 的
+     * Gateway 原生 runId（服务端 runs.state='RUNNING' 权威行，快照/校准随行带出）——
+     * 冷启动后 Stop 按钮（REST #11 run.cancel 路径参数）即可用，无需等事件流 run.started
+     * 补齐（此前快照/校准路径不带 runId，冷启动后 Stop 恒「结束中」）。无 RUNNING run
+     * 字段省略；宽解析容忍缺省——老服务端快照行无此字段即 null，事件流 run.* 仍为
+     * 活跃翻转的实时通道（与 setConversationActiveRun 事件路径共用同一列）。
+     */
+    val activeRunId: String? = null,
     /** 对账标记（ADR-05）：true=投影可能滞后于 Gateway，UI 呈现「对账中」。 */
     val reconciling: Boolean,
 )
@@ -176,9 +185,19 @@ data class CancelRunRequest(val idempotencyKey: String)
 @Serializable
 data class ApprovalDecisionRequest(val idempotencyKey: String, val decision: String, val note: String? = null)
 
-/** #16 conversation.create：label 与 idempotencyKey 均可选（缺省 Hub 生成幂等键、重试安全）。 */
+/**
+ * #16 conversation.create：label 与 idempotencyKey 均可选（缺省 Hub 生成幂等键、重试安全）。
+ * mainSession（v1.1 additive，#16 主线锚定 2026-11-06）：true = 锚定该 agent 专属主线——
+ * 服务端据此在命令载荷组装 sessionKey = agent:<agentId>:main（客户端永不拼键，ADR-14），
+ * 桥侧原样透传 Gateway sessions.create 原生可选 key（同名 key 为 adopt 语义，不 fork）；
+ * 缺省（null，不编码）保持现状 dashboard 键行为，Gateway 仍是会话归属权威。
+ */
 @Serializable
-data class CreateConversationRequest(val label: String? = null, val idempotencyKey: String? = null)
+data class CreateConversationRequest(
+    val label: String? = null,
+    val idempotencyKey: String? = null,
+    val mainSession: Boolean? = null,
+)
 
 /** #19 conversation.rename：label 必填非空（缺失/空串 → 400 HUB-BIZ-004）。 */
 @Serializable

@@ -53,9 +53,13 @@ class DesktopNotificationCoordinatorTest {
         notifier: FakeNotifier,
         resolver: (String, String) -> String = { _, _ -> "" },
         clock: FakeClock = FakeClock(),
+        mutedIds: () -> Set<String> = { emptySet() },
+        enabled: () -> Boolean = { true },
     ) = DesktopNotificationCoordinator(
         notifier = notifier,
         conversationKeyResolver = resolver,
+        mutedConversationIds = mutedIds,
+        notificationsEnabled = enabled,
         nowNanos = clock::nanos,
     )
 
@@ -80,11 +84,11 @@ class DesktopNotificationCoordinatorTest {
             c.classify(envelope(EventEnvelope.APPROVAL_REQUESTED)),
         )
         assertEquals(
-            DesktopNotificationCoordinator.Classified.RunTerminal("conv-1", completed = true),
+            DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = true, runId = null),
             c.classify(envelope(EventEnvelope.RUN_COMPLETED)),
         )
         assertEquals(
-            DesktopNotificationCoordinator.Classified.RunTerminal("conv-1", completed = false),
+            DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = false, runId = null),
             c.classify(envelope(EventEnvelope.RUN_FAILED)),
         )
     }
@@ -144,8 +148,8 @@ class DesktopNotificationCoordinatorTest {
         val clock = FakeClock()
         val c = coordinator(notifier, clock = clock)
         c.handleConversationsPush(listOf(conv("conv-1", 0), conv("conv-2", 0)))
-        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("conv-1", completed = true))
-        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("conv-2", completed = false))
+        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = true, runId = null))
+        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-2", completed = false, runId = null))
         assertEquals(2, notifier.received.size)
         val completed = notifier.received[0]
         assertEquals(DesktopNotificationCoordinator.Kind.RUN_COMPLETED, completed.kind)
@@ -162,9 +166,52 @@ class DesktopNotificationCoordinatorTest {
         // 未映射会话：无归属、无法静音判定与跳转，显式降级不提醒（与审批不同，iOS 同纪律）
         val notifier = FakeNotifier()
         val c = coordinator(notifier)
-        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("", completed = true))
-        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("", completed = false))
+        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "", completed = true, runId = null))
+        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "", completed = false, runId = null))
         assertTrue(notifier.received.isEmpty())
+    }
+
+    // ── wp-4 修法二：run 终态「本端发起」门（两端协调器同口径 = RunOriginRegistry.isRunLocal） ──
+
+    @Test
+    fun runTerminalSuppressedWhenOriginGateDenies() {
+        // 他端发起 / compact 触发：门拒绝 → 静默（未读增量仍由会话列表承载）
+        val notifier = FakeNotifier()
+        val c = coordinator(notifier)
+        c.runOriginGate = { _, _ -> false }
+        c.handleConversationsPush(listOf(conv("conv-1", 0)))
+        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = true, runId = "r1"))
+        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = false, runId = "r2"))
+        assertTrue(notifier.received.isEmpty())
+        // 审批不受发起方门影响（审批仍具行动性，iOS 同口径）
+        c.handleEvent(DesktopNotificationCoordinator.Classified.ApprovalRequested("conv-1"))
+        assertEquals(1, notifier.received.size)
+    }
+
+    @Test
+    fun runTerminalNotifiesWhenOriginGateAllows() {
+        // 本端发起（message.send 登记 → isRunLocal true）：门放行 → 通知 + 3s 抑制窗照常置位
+        val notifier = FakeNotifier()
+        val clock = FakeClock()
+        val c = coordinator(notifier, clock = clock)
+        c.runOriginGate = { gatewayId, runId -> gatewayId == "gw1" && runId == "r1" }
+        c.handleConversationsPush(listOf(conv("conv-1", 0)))
+        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = true, runId = "r1"))
+        assertEquals(1, notifier.received.size)
+        assertEquals(DesktopNotificationCoordinator.Kind.RUN_COMPLETED, notifier.received.single().kind)
+        clock.advanceMillis(1000)
+        c.handleConversationsPush(listOf(conv("conv-1", 2)))
+        assertTrue(notifier.received.size == 1, "放行路径的 3s 回复抑制窗保持有效")
+    }
+
+    @Test
+    fun gateNotSetKeepsLegacyBehavior() {
+        // 门未装配（旧装配/单测兼容）：不抑制，仅按归属降级（回归锚：wp-4 前行为不漂移）
+        val notifier = FakeNotifier()
+        val c = coordinator(notifier)
+        c.handleConversationsPush(listOf(conv("conv-1", 0)))
+        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = true, runId = "r1"))
+        assertEquals(1, notifier.received.size)
     }
 
     // ── 回复差异面（会话列表 Flow 推送） ──
@@ -231,7 +278,7 @@ class DesktopNotificationCoordinatorTest {
         val c = coordinator(notifier, clock = clock)
         c.handleConversationsPush(listOf(conv("conv-1", 0), conv("conv-2", 0)))
         // run.completed → 完成通知 + 3s 抑制窗（同一 run 结束，防「完成」+「回复」双响）
-        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("conv-1", completed = true))
+        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = true, runId = null))
         assertEquals(1, notifier.received.size)
         clock.advanceMillis(1000)
         c.handleConversationsPush(listOf(conv("conv-1", 2), conv("conv-2", 0)))
@@ -253,7 +300,7 @@ class DesktopNotificationCoordinatorTest {
         val clock = FakeClock()
         val c = coordinator(notifier, clock = clock)
         c.handleConversationsPush(listOf(conv("conv-1", 0)))
-        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("conv-1", completed = false))
+        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = false, runId = null))
         clock.advanceMillis(100)
         c.handleConversationsPush(listOf(conv("conv-1", 1)))
         assertEquals(2, notifier.received.size) // 失败通知 + 回复通知都到
@@ -267,7 +314,7 @@ class DesktopNotificationCoordinatorTest {
         val clock = FakeClock()
         val c = coordinator(notifier, clock = clock)
         c.handleConversationsPush(listOf(conv("conv-1", 5)))
-        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("conv-1", completed = true))
+        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = true, runId = null))
         clock.advanceMillis(500)
         c.handleReset() // 登录态离场重置（生产经 Msg.Reset 由消费协程调用；此处直调验证语义）
         // 重登快照从零重记基线：旧 unread 同值不算「到达」，不误报
@@ -326,9 +373,98 @@ class DesktopNotificationCoordinatorTest {
         val c = coordinator(notifier)
         c.handleConversationsPush(listOf(conv("conv-1", 0)))
         c.handleEvent(DesktopNotificationCoordinator.Classified.ApprovalRequested("conv-1"))
-        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("conv-1", completed = true))
+        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = true, runId = null))
         c.handleConversationsPush(listOf(conv("conv-1", 3)))
         assertTrue(notifier.received.isEmpty())
+    }
+
+    // ── wp-9：按会话静音（吞回复/终态、不吞审批） + 通知总开关 ──
+
+    @Test
+    fun mutedConversationSwallowsReplyAndRunTerminalButNotApproval() {
+        // wp-9 验收②核心：静音会话不再弹回复/完成通知但审批仍弹（失败终态同吞）
+        val notifier = FakeNotifier()
+        var muted = setOf("conv-1")
+        val c = coordinator(notifier, mutedIds = { muted })
+        c.handleConversationsPush(listOf(conv("conv-1", 0), conv("conv-2", 0))) // 基线
+        c.handleConversationsPush(listOf(conv("conv-1", 2), conv("conv-2", 0)))
+        assertTrue(notifier.received.isEmpty(), "静音会话的回复通知应被吞")
+        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = true, runId = null))
+        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = false, runId = null))
+        assertTrue(notifier.received.isEmpty(), "静音会话的运行终态通知（完成/失败）应被吞")
+        // 审批不受静音影响（run 前置门，出现即需注意）
+        c.handleEvent(DesktopNotificationCoordinator.Classified.ApprovalRequested("conv-1"))
+        assertEquals(1, notifier.received.size)
+        assertEquals(DesktopNotificationCoordinator.Kind.APPROVAL, notifier.received.single().kind)
+        // 未静音会话的回复照常（静音只作用于命中会话）
+        c.handleConversationsPush(listOf(conv("conv-1", 3), conv("conv-2", 1)))
+        assertEquals(2, notifier.received.size)
+        assertEquals(DesktopNotificationCoordinator.Kind.REPLY, notifier.received[1].kind)
+        assertEquals("conv-2", notifier.received[1].conversationId)
+    }
+
+    @Test
+    fun unmutingRestoresReplyNotificationsLive() {
+        // 静音集为决策时实时读取：设置页/右键解除静音后，下一条回复即时恢复提醒
+        val notifier = FakeNotifier()
+        var muted = setOf<String>("conv-1")
+        val c = coordinator(notifier, mutedIds = { muted })
+        c.handleConversationsPush(listOf(conv("conv-1", 0)))
+        c.handleConversationsPush(listOf(conv("conv-1", 2)))
+        assertTrue(notifier.received.isEmpty(), "静音期间回复应被吞")
+        muted = emptySet()
+        c.handleConversationsPush(listOf(conv("conv-1", 4)))
+        assertEquals(1, notifier.received.size)
+        assertEquals(DesktopNotificationCoordinator.Kind.REPLY, notifier.received.single().kind)
+    }
+
+    @Test
+    fun mutedRunTerminalDoesNotArmReplySuppressWindow() {
+        // 静音吞终态走早于抑制窗置位的路径（iOS 同序）：静音解除后回复不再受旧 run 的窗牵连
+        val notifier = FakeNotifier()
+        val clock = FakeClock()
+        var muted = setOf("conv-1")
+        val c = coordinator(notifier, clock = clock, mutedIds = { muted })
+        c.handleConversationsPush(listOf(conv("conv-1", 0)))
+        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = true, runId = null))
+        assertTrue(notifier.received.isEmpty())
+        muted = emptySet()
+        clock.advanceMillis(500) // 若置窗则 500ms < 3s 会吞下面的回复
+        c.handleConversationsPush(listOf(conv("conv-1", 1)))
+        assertEquals(1, notifier.received.size)
+        assertEquals(DesktopNotificationCoordinator.Kind.REPLY, notifier.received.single().kind)
+    }
+
+    @Test
+    fun masterSwitchOffSilencesAllKindsIncludingApproval() {
+        // 总开关关闭 = notify 单点门放空全部 kind（含审批）；打开后下一条通知即时恢复
+        val notifier = FakeNotifier()
+        var enabled = false
+        val c = coordinator(notifier, enabled = { enabled })
+        c.handleConversationsPush(listOf(conv("conv-1", 0)))
+        c.handleConversationsPush(listOf(conv("conv-1", 2))) // 回复
+        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = true, runId = null))
+        c.handleEvent(DesktopNotificationCoordinator.Classified.ApprovalRequested("conv-1")) // 审批也吞
+        assertTrue(notifier.received.isEmpty(), "总开关关闭应放空全部通知")
+        enabled = true
+        c.handleEvent(DesktopNotificationCoordinator.Classified.ApprovalRequested("conv-1"))
+        assertEquals(1, notifier.received.size)
+        assertEquals(DesktopNotificationCoordinator.Kind.APPROVAL, notifier.received.single().kind)
+    }
+
+    @Test
+    fun masterSwitchOffBeatsUnmutedReplyAndMuteSetStaysEffective() {
+        // 组合面：总开关关 + 未静音 → 吞；总开关开 + 静音 → 吞（两个门独立）
+        val notifier = FakeNotifier()
+        var enabled = false
+        var muted = setOf<String>()
+        val c = coordinator(notifier, mutedIds = { muted }, enabled = { enabled })
+        c.handleConversationsPush(listOf(conv("conv-1", 0)))
+        c.handleConversationsPush(listOf(conv("conv-1", 2)))
+        assertTrue(notifier.received.isEmpty())
+        enabled = true; muted = setOf("conv-1")
+        c.handleConversationsPush(listOf(conv("conv-1", 4)))
+        assertTrue(notifier.received.isEmpty(), "总开关开但静音命中仍应吞")
     }
 
     // ── osascript 封装 ──

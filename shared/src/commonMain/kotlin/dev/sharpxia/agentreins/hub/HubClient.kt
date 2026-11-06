@@ -20,15 +20,19 @@ import dev.sharpxia.agentreins.hub.db.openHubDatabase
 import dev.sharpxia.agentreins.hub.sync.DbEventCursorStore
 import dev.sharpxia.agentreins.hub.sync.DefaultSyncEngine
 import dev.sharpxia.agentreins.hub.sync.DefaultSyncScheduler
+import dev.sharpxia.agentreins.hub.sync.SyncPhase
 import dev.sharpxia.agentreins.hubdb.HubDatabase
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 
 /** UI 只读模型：隔离 sqldelight 生成行类型（iOS 桥按此投影）。 */
 data class UiConversation(
@@ -185,37 +189,92 @@ class DefaultHubClient(
     var commands: CommandClient? = null
         private set
 
+    /**
+     * wp-4 修法二：run 发起登记表（start 时创建，stop 后重登重建 = 登出态自然清零；
+     * wipeLocalData 显式 reset）。两端通知协调器（desktop coordinator 门 / iOS 桥）经此消费
+     * run 终态「本端发起」判定，缺省 null（未 start）时调用方按允许放行（事件不流动则门不触发）。
+     */
+    @kotlin.concurrent.Volatile
+    var runOriginRegistry: RunOriginRegistry? = null
+        private set
+
     private var scheduler: DefaultSyncScheduler? = null
+
+    /**
+     * wp-10 连接相位观察面（additive，纯观察不参与控制）：稳定 StateFlow 实例——scheduler
+     * 每次 start/stop 重建（DefaultSyncScheduler 自持流会换实例），组装时把本流作 phaseSink
+     * 注入 [DefaultSyncScheduler]，UI collect 永不换源。语义见 [SyncPhase]：Linked = 已连接
+     * 且已追平（两端连接提示条唯一消失相位）；未 start（登录前）为 Catching 占位；stop()
+     * 复位 Catching（登出过渡期不留旧相位）。
+     */
+    private val phaseState = MutableStateFlow(SyncPhase.Catching)
+    val syncPhase: StateFlow<SyncPhase> get() = phaseState
 
     /** 登录态就绪后组装同步栈并启动（幂等：重复调用忽略；登出后 stop 再 login 需重新 start）。 */
     fun start() {
         val stack = runtime.authStack ?: return
         if (scheduler != null || db == null) return
+        val registry = RunOriginRegistry()
+        runOriginRegistry = registry
         val baseProjection = DefaultEventProjector(db)
-        projection = if (eventTap != null) TappedEventProjector(baseProjection, eventTap) else baseProjection
+        // wp-4：eventTap 组合面——登记喂帧（run.started → RunOriginRegistry，恒开）在用户
+        // eventTap（通知协调器）之前；两者都只见已应用且过幂等/水位裁决的事件。
+        val userTap = eventTap
+        val tap: ((EventEnvelope) -> Unit) = { envelope ->
+            feedRunOrigin(registry, envelope)
+            userTap?.invoke(envelope)
+        }
+        projection = TappedEventProjector(baseProjection, tap)
         val cursors = DbEventCursorStore(db)
         engine = DefaultSyncEngine(stack.api, stack.auth, projection!!, cursors)
-        commands = DefaultCommandClient(stack.api, stack.auth, db)
+        commands = DefaultCommandClient(stack.api, stack.auth, db, registry)
         val base = runtime.baseUrl ?: return
         val ws = DefaultHubWsClient(
             config = HubConfig(base, runtime.wsUrlOf(base)),
             accessTokenProvider = { stack.auth.currentAccessToken() },
             scope = scope,
         )
-        scheduler = DefaultSyncScheduler(scope, engine!!, ws, cursors)
+        scheduler = DefaultSyncScheduler(scope, engine!!, ws, cursors, phaseSink = phaseState)
         scheduler?.start()
         // 断线恢复：未终态命令按同键幂等重发（05 §3.5 恢复流程收尾步）
         scope.launch { runCatching { commands?.retryUnfinished() } }
     }
 
+    /**
+     * wp-4 登记喂帧：run.started → [RunOriginRegistry.noteRunStarted]。
+     *
+     * 准入键收紧（wp-4 回归修复 2026-11-06）：conversationId 经 hubConvKeys 解析，**只认
+     * twoHop==0 的自学习行**（自发送回执链/自命令 ack——即本设备自己发过消息的键）。两跳连结行
+     * （同 agent 的 TG/channel/任务键，joinStagedSessionAgents 连到同一张主线卡）与未映射键的
+     * 解析结果**都不喂登记面**——SEND 登记是会话（conversationId）级，若两跳行也解析出主线卡，
+     * 主线卡的 SEND 标记会把 channel 会话的 run 误判本端发起，他端/TG 触发的 run 终态在本端
+     * 弹通知（回归验收「他端/TG 触发的 run 终态静默」即破）；runId 信封缺省时以 data.runId
+     * 兜底（与投影取序一致）。本函数只在 tap 协程线程跑，毫秒级单查询。
+     * internal 供 desktopTest 混合形态用例直调（生产唯一调用点 = [start] 的 tap 组合面）。
+     */
+    internal fun feedRunOrigin(registry: RunOriginRegistry, envelope: EventEnvelope) {
+        if (envelope.type != EventEnvelope.RUN_STARTED) return
+        val db = db ?: return
+        val runId = envelope.runId
+            ?: runCatching { envelope.data.jsonObject["runId"]?.toString()?.trim('"')?.takeIf { it.isNotEmpty() } }.getOrNull()
+            ?: return
+        val key = envelope.sessionKey
+            ?.let { sk -> db.hubQueries.selectConversationByKey(envelope.gatewayId, sk).executeAsOneOrNull() }
+            ?: return // 未映射：解析不出归属，登记面无从判源（终态即抑制）
+        if (key.twoHop != 0L) return // 两跳连结行（channel/任务键）不喂登记面——会话级 SEND 标记不得跨键外溢
+        registry.noteRunStarted(envelope.gatewayId, runId, key.conversationId)
+    }
+
     fun stop() {
         scheduler?.stop()
         scheduler = null
+        phaseState.value = SyncPhase.Catching // wp-10：同步栈停转后复位，不留旧相位
     }
 
     /**
-     * 清全部本地数据（登出闭环，方案 §6-P4 验收⑤）：九表事务内清空，含 O-01 最小集
-     * （命令队列/游标）与审批/工具活动累积态（wp-15 v6 两表）——设备已在服务端撤销，
+     * 清全部本地数据（登出闭环，方案 §6-P4 验收⑤）：十一表事务内清空，含 O-01 最小集
+     * （命令队列/游标）、审批/工具活动累积态（wp-15 v6 两表）与两跳归属暂存（v7 wp-4）；
+     * 同时重置 run 发起登记表（wp-4 修法二，内存态不跨登出复用）。设备已在服务端撤销，
      * 本地不残留任何账号数据；重登后从空库 bootstrap。须在 [stop] 之后调用（同步循环已停，
      * 无在途投影写入）。
      */
@@ -225,6 +284,7 @@ class DefaultHubClient(
             db.hubQueries.clearGateways()
             db.hubQueries.clearConversations()
             db.hubQueries.clearConvKeys()
+            db.hubQueries.clearSessionAgents()
             db.hubQueries.clearMessages()
             db.hubQueries.clearReadCursors()
             db.hubQueries.clearCommands()
@@ -233,6 +293,7 @@ class DefaultHubClient(
             db.hubQueries.clearRunStatus()
             db.hubQueries.clearSyncState()
         }
+        runOriginRegistry?.reset()
     }
 
     // ── UI 查询（投影库 Flow；写路径由 projector/commands 承担） ──
@@ -427,6 +488,10 @@ class DefaultHubClient(
      * （入口侧筛选，本门面不拦）。回执 PERSISTED 后主动触发一次会话列表校准：新卡出现从
      * R4 周期节拍（分钟级）提速到秒级，且「90s 内或重进列表出现」的手工验收因此必然命中。
      * 校准失败不吞回执——列表在下一 R4 节拍重试。
+     * v1.1 additive（#16 主线锚定 2026-11-06）：本门面固定携带 mainSession=true（下游
+     * DefaultCommandClient 落地）——服务端组装 sessionKey=agent:<agentId>:main（客户端永不拼键，
+     * ADR-14），Gateway sessions.create 同名 key adopt 不 fork；iOS/desktop 新建入口经本门面
+     * 自动获得，签名不变。
      */
     suspend fun createConversation(gatewayId: String, agentId: String, label: String?): CommandReceipt {
         val receipt = commands!!.createConversation(gatewayId, agentId, label)
@@ -474,9 +539,10 @@ class DefaultHubClient(
 }
 
 /**
- * wp-13：投影装饰器（[eventTap] 非 null 时才组装）——快照/校准/事件语义逐方法原样透传，
- * 仅在 applyEvent 委托返回后触发 [tap]（事件此时已应用、事务已提交）。engine 侧的幂等去重
- * （同 id 丢弃）与水位裁决发生在 applyEvent 之前，tap 只见真实应用的事件，不会重复触发。
+ * wp-13/wp-4：投影装饰器——快照/校准/事件语义逐方法原样透传，仅在 applyEvent 委托返回后触发
+ * [tap]（事件此时已应用、事务已提交；wp-4 起 tap 恒组装，内含登记喂帧 + 可选用户 eventTap）。
+ * engine 侧的幂等去重（同 id 丢弃）与水位裁决发生在 applyEvent 之前，tap 只见真实应用的事件，
+ * 不会重复触发。
  */
 private class TappedEventProjector(
     private val base: EventProjector,

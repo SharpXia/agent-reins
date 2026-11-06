@@ -33,6 +33,8 @@ interface CommandClient {
      * v1.1 新端点（#16/#17/#19，openclaw 原生指令）：**幂等键由 Hub 生成**（请求体无 idempotencyKey
      * 字段，#16 仅有可选键），与本地队列的幂等纪律不兼容——不走队列、直调一次，失败由调用方提示
      * 手动重试。新会话经 roster 同步自动出现在列表（R4 校准兜底）。
+     * #16 实现固定携带 mainSession=true（v1.1 additive，主线锚定）：服务端组装
+     * sessionKey=agent:<agentId>:main（客户端永不拼键，ADR-14），同名 key adopt 不 fork。
      */
     suspend fun createConversation(gatewayId: String, agentId: String, label: String?): CommandReceipt
 

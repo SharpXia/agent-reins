@@ -4,6 +4,8 @@ import app.cash.sqldelight.db.SqlDriver
 import dev.sharpxia.agentreins.hubdb.HubDatabase
 
 /** Hub 投影库 schema 版本（投影可整库重建；升版即 drop 重建，O-01 持久化最小集随重建后从服务端重取）。
+ *  7 = additive（wp-4 通知归属两跳学习）：hubSessionAgents（session 域两跳归属暂存）
+ *  + hubConvKeys.twoHop 标记列（连结行分域消费，app 主会话隔离对位）。
  *  6 = additive（wp-15 工具活动捕获）：hubToolEvents（tool.* 三态本地捕获，「工作过程」披露条数据面）
  *  + hubRunStatus（run.status 阶段帧，wp-15 可选项）。
  *  5 = v1.1 additive（wp-11）：hubConversations.gatewayId（ConversationRow required 透出，
@@ -13,7 +15,7 @@ import dev.sharpxia.agentreins.hubdb.HubDatabase
  *  3 = 契约 v1.1.0 去 session 化表结构（conversationId 主键 + hubConvKeys；1 = 0.5.0 的 sessionKey 主键代）。
  *  0.5.1/0.5.2 曾改表未升版本号——守卫放行旧结构，v3 SQL 打 v1 表抛异常经 uncaught handler SIGABRT，
  *  即真机「点开会话即崩」根因；本版本号今后与 Hub.sq 结构变更必须同步升。 */
-internal const val HUB_DB_VERSION = 6L
+internal const val HUB_DB_VERSION = 7L
 
 /** 平台 SQLite driver 工厂；存储不可用返回 null → 调用方降级（同步引擎不可用须向 UI 呈现）。 */
 expect fun createHubDriver(): SqlDriver?
@@ -60,7 +62,7 @@ private fun setUserVersion(driver: SqlDriver, version: Long) {
 }
 
 private val HUB_TABLES = listOf(
-    "hubGateways", "hubConversations", "hubConvKeys", "hubMessages",
+    "hubGateways", "hubConversations", "hubConvKeys", "hubSessionAgents", "hubMessages",
     "hubCommands", "hubReadCursors", "hubApprovals", "hubToolEvents", "hubRunStatus", "hubSyncState",
 )
 

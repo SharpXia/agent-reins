@@ -17,6 +17,15 @@
 --   变体 → run.status additive，06 §3.2）。两表都是**累积捕获态**（与 hubApprovals 同族）：
 --   快照重建不清（快照不含工具事件，清了即丢；断线窗口丢失面见 06 §10.2，UI 不承诺完整），
 --   登出 wipeLocalData 清、会话删除/化身更替清、run 终态清对应 hubRunStatus 行。
+-- v7（2026-11-06 additive，wp-4 通知归属两跳学习）：
+--   hubSessionAgents = session 域两跳归属暂存 (gatewayId, sessionKey, agentId)——session.created/
+--   session.updated 载荷自带 (sessionKey, agentId)，未映射时暂存；卡片行自带 (gatewayId, agentId)，
+--   两跳连结后写 hubConvKeys（不建卡，卡片唯一来源=快照/校准铁律不变）。
+--   hubConvKeys 增 twoHop 标记列（0=自发送回执/自命令 ack 自学习，1=两跳连结）——消费分域：
+--   两跳行只供 run 终态与 approval.requested 的归属面（通知/审批卡），message.*（时间线/未读）、
+--   session.updated 身份（label/hasActiveRun/化身）、run.started 活跃翻转、tool.*/run.status 捕获
+--   一律只认自学习行——同 agent 的 channel/TG 会话与任务会话由此不混入主线卡（app 主会话隔离，
+--   2026-11-06 聚合轮 allowlist 收口的客户端对位）；session.removed 只对自学习行级联删卡。
 -- v1.1 关键契约事实（08 §8.1/§8.5）：REST ConversationRow 撤 sessionKey/sessionId/lifecycleRevision，
 -- 事件信封按域带 sessionKey（eventlog 强制校验：message/session/tool/approval/run 域必带、
 -- gateway/read 域不带）——两域无交集字段。因此：
@@ -57,6 +66,16 @@ CREATE TABLE hubConvKeys (
     gatewayId TEXT NOT NULL,
     sessionKey TEXT NOT NULL,               -- 原样保留不解析（ADR-14）
     conversationId TEXT NOT NULL,
+    twoHop INTEGER NOT NULL DEFAULT 0,      -- v7 wp-4：0=自学习（回执链/命令 ack）、1=两跳连结（消费分域，见文件头）
+    PRIMARY KEY (gatewayId, sessionKey)
+);
+
+-- v7 wp-4：session 域两跳归属暂存（session.created/updated 载荷的 (sessionKey, agentId)）。
+-- 暂存行在连结后保留（幂等 upsert，卡片整库重建后可再连结）；session.removed 与登出清。
+CREATE TABLE hubSessionAgents (
+    gatewayId TEXT NOT NULL,
+    sessionKey TEXT NOT NULL,               -- 原样保留不解析（ADR-14）
+    agentId TEXT NOT NULL,
     PRIMARY KEY (gatewayId, sessionKey)
 );
 
@@ -176,10 +195,13 @@ clearReadCursors:
 DELETE FROM hubReadCursors;
 
 -- 登出全清（P4 验收⑤：登出 = 撤销当前设备 + 清全部本地数据）。与快照重建不同，
--- 此处连映射、O-01 最小集（命令队列/游标）与审批/工具活动累积态（wp-15 v6）一并清：
--- 设备已撤销，本地不应残留任何账号数据；重登后从空库 bootstrap。
+-- 此处连映射、两跳暂存（v7 wp-4）、O-01 最小集（命令队列/游标）与审批/工具活动累积态
+-- （wp-15 v6）一并清：设备已撤销，本地不应残留任何账号数据；重登后从空库 bootstrap。
 clearConvKeys:
 DELETE FROM hubConvKeys;
+
+clearSessionAgents:
+DELETE FROM hubSessionAgents;
 
 clearCommands:
 DELETE FROM hubCommands;
@@ -200,13 +222,15 @@ selectGateways:
 SELECT * FROM hubGateways ORDER BY name;
 
 -- 快照/列表落定的卡片灌入（v1.1 行无 sessionKey/revision；conversationId 是主键）。
--- gatewayId 为快照/校准行 required（v5 透出）；activeRunId 不在快照/校准面上：inactive 校准
--- 连带清空（防死 runId 残留），active 时保留事件习得值。
+-- gatewayId 为快照/校准行 required（v5 透出）。activeRunId（v6 wp-3 活跃 run 权威回填，
+-- 2026-11-06）：快照/校准行可选字段透传（服务端 runs RUNNING 权威行 native_run_id），
+-- 三级合并——inactive 校准连带清空（防死 runId 残留，v4 语义不变）> 服务端权威值 > 缺省
+-- （老服务端行无此字段即 NULL）保留事件习得值（run.* 事件路径 setConversationActiveRun）。
 upsertConversation:
 INSERT INTO hubConversations
 (conversationId, gatewayId, sessionKey, label, agentId, lastMessagePreview, lastSeq, lastActiveAt,
- unreadCount, hasActiveRun, reconciling, lifecycleRevision)
-VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, -1)
+ unreadCount, hasActiveRun, activeRunId, reconciling, lifecycleRevision)
+VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, -1)
 ON CONFLICT(conversationId) DO UPDATE SET
   gatewayId = excluded.gatewayId,
   label = excluded.label,
@@ -216,13 +240,37 @@ ON CONFLICT(conversationId) DO UPDATE SET
   lastActiveAt = excluded.lastActiveAt,
   unreadCount = excluded.unreadCount,
   hasActiveRun = excluded.hasActiveRun,
-  activeRunId = CASE WHEN excluded.hasActiveRun = 0 THEN NULL ELSE hubConversations.activeRunId END,
+  activeRunId = CASE
+    WHEN excluded.hasActiveRun = 0 THEN NULL
+    WHEN excluded.activeRunId IS NOT NULL THEN excluded.activeRunId
+    ELSE hubConversations.activeRunId
+  END,
   reconciling = excluded.reconciling;
 
--- 映射学习/回填（自发送回执链与自命令 ack；只加速路由，不作存在性判定）
+-- 映射学习/回填（自发送回执链与自命令 ack；只加速路由，不作存在性判定）。
+-- 自学习到达即把 twoHop 翻回 0（两跳暂存行可能先于首条自发送连结过同一键——自通道证据更权威，
+-- 消息时间线/未读与 session 身份面随自学习恢复全量消费）。
 upsertConvKey:
-INSERT INTO hubConvKeys(gatewayId, sessionKey, conversationId) VALUES (?, ?, ?)
-ON CONFLICT(gatewayId, sessionKey) DO UPDATE SET conversationId = excluded.conversationId;
+INSERT INTO hubConvKeys(gatewayId, sessionKey, conversationId, twoHop) VALUES (?, ?, ?, 0)
+ON CONFLICT(gatewayId, sessionKey) DO UPDATE SET
+  conversationId = excluded.conversationId,
+  twoHop = 0;
+
+-- v7 wp-4 两跳连结写面：暂存 (g, sk, agentId) × 同 (g, agentId) 卡片 → 映射。冲突时保序：
+-- 已是自学习行（twoHop=0）不降级为两跳（快照重建后暂存重连结不得把自学习主键打回受限消费）。
+upsertConvKeyTwoHop:
+INSERT INTO hubConvKeys(gatewayId, sessionKey, conversationId, twoHop) VALUES (?, ?, ?, 1)
+ON CONFLICT(gatewayId, sessionKey) DO UPDATE SET
+  conversationId = excluded.conversationId,
+  twoHop = CASE WHEN hubConvKeys.twoHop = 0 THEN 0 ELSE 1 END;
+
+-- v7 wp-4：session 域两跳暂存（未映射 session.created/updated；幂等，agentId 取最新值）
+upsertSessionAgent:
+INSERT INTO hubSessionAgents(gatewayId, sessionKey, agentId) VALUES (?, ?, ?)
+ON CONFLICT(gatewayId, sessionKey) DO UPDATE SET agentId = excluded.agentId;
+
+deleteSessionAgent:
+DELETE FROM hubSessionAgents WHERE gatewayId = ? AND sessionKey = ?;
 
 -- 队列条目反查 conversationId（映射学习通道 b/c）
 selectCommandByKey:
@@ -233,6 +281,15 @@ SELECT * FROM hubConversations WHERE conversationId = ?;
 
 selectConversationByKey:
 SELECT * FROM hubConvKeys WHERE gatewayId = ? AND sessionKey = ?;
+
+-- v7 wp-4 两跳连结查询：卡片行 (gatewayId, agentId) → 同源暂存行；卡片 (gatewayId, agentId) → 卡片
+-- （服务端聚合保证一 agent 至多一卡；ORDER BY lastActiveAt DESC 取最近活跃为防御性归一）。
+selectSessionAgentsByCard:
+SELECT * FROM hubSessionAgents WHERE gatewayId = ? AND agentId = ?;
+
+selectConversationIdByAgent:
+SELECT conversationId FROM hubConversations WHERE gatewayId = ? AND agentId = ?
+ORDER BY lastActiveAt DESC LIMIT 1;
 
 selectConversations:
 SELECT * FROM hubConversations ORDER BY lastActiveAt DESC;

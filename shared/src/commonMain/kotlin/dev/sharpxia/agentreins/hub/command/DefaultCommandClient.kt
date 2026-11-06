@@ -2,6 +2,7 @@ package dev.sharpxia.agentreins.hub.command
 
 import dev.sharpxia.agentreins.hub.HubApi
 import dev.sharpxia.agentreins.hub.HubException
+import dev.sharpxia.agentreins.hub.RunOriginRegistry
 import dev.sharpxia.agentreins.hub.auth.TokenManager
 import dev.sharpxia.agentreins.hub.projection.ApprovalDecisionRequest
 import dev.sharpxia.agentreins.hub.projection.CancelRunRequest
@@ -21,11 +22,19 @@ import kotlin.random.Random
  * 幂等键生成后永不更换；HUB-BIZ-001 → FAILED（禁换键）；网络失败保持 PENDING_LOCAL 待重试。
  * payloadJson 存原始载荷（message.send 存文本、read.mark 存 readUpTo 数字串），重试按同键同载荷。
  * v1.1 的 create/compact/rename 不走队列（幂等键由 Hub 生成，见 [CommandClient] 注）。
+ * wp-4（发起方）：命令提交面兼 [RunOriginRegistry] 登记面——message.send 记 SEND（本端发起 run
+ * 的主通道，准入该会话后续 run 终态提醒）；conversation.compact 记 COMPACT（静默通道，wp-4 scope
+ * 「compact 触发静默」）。其余命令与 run 发起无关不登记。SEND 登记时机 = submit 取得 PERSISTED
+ * 回执之后（回归修复 2026-11-06：提交前登记会让 FAILED/网络失败——没发出去的消息也开准入，
+ * 而准入跨 run 存活，误开即通知面泄漏）；compact 登记维持提交前（静默通道宁默勿响）。
+ * 重试路径（retryUnfinished）成功同样补登记。
  */
 class DefaultCommandClient(
     private val api: HubApi,
     private val auth: TokenManager,
     private val db: HubDatabase,
+    /** wp-4：run 发起登记面（缺省 null = 不登记，单测兼容；生产由 DefaultHubClient.start 注入）。 */
+    private val runOriginRegistry: RunOriginRegistry? = null,
 ) : CommandClient {
 
     override suspend fun sendMessage(conversationId: String, text: String): CommandReceipt? =
@@ -51,11 +60,20 @@ class DefaultCommandClient(
             api.decideApproval(approvalId, ApprovalDecisionRequest(idempotencyKey = key, decision = decision))
         }
 
+    /**
+     * #16 新开会话：固定携带 mainSession=true（v1.1 additive，主线锚定 2026-11-06）——
+     * app 新建入口语义即主线锚定，服务端据此组装 sessionKey=agent:<agentId>:main
+     * （客户端永不拼键，ADR-14），Gateway sessions.create 同名 key adopt 不 fork。
+     * encodeDefaults=false 下显式 true 正常编码；缺省不携带=现状 dashboard 键行为（本客户端不产生）。
+     */
     override suspend fun createConversation(gatewayId: String, agentId: String, label: String?): CommandReceipt =
-        auth.withBearer { api.createConversation(gatewayId, agentId, CreateConversationRequest(label = label)) }
+        auth.withBearer { api.createConversation(gatewayId, agentId, CreateConversationRequest(label = label, mainSession = true)) }
 
-    override suspend fun compactConversation(conversationId: String): CommandReceipt =
-        auth.withBearer { api.compactConversation(conversationId) }
+    override suspend fun compactConversation(conversationId: String): CommandReceipt {
+        // wp-4：compact 是静默通道——登记 COMPACT 覆盖会话准入，其触发的 run 终态不提醒
+        runOriginRegistry?.markSubmission(conversationId, RunOriginRegistry.Kind.COMPACT)
+        return auth.withBearer { api.compactConversation(conversationId) }
+    }
 
     override suspend fun renameConversation(conversationId: String, label: String): CommandReceipt =
         auth.withBearer { api.renameConversation(conversationId, RenameConversationRequest(label = label)) }
@@ -65,8 +83,12 @@ class DefaultCommandClient(
         db.hubQueries.selectNonTerminalCommands().executeAsList().forEach { cmd ->
             when (cmd.type) {
                 "message.send" -> if (cmd.conversationId != null && cmd.payloadJson.isNotEmpty()) {
-                    submit(cmd.idempotencyKey) {
-                        api.sendMessage(cmd.conversationId, SendMessageRequest(cmd.idempotencyKey, cmd.payloadJson))
+                    val convId = cmd.conversationId
+                    submit(cmd.idempotencyKey, onPersisted = {
+                        // 断线恢复重试成功同样登记 SEND 准入（消息此时才真正发出、run 才由它发起）
+                        runOriginRegistry?.markSubmission(convId, RunOriginRegistry.Kind.SEND)
+                    }) {
+                        api.sendMessage(convId, SendMessageRequest(cmd.idempotencyKey, cmd.payloadJson))
                     }
                 }
                 "read.mark" -> {
@@ -99,7 +121,9 @@ class DefaultCommandClient(
             createdAt = now, updatedAt = now,
         )
         // message.send 同步插乐观行（messageId=幂等键临时占位，message.created 回执时提升为服务端行；
-        // seq=Long.MAX_VALUE 恒排末尾，回执后取服务端 seq）
+        // seq=Long.MAX_VALUE 恒排末尾，回执后取服务端 seq）。wp-4：SEND 准入登记**不在提交前**——
+        // 挪到 submit 取得 PERSISTED 回执之后（回归修复 2026-11-06），提交未达（FAILED/网络失败）
+        // 的消息不登记，避免「没发出的消息」给会话开准入
         if (type == "message.send" && conversationId != null) {
             db.hubQueries.upsertMessage(
                 messageId = key, conversationId = conversationId, seq = Long.MAX_VALUE,
@@ -108,16 +132,22 @@ class DefaultCommandClient(
                 commandId = null, idempotencyKey = key, ts = now,
             )
         }
-        return submit(key, call)
+        return submit(key, onPersisted = {
+            if (type == "message.send" && conversationId != null) {
+                runOriginRegistry?.markSubmission(conversationId, RunOriginRegistry.Kind.SEND)
+            }
+        }, call = call)
     }
 
     private suspend fun submit(
         key: String,
+        onPersisted: (() -> Unit)? = null,
         call: suspend (String) -> CommandReceipt,
     ): CommandReceipt? = try {
         val receipt = auth.withBearer { call(key) }
         db.hubQueries.updateCommandId(receipt.commandId, receipt.acceptedAt, key)
         db.hubQueries.updateCommandState("PERSISTED", null, receipt.acceptedAt, key)
+        onPersisted?.invoke() // wp-4：SEND 准入登记钩子（仅 PERSISTED 触发；失败路径不登记）
         receipt
     } catch (e: HubException) {
         // 确定性拒绝：FAILED + 错误码（HUB-BIZ-001 同键不同内容——禁换键，条目作废待人工）

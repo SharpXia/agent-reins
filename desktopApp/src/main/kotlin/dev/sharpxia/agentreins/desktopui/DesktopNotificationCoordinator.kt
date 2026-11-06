@@ -4,6 +4,7 @@ import dev.sharpxia.agentreins.hub.UiConversation
 import dev.sharpxia.agentreins.hub.projection.EventEnvelope
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.prefs.Preferences
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
@@ -23,14 +24,23 @@ import kotlinx.coroutines.launch
  *
  * 触发面清单（与 iOS wp-13 HubStore 同清单）：
  * - 审批：有归属 → 「会话名」有新的审批请求；未映射 → 无归属提醒（审批仍具行动性）。
- *   当前打开不抑制（审批是 run 前置门，出现即需注意，与 iOS 同口径）。
+ *   当前打开不抑制（审批是 run 前置门，出现即需注意，与 iOS 同口径）。wp-4：归属面放开两跳
+ *   连结行（shared 投影分域）——他端/channel 会话的审批也带会话名。
  * - 回复：已知卡片 unread 增量 + 非当前打开；run.completed 后 3s 窗内的回复吞掉（防双响）。
  * - run 终态：仅 completed/failed（run.aborted 是用户主动 Stop 的自致结果，不提醒）；
  *   未映射会话不提醒。completed 同时置 3s 回复抑制窗。
+ *   wp-4 修法二：[runOriginGate]（两端协调器同口径 = RunOriginRegistry.isRunLocal 消费）——
+ *   仅「本端发起」（message.send 登记；compact 触发静默、他端无记录抑制）的 run 终态提醒。
  *
  * 静默降级纪律（验收硬要求）：权限拒绝（osascript 通知权限）/进程失败/超时任何路径不抛
  * 不崩不重试；通知内容最小化（标题 + 会话名，零正文/payload 摘要，iOS 同纪律）。
- * 按会话静音是 iOS wp-13 特性（桌面无静音 UI），本面不实现。
+ *
+ * wp-9：按会话静音补齐（桌面同位 iOS wp-13 HubStore.mutedConversations）——[mutedConversationIds]
+ * 单点注入（conversationKeyResolver 同型，决策时实时读取，设置页/右键解除即时生效），
+ * 口径 = 静音吞「回复 + run 终态」、**不吞审批**（审批是 run 前置门，出现即需注意，wp-9
+ * scope/验收同口径；注：iOS HubStore.noteApprovalRequested 对已归属静音审批做了吞——桌面
+ * 面按 wp-9 验收②「审批仍弹」为准，两端差异记录在案）。另有 [notificationsEnabled] 总开关
+ * 单点门（[notify] 入口）：关闭 = 全部通知静默（含审批），生产 = [DesktopMutePreferences]。
  *
  * 线程模型：eventTap 在同步引擎协程线程回调（只做分类 + hubConvKeys 查询，毫秒级，不阻塞
  * 投影循环）；所有决策状态（unread 基线/抑制窗/会话快照）由单一消费协程独占（经 Channel
@@ -41,6 +51,15 @@ internal class DesktopNotificationCoordinator(
     private val notifier: DesktopNotifier = OsascriptNotifier(),
     /** hubConvKeys 解析（信封 gatewayId + sessionKey → conversationId；未映射 = ""）。生产实现见 DesktopHubApp。 */
     private val conversationKeyResolver: (gatewayId: String, sessionKey: String) -> String = { _, _ -> "" },
+    /**
+     * wp-9：按会话静音集注入（conversationKeyResolver 同型的单点注入位；决策时实时读取，
+     * 右键/设置页解除静音即时生效）。生产 = DesktopMutePreferences.mutedConversationIds。
+     * 口径：吞回复 + run 终态，不吞审批（审批是 run 前置门，iOS 同纪律）。未映射会话
+     * （conversationId = ""）不在静音面内，维持既有降级路径。
+     */
+    private val mutedConversationIds: () -> Set<String> = { emptySet() },
+    /** wp-9：通知总开关（false = [notify] 单点门放空全部 kind 含审批；生产 = DesktopMutePreferences）。 */
+    private val notificationsEnabled: () -> Boolean = { true },
     /** 单调时钟注入点（测试控制 3s 抑制窗推进；生产 = System.nanoTime）。 */
     private val nowNanos: () -> Long = System::nanoTime,
 ) {
@@ -70,7 +89,14 @@ internal class DesktopNotificationCoordinator(
 
     internal sealed interface Classified {
         data class ApprovalRequested(val conversationId: String) : Classified
-        data class RunTerminal(val conversationId: String, val completed: Boolean) : Classified
+
+        /** wp-4：runId 随分类透出（发起方门按 (gatewayId, runId) 消费）；gatewayId 同理。 */
+        data class RunTerminal(
+            val gatewayId: String,
+            val conversationId: String,
+            val completed: Boolean,
+            val runId: String?,
+        ) : Classified
     }
 
     private val channel = Channel<Msg>(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
@@ -79,6 +105,15 @@ internal class DesktopNotificationCoordinator(
     /** 当前打开会话（壳层写 / 消费协程读，回复「非当前打开」判定；null = 无打开会话）。 */
     @Volatile
     var openConversationId: String? = null
+
+    /**
+     * wp-4 修法二：run 终态「本端发起」门（生产 = RunOriginRegistry.isRunLocal；壳层在
+     * DefaultHubClient 组装后注入 lambda，解析经 client.runOriginRegistry 保证重登重建后仍活）。
+     * null = 不设门（单测与旧装配兼容，行为同旧：只按归属降级）。false = 抑制提醒（他端发起 /
+     * compact 触发），true = 放行。
+     */
+    @Volatile
+    var runOriginGate: ((gatewayId: String, runId: String?) -> Boolean)? = null
 
     /** eventTap 入口（DefaultHubClient 组装时注入；投影应用后回调）。 */
     fun onEventEnvelope(envelope: EventEnvelope) {
@@ -97,8 +132,12 @@ internal class DesktopNotificationCoordinator(
         val conversationId = conversationKeyResolver(envelope.gatewayId, sk)
         return when (envelope.type) {
             EventEnvelope.APPROVAL_REQUESTED -> Classified.ApprovalRequested(conversationId)
-            EventEnvelope.RUN_COMPLETED -> Classified.RunTerminal(conversationId, completed = true)
-            EventEnvelope.RUN_FAILED -> Classified.RunTerminal(conversationId, completed = false)
+            EventEnvelope.RUN_COMPLETED -> Classified.RunTerminal(
+                gatewayId = envelope.gatewayId, conversationId = conversationId, completed = true, runId = envelope.runId,
+            )
+            EventEnvelope.RUN_FAILED -> Classified.RunTerminal(
+                gatewayId = envelope.gatewayId, conversationId = conversationId, completed = false, runId = envelope.runId,
+            )
             else -> null // run.aborted 与其余事件不走通知面（回复走会话列表 Flow 差异）
         }
     }
@@ -140,12 +179,19 @@ internal class DesktopNotificationCoordinator(
     internal fun handleEvent(classified: Classified) {
         when (classified) {
             is Classified.ApprovalRequested -> notifyApproval(classified.conversationId)
-            is Classified.RunTerminal -> notifyRunTerminal(classified.conversationId, classified.completed)
+            is Classified.RunTerminal -> notifyRunTerminal(
+                gatewayId = classified.gatewayId,
+                conversationId = classified.conversationId,
+                completed = classified.completed,
+                runId = classified.runId,
+            )
         }
     }
 
     internal fun handleConversationsPush(list: List<UiConversation>) {
         latestConversations = list
+        // wp-9：单次推送读一次静音集（避免每卡片重复读注入 lambda）
+        val mutedIds = mutedConversationIds()
         if (list.isEmpty()) {
             // 全空推送 = 登出清库后的空窗：基线清零（重登快照从零重记，不误报「到达」）
             primed = false
@@ -165,6 +211,9 @@ internal class DesktopNotificationCoordinator(
             // 只对已知卡片判增量（登录/快照重建后新入列的卡片带 unread 只记录不算「到达」）
             if (prev == null || now <= prev) return@forEach
             if (c.conversationId == openConversationId) return@forEach // 当前打开不提醒
+            // wp-9：按会话静音（iOS HubStore.noteConversationsPush 同位 guard）——位置在「当前
+            // 打开」之后、抑制窗之前，与 iOS 同序
+            if (c.conversationId in mutedIds) return@forEach
             // run.completed 抑制窗内（同一 run 结束，完成通知已含「回来看」信号）吞掉防双响
             val until = replySuppressUntilNanos[c.conversationId]
             if (until != null && nowNanos() < until) return@forEach
@@ -188,7 +237,9 @@ internal class DesktopNotificationCoordinator(
 
     private fun notifyApproval(conversationId: String) {
         val attributed = conversationId.isNotEmpty()
-        // 审批不受回复抑制窗影响、也不受「当前打开」抑制：审批是 run 前置门，出现即需注意（iOS 同口径）
+        // 审批不受回复抑制窗影响、也不受「当前打开」抑制：审批是 run 前置门，出现即需注意（iOS 同口径）。
+        // wp-9：审批也不受按会话静音影响（吞审批 = 用户可能错过 run 前置门，wp-9 验收②「审批仍弹」）；
+        // 已归属静音审批在 iOS HubStore:377 有吞的变体，桌面按 wp-9 scope 口径为准（差异记录在案）。
         val label = if (attributed) labelOf(conversationId) else null
         notify(
             Request(
@@ -200,9 +251,16 @@ internal class DesktopNotificationCoordinator(
         )
     }
 
-    private fun notifyRunTerminal(conversationId: String, completed: Boolean) {
+    private fun notifyRunTerminal(gatewayId: String, conversationId: String, completed: Boolean, runId: String?) {
         // 未映射会话：无归属、无法跳转，显式降级不提醒（不编造归属，iOS noteRunTerminal 同纪律）
         if (conversationId.isEmpty()) return
+        // wp-9：按会话静音（iOS HubStore.noteRunTerminal 同位 guard）——吞回复/终态口径的终态侧；
+        // 早于 3s 抑制窗置位（iOS 同序：静音即 return，窗不设——静音期间回复本就被吞，窗无意义）
+        if (conversationId in mutedConversationIds()) return
+        // wp-4 修法二发起方门（两端协调器同口径）：他端发起 / compact 触发的 run 终态静默
+        // （未读增量仍由会话列表承载）；null 门 = 旧装配/单测兼容（放行）
+        val gate = runOriginGate
+        if (gate != null && !gate(gatewayId, runId)) return
         val label = labelOf(conversationId)
         if (completed) {
             replySuppressUntilNanos[conversationId] = nowNanos() + REPLY_SUPPRESS_WINDOW_NANOS
@@ -227,6 +285,8 @@ internal class DesktopNotificationCoordinator(
     }
 
     private fun notify(request: Request) {
+        // wp-9 总开关单点门：关闭 = 全部通知静默（含审批；打开后下一条通知即时恢复，无缓存态）
+        if (!notificationsEnabled()) return
         runCatching { notifier.notify(request) } // 通知发送任何失败静默（不重试不崩）
     }
 
@@ -278,5 +338,85 @@ internal class OsascriptNotifier(
 
         private fun isMacOs(): Boolean =
             System.getProperty("os.name").orEmpty().contains("mac", ignoreCase = true)
+    }
+}
+
+/**
+ * wp-9：按会话静音集 + 通知总开关的本地偏好存储（生产注入位 = [DesktopNotificationCoordinator]
+ * 的 mutedConversationIds / notificationsEnabled）。
+ *
+ * 口径（与 iOS HubStore 同位）：静音是**本地用户偏好，非账号数据**——跨登出保留（iOS
+ * UserDefaults `hub.muted.<id>` 前缀同式，此处 java.util.prefs 用户级节点，跨重启保留；
+ * HubStore:672 登出清库路径不动静音偏好，桌面 [SettingsScreen] 登出同样不清）。
+ *
+ * 存储纪律：进程内内存镜像为权威（读 O(1) 且免 I/O 阻塞决策线程），持久化 best-effort——
+ * 任何 Preferences I/O 失败（BackingStoreException/权限）静默降级为纯内存态：进程内仍生效，
+ * 下次启动回落到最近一次成功持久化的值；Preferences 体系本身不可用时 node = null，全程内存态。
+ * 不抛不崩（桌面静默降级纪律同面延伸到偏好面）。
+ */
+internal class DesktopMutePreferences(node: Preferences? = null) {
+
+    private val node: Preferences? = node ?: runCatching { Preferences.userRoot().node(NODE_NAME) }.getOrNull()
+
+    private val lock = Any()
+    private val mutedInMemory: MutableSet<String>
+    private var enabledInMemory: Boolean
+
+    init {
+        val loadedMuted = mutableSetOf<String>()
+        var loadedEnabled = true
+        node?.let { n ->
+            // 静音键按前缀过滤（前缀内 conversationId 还原；启用开关键不混入静音集——iOS
+            // loadMutedConversations 同式 prefix 过滤）
+            runCatching {
+                for (key in n.keys()) {
+                    if (!key.startsWith(MUTED_KEY_PREFIX)) continue
+                    runCatching {
+                        if (n.getBoolean(key, false)) loadedMuted += key.removePrefix(MUTED_KEY_PREFIX)
+                    }
+                }
+            }
+            runCatching { loadedEnabled = n.getBoolean(KEY_NOTIFICATIONS_ENABLED, true) }
+        }
+        mutedInMemory = loadedMuted
+        enabledInMemory = loadedEnabled
+    }
+
+    /** 当前静音集快照（线程安全；决策线程调用，O(n) 拷贝可忽略——静音集量级是个位数会话）。 */
+    fun mutedConversationIds(): Set<String> = synchronized(lock) { mutedInMemory.toSet() }
+
+    fun isMuted(conversationId: String): Boolean = synchronized(lock) { conversationId in mutedInMemory }
+
+    /** 通知总开关（true = 开；Preferences 不可用/读到缺省 = 开——降级方向为「多提醒」不吞用户信息）。 */
+    val notificationsEnabled: Boolean
+        get() = synchronized(lock) { enabledInMemory }
+
+    fun setMuted(muted: Boolean, conversationId: String) {
+        synchronized(lock) {
+            if (muted) mutedInMemory += conversationId else mutedInMemory -= conversationId
+        }
+        node?.let { n ->
+            runCatching {
+                if (muted) n.putBoolean(MUTED_KEY_PREFIX + conversationId, true) else n.remove(MUTED_KEY_PREFIX + conversationId)
+            } // 持久化失败 = 内存态降级（进程内生效，重启后回落上次持久化值）
+        }
+    }
+
+    fun setNotificationsEnabled(enabled: Boolean) {
+        synchronized(lock) { enabledInMemory = enabled }
+        node?.let { n ->
+            runCatching { n.putBoolean(KEY_NOTIFICATIONS_ENABLED, enabled) }
+        }
+    }
+
+    internal companion object {
+        /** 用户级偏好节点（java.util.prefs；macOS = ~/Library/Preferences plist 面）。 */
+        private const val NODE_NAME = "dev/sharpxia/agentreins/hub"
+
+        /** 静音键前缀（iOS HubStore.mutedKeyPrefix 同值 `hub.muted.`，两端偏好语义同源）。 */
+        private const val MUTED_KEY_PREFIX = "hub.muted."
+
+        /** 总开关键（非静音前缀族，互不混入）。 */
+        private const val KEY_NOTIFICATIONS_ENABLED = "hub.notificationsEnabled"
     }
 }

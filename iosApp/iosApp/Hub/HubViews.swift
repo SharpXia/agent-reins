@@ -11,14 +11,21 @@ struct HubRootView: View {
     @State private var hub = HubStore.shared
 
     var body: some View {
-        // tab 态在 HubStore（wp-13：通知点按需从任意 tab 带回会话栈），此处只绑定。
-        TabView(selection: $hub.selectedTab) {
-            NavigationStack { HubHomeView() }
-                .tabItem { Label("会话", systemImage: "bubble.left.and.bubble.right.fill") }
-                .tag(0)
-            NavigationStack { HubSettingsView() }
-                .tabItem { Label("设置", systemImage: "gearshape.fill") }
-                .tag(1)
+        VStack(spacing: 0) {
+            // wp-10：连接提示条挂顶层（TabView 之上，跨 tab 常驻）：断连/重建/接管在途显示，
+            // 追平（linked）自动消失——wp-8 降级态面在连接维度的补位。
+            if hub.isLoggedIn, hub.syncPhase != "linked" {
+                HubSyncPhaseBanner(phase: hub.syncPhase)
+            }
+            // tab 态在 HubStore（wp-13：通知点按需从任意 tab 带回会话栈），此处只绑定。
+            TabView(selection: $hub.selectedTab) {
+                NavigationStack { HubHomeView() }
+                    .tabItem { Label("会话", systemImage: "bubble.left.and.bubble.right.fill") }
+                    .tag(0)
+                NavigationStack { HubSettingsView() }
+                    .tabItem { Label("设置", systemImage: "gearshape.fill") }
+                    .tag(1)
+            }
         }
         .environment(hub)
         .task {
@@ -51,6 +58,57 @@ struct HubRootView: View {
                 }
             }
         }
+    }
+}
+
+/// wp-10：连接状态提示条（iOS 顶层挂载，HubRootView 的 TabView 之上）。非 linked 相位常驻
+/// 显示，追平（linked）自动消失——验收③「断网出现提示条、恢复后自动消失；410 重建期间显示
+/// 重建态」。文案与桌面 SyncPhaseBanner 同族（两端体验 parity）：catching = 引导/追平在途
+/// （灰面弱提示）；reconnecting / rebuilding / superseded = 连接降级（琥珀警示面）。
+struct HubSyncPhaseBanner: View {
+    let phase: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: iconName)
+            Text(text)
+            Spacer(minLength: 0)
+        }
+        .font(.footnote)
+        .foregroundStyle(foregroundColor)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(backgroundColor)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("连接状态：\(text)")
+    }
+
+    private var text: String {
+        switch phase {
+        case "reconnecting": return "连接已断开，正在重连…"
+        case "rebuilding": return "同步游标已失效，正在重建本地快照…"
+        case "superseded": return "连接已被本机新会话接管，等待恢复…"
+        case "catching": return "正在同步…"
+        default: return ""
+        }
+    }
+
+    private var iconName: String {
+        switch phase {
+        case "reconnecting": return "wifi.slash"
+        case "rebuilding": return "arrow.triangle.2.circlepath"
+        case "superseded": return "person.2.fill"
+        default: return "arrow.triangle.2.circlepath"
+        }
+    }
+
+    private var backgroundColor: Color {
+        phase == "catching" ? Color(.systemGray6) : Color.orange.opacity(0.18)
+    }
+
+    private var foregroundColor: Color {
+        phase == "catching" ? Color.secondary : Color.orange
     }
 }
 
@@ -245,7 +303,8 @@ private struct HubConversationRow: View {
 }
 
 /// 会话页：消息时间线（乐观态徽标 + 流式行 + 合成行分隔条）+ 发送条 + 会话操作菜单；
-/// 渲染完整后自动上报已读。
+/// 已读上报（wp-12）：maxRenderedSeq 驱动持续上报（桌面同型，只推进不回退）——打开首帧
+/// 照报、会话期新行渲染即推进，回列表不再假未读；空列表呈「暂无消息」占位（桌面同型）。
 /// 流式体验（wp-7）：自动滚屏只在「尾部变化且用户在底部」时跟随（onScrollGeometryChange +
 /// onScrollPhaseChange 区分用户上翻与内容增长）；空内容 streaming 行呈 typing 三点脉冲；
 /// 流式正文 typewriter 渐进揭示；消息列表写入侧经 HubStore 75ms 合帧。
@@ -330,6 +389,18 @@ struct HubChatView: View {
         }
     }
 
+    /// wp-12：已渲染最大真实 seq（桌面 ConversationScreen.maxRenderedSeq 同口径）——
+    /// 乐观行占位 seq（Int64.max）与 failed 行不计入；streaming 行（含 dstream 占位行）
+    /// 已渲染即计入（与桌面同型：用户看着流式输出时水位随渲染推进，离场不留假未读）。
+    /// 持续已读上报的驱动源：onAppear 首报 + onChange 增量推进（HubStore.markReadUpTo
+    /// 基线只推进不回退），替代旧「appear+400ms 单次取值」一次性上报。
+    private var maxRenderedSeq: Int64 {
+        hub.messages
+            .filter { $0.seq != HubStore.optimisticSeqSentinel && $0.state != "failed" }
+            .map(\.seq)
+            .max() ?? 0
+    }
+
     /// wp-12：历史翻页顶部行（时间线首行，随滚动区移动）——三态：
     /// - 在途：进度指示（按钮禁用防并发翻页）；
     /// - 可翻：「加载更早」按钮（点击 → HubStore.loadEarlier，按 oldestSeq 翻页）；
@@ -363,76 +434,97 @@ struct HubChatView: View {
         }
     }
 
+    /// wp-12：时间线（消息滚动区 + 滚动锚定/贴底跟随/翻页恢复接线，wp-7①/wp-12 原样平移）——
+    /// body 中与空态占位互斥渲染：空→非空切换时 ScrollView 新建并 onAppear 锚底（语义不变）。
+    private var timeline: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    // wp-12：历史翻页入口（顶部常驻行）——按钮态由 HubStore 状态机驱动
+                    //（canLoadEarlier 乐观判定 + 首翻后服务端 hasMore 接管；翻到头锁存隐藏，
+                    // 换「已到最早消息」收尾条）；在途呈进度态，防并发翻页（限流 60 次/分/设备）。
+                    earlierLoaderRow
+                    if let err = hub.loadEarlierError {
+                        Label {
+                            Text(err)
+                        } icon: {
+                            Image(systemName: "exclamationmark.triangle")
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.red.opacity(0.85))
+                        .frame(maxWidth: .infinity, alignment: .center)
+                    }
+                    ForEach(hub.messages, id: \.messageId) { m in
+                        HubMessageRow(m: m).id(m.messageId)
+                    }
+                    Color.clear.frame(height: 4).id("bottom")
+                }
+                .padding(.horizontal, 14).padding(.vertical, 10)
+            }
+            .onScrollGeometryChange(for: ScrollProbe.self) { geo in
+                ScrollProbe(offsetY: geo.contentOffset.y,
+                            contentHeight: geo.contentSize.height,
+                            containerHeight: geo.containerSize.height,
+                            insetBottom: geo.contentInsets.bottom)
+            } action: { _, new in
+                probeBox.latest = new
+                // 流式 append 与程序化跟随滚动（animating）不改锚定态：内容增长会把
+                // 哨兵推到视口下方，若据此解锚，下一帧起跟随永久停摆。
+                guard userDrivenScroll else { return }
+                setAtBottom(probe: new)
+            }
+            .onScrollPhaseChange { _, new in
+                // 用户驱动相 = 手指/惯性；idle（含内容增长）与 animating（程序化跟随）除外。
+                let userDriven: Bool
+                switch new {
+                case .tracking, .interacting, .decelerating: userDriven = true
+                case .idle, .animating: userDriven = false
+                @unknown default: userDriven = false
+                }
+                userDrivenScroll = userDriven
+                // 手势/惯性结束在半途时用最终几何补判一次（惯性停在距底 30pt 也算在底）。
+                if !userDriven, let p = probeBox.latest { setAtBottom(probe: p) }
+            }
+            .onChange(of: hub.messages.count) { _, _ in
+                // wp-12：翻页行合入列表（顶部插入）后滚回触发前最老一行，保住阅读位置——
+                // 不滚回则视口内容整体下移（读取位置丢失）。锚由 HubStore.loadEarlier 武装、
+                // 仅在成功回执后消费（在途新尾消息到达不触发）。
+                if let anchor = hub.takeRestoreScrollTarget() {
+                    proxy.scrollTo(anchor, anchor: .top)
+                }
+            }
+            .onChange(of: tailSignature) { _, _ in
+                // wp-7①：跟随条件 = 尾部变化 且 用户在底部（上翻阅读时不拉回）。
+                // 尾签覆盖行数、尾行身份/状态/内容量——比旧「只看 messages.count」
+                // 多覆盖流式行原位增长与占位行收敛。
+                guard atBottom else { return }
+                proxy.scrollTo("bottom", anchor: .bottom)
+            }
+            .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
+        }
+    }
+
+    /// wp-12：时间线空态占位（桌面 ConversationScreen「暂无消息」同型：居中主行 + 灰色副行，
+    /// 文案逐字同源）——空态纪律对齐 iOS 会话列表（ContentUnavailableView 同族）。打开瞬态
+    /// 与真空会话同呈现，不虚构内容；首批快照落地即被 timeline 替换。
+    private var timelineEmptyState: some View {
+        ContentUnavailableView("暂无消息", systemImage: "bubble.left",
+                               description: Text("发送第一条消息开始（历史随快照与事件流回填）"))
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if !sessionApprovals.isEmpty {
                 approvalBanner
             }
             workProcessSection
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        // wp-12：历史翻页入口（顶部常驻行）——按钮态由 HubStore 状态机驱动
-                        //（canLoadEarlier 乐观判定 + 首翻后服务端 hasMore 接管；翻到头锁存隐藏，
-                        // 换「已到最早消息」收尾条）；在途呈进度态，防并发翻页（限流 60 次/分/设备）。
-                        earlierLoaderRow
-                        if let err = hub.loadEarlierError {
-                            Label {
-                                Text(err)
-                            } icon: {
-                                Image(systemName: "exclamationmark.triangle")
-                            }
-                            .font(.caption)
-                            .foregroundStyle(.red.opacity(0.85))
-                            .frame(maxWidth: .infinity, alignment: .center)
-                        }
-                        ForEach(hub.messages, id: \.messageId) { m in
-                            HubMessageRow(m: m).id(m.messageId)
-                        }
-                        Color.clear.frame(height: 4).id("bottom")
-                    }
-                    .padding(.horizontal, 14).padding(.vertical, 10)
-                }
-                .onScrollGeometryChange(for: ScrollProbe.self) { geo in
-                    ScrollProbe(offsetY: geo.contentOffset.y,
-                                contentHeight: geo.contentSize.height,
-                                containerHeight: geo.containerSize.height,
-                                insetBottom: geo.contentInsets.bottom)
-                } action: { _, new in
-                    probeBox.latest = new
-                    // 流式 append 与程序化跟随滚动（animating）不改锚定态：内容增长会把
-                    // 哨兵推到视口下方，若据此解锚，下一帧起跟随永久停摆。
-                    guard userDrivenScroll else { return }
-                    setAtBottom(probe: new)
-                }
-                .onScrollPhaseChange { _, new in
-                    // 用户驱动相 = 手指/惯性；idle（含内容增长）与 animating（程序化跟随）除外。
-                    let userDriven: Bool
-                    switch new {
-                    case .tracking, .interacting, .decelerating: userDriven = true
-                    case .idle, .animating: userDriven = false
-                    @unknown default: userDriven = false
-                    }
-                    userDrivenScroll = userDriven
-                    // 手势/惯性结束在半途时用最终几何补判一次（惯性停在距底 30pt 也算在底）。
-                    if !userDriven, let p = probeBox.latest { setAtBottom(probe: p) }
-                }
-                .onChange(of: hub.messages.count) { _, _ in
-                    // wp-12：翻页行合入列表（顶部插入）后滚回触发前最老一行，保住阅读位置——
-                    // 不滚回则视口内容整体下移（读取位置丢失）。锚由 HubStore.loadEarlier 武装、
-                    // 仅在成功回执后消费（在途新尾消息到达不触发）。
-                    if let anchor = hub.takeRestoreScrollTarget() {
-                        proxy.scrollTo(anchor, anchor: .top)
-                    }
-                }
-                .onChange(of: tailSignature) { _, _ in
-                    // wp-7①：跟随条件 = 尾部变化 且 用户在底部（上翻阅读时不拉回）。
-                    // 尾签覆盖行数、尾行身份/状态/内容量——比旧「只看 messages.count」
-                    // 多覆盖流式行原位增长与占位行收敛。
-                    guard atBottom else { return }
-                    proxy.scrollTo("bottom", anchor: .bottom)
-                }
-                .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
+            // wp-12：时间线空态占位（桌面 ConversationScreen「暂无消息」同型，空态纪律
+            // 对齐会话列表空态）——空列表（打开瞬态/真空会话）整块替换时间线呈居中占位，
+            // 首批快照落地即被时间线替换（ScrollView 重建，onAppear 锚底照走）。
+            if hub.messages.isEmpty {
+                timelineEmptyState
+            } else {
+                timeline
             }
             // wp-14：斜杠命令建议面板——draft 由 "/" 起手时悬浮于 composer 上方，选中即动作；
             // 无命中/进入参数书写段自动收起，其余输入零干扰。
@@ -529,11 +621,13 @@ struct HubChatView: View {
         }
         .onAppear { hub.open(conv) }
         .onDisappear { if hub.selected?.conversationId == conv.conversationId { hub.closeConversation() } }
-        .task {
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            let maxSeq = hub.messages.filter { $0.state == "final" }.map(\.seq).max() ?? 0
-            if maxSeq > 0 { hub.markReadUpTo(maxSeq) }
-        }
+        // wp-12：持续已读上报（桌面 maxRenderedSeq 驱动 LaunchedEffect 同型，替代旧
+        // appear+400ms 单次取值）——onAppear 首报（首帧慢于旧 400ms 定时器也照报，快照
+        // 先到不漏）+ onChange 增量推进（会话打开期间新 final/streaming 行渲染即上报，
+        // 回列表不再假未读）；只推进不回退由 HubStore.markReadUpTo 基线承担。挂外层
+        // VStack：空态（时间线被占位替换）与时间线两态都活着。
+        .onAppear { hub.markReadUpTo(maxRenderedSeq) }
+        .onChange(of: maxRenderedSeq) { _, latest in hub.markReadUpTo(latest) }
     }
 
     private func title(_ c: UiConversation) -> String {
@@ -1229,6 +1323,17 @@ struct HubSettingsView: View {
                 }
             }
             Section("已绑定设备") {
+                // wp-11 设备管理错误态：拉取失败显式「错误 + 重试」降级（devicesCache nil 时
+                // 取代永「加载中…」；有缓存时错误行与缓存行并存，重试按钮补拉），不静默。
+                if let error = hub.devicesError {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("设备清单加载失败：\(error)")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                        Button("重试") { hub.refreshDevices() }
+                            .font(.caption)
+                    }
+                }
                 if let devices = hub.devices {
                     ForEach(devices, id: \.deviceId) { d in
                         HStack {
@@ -1246,8 +1351,14 @@ struct HubSettingsView: View {
                             }
                         }
                     }
-                } else {
+                } else if hub.devicesError == nil {
                     HStack { ProgressView(); Text("加载中…").foregroundStyle(.secondary) }
+                }
+                // wp-11 设备管理错误态：撤销失败显式降级文案，可重试（再点「撤销」），不静默。
+                if let failure = hub.revokeFailure {
+                    Text("撤销失败：\(failure)")
+                        .font(.caption)
+                        .foregroundStyle(.red)
                 }
             }
             Section("接入") {

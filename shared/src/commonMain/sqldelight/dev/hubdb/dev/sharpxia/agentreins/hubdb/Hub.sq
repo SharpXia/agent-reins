@@ -376,6 +376,14 @@ SELECT idempotencyKey, conversationId FROM hubMessages WHERE idempotencyKey = ? 
 setMessageUiStateByIdem:
 UPDATE hubMessages SET uiState = ? WHERE idempotencyKey = ? AND state != 'failed';
 
+-- 回显去重（v8，2026-11-06 真机修复）：回显不带幂等键时（bridge 契约缺口，Gateway 载荷不携带），
+-- 同会话已过 DELIVERED 的乐观行（seq=Long.MAX 占位序）已被本权威行取代，清除防双气泡并存；
+-- 仍在途 SENDING 行与失败行不动（失败行由 UI 重发面管，SENDING 行等自己的回显/ack 收敛）。
+deleteDeliveredOptimisticExcept:
+DELETE FROM hubMessages
+WHERE conversationId = ? AND role = 'user' AND seq = 9223372036854775807
+  AND uiState = 'delivered' AND messageId != ?;
+
 selectMessage:
 SELECT * FROM hubMessages WHERE messageId = ?;
 

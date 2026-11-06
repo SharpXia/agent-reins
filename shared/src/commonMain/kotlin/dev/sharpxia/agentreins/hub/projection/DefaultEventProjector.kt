@@ -15,13 +15,17 @@ import kotlin.concurrent.Volatile
 @Serializable
 private data class DataMessageDelta(val messageId: String, val deltaText: String, val replace: Boolean? = null)
 
-/** v1.1：openclawId/sessionId 已撤（App 面禁出 openclaw 锚字段，02 R7）。 */
+/** v1.1：openclawId/sessionId 已撤（App 面禁出 openclaw 锚字段，02 R7）。
+ *  2026-11-06 真机修复：sourceMessageSeq 契约必填（hub-wss-frames-v1 DataMessageCreated required），
+ *  但 eventlog 存量行（bridge 修复前入库）不带该字段——必填解码整帧失败 → message.created
+ *  族静默 skip，除冷启动快照外任何消息进不了详情页（真机 0.5.4 根因）。改为缺省 0 + 落库时
+ *  兜底（见 onMessageCreated），宽松解析纪律与全文件一致。 */
 @Serializable
 private data class DataMessageCreated(
     val messageId: String,
     val role: String,
     val content: String,
-    val sourceMessageSeq: Long,
+    val sourceMessageSeq: Long = 0,
     val commandId: String? = null,
     val idempotencyKey: String? = null,
 )
@@ -350,6 +354,13 @@ class DefaultEventProjector(
         // 只认自学习映射（v7 分域，注释同 onMessageDelta）：同 agent 的 channel/任务会话消息
         // 不得写入主线卡时间线、不得推未读（app 主会话隔离）
         val convId = resolveConversation(envelope, d.idempotencyKey, allowTwoHop = false) ?: return skip()
+        // seq 兜底（2026-11-06 真机修复，DTO 注释）：存量事件行不带 sourceMessageSeq（=0）时，
+        // 按当前权威 lastSeq+1 顺延——与 delta 占位行同款兜底口径（服务端 seq 口径不被污染：
+        // 不回写 lastSeq 之外的服务端语义）。卡片行缺失（快照/校准未到）且无载荷 seq → 保守 skip。
+        val seq = if (d.sourceMessageSeq > 0L) d.sourceMessageSeq else {
+            db.hubQueries.selectConversation(convId).executeAsOneOrNull()?.lastSeq?.plus(1L)
+                ?: return skip()
+        }
         val isUser = d.role == "user"
         // 用户行回执：同 idempotencyKey 的本地乐观行（PENDING_LOCAL 期 messageId=幂等键）整体提升，
         // 避免乐观行与服务端行双行并存（05 §3.9 义务 4 的 UI 翻转语义）
@@ -359,14 +370,14 @@ class DefaultEventProjector(
             db.hubQueries.promoteLocalEcho(
                 messageId = d.messageId,
                 content = d.content,
-                seq = d.sourceMessageSeq,
+                seq = seq,
                 commandId = d.commandId,
                 ts = envelope.ts,
                 idempotencyKey = d.idempotencyKey,
             )
             db.hubQueries.touchConversationPreview(
                 preview = d.content.take(PREVIEW_MAX),
-                seq = d.sourceMessageSeq,
+                seq = seq,
                 lastActiveAt = envelope.ts,
                 conversationId = convId,
             )
@@ -382,7 +393,7 @@ class DefaultEventProjector(
         db.hubQueries.upsertMessage(
             messageId = d.messageId,
             conversationId = convId,
-            seq = d.sourceMessageSeq,
+            seq = seq,
             role = d.role,
             content = d.content,
             state = STATE_FINAL,
@@ -392,13 +403,21 @@ class DefaultEventProjector(
             idempotencyKey = d.idempotencyKey,
             ts = envelope.ts,
         )
-        // 发送方乐观行翻转（05 §3.9 义务 4）：幂等键命中的本地行 sending → delivered
-        if (isUser && d.idempotencyKey != null) {
-            db.hubQueries.setMessageUiStateByIdem(UI_DELIVERED, d.idempotencyKey)
+        if (isUser) {
+            // 发送方乐观行翻转（05 §3.9 义务 4）：幂等键命中的本地行 sending → delivered
+            if (d.idempotencyKey != null) {
+                db.hubQueries.setMessageUiStateByIdem(UI_DELIVERED, d.idempotencyKey)
+            } else {
+                // 回显不带幂等键（bridge 契约缺口：用户行 required commandId/idempotencyKey，
+                // Gateway 载荷不携带、bridge 无法回填）——同会话在途乐观行已被本权威行取代，
+                // 不清除即「已送达权威行 + seq=MAX 乐观行」双气泡并存（协议次序 ack→echo，
+                // 此处仅清已过 DELIVERED 态的行；仍在途 SENDING 行不动）。
+                db.hubQueries.deleteDeliveredOptimisticExcept(convId, d.messageId)
+            }
         }
         db.hubQueries.touchConversationPreview(
             preview = d.content.take(PREVIEW_MAX),
-            seq = d.sourceMessageSeq,
+            seq = seq,
             lastActiveAt = envelope.ts,
             conversationId = convId,
         )
@@ -406,7 +425,7 @@ class DefaultEventProjector(
         // role="" 合成行不计）
         if (!isUser && d.role != ROLE_SYNTHETIC) {
             val readUpTo = db.hubQueries.selectReadCursor(convId).executeAsOneOrNull() ?: 0L
-            if (d.sourceMessageSeq > readUpTo) {
+            if (seq > readUpTo) {
                 bumpUnread(convId)
             }
         }

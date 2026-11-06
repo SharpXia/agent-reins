@@ -802,7 +802,16 @@ private struct HubMessageRow: View {
                     .padding(.horizontal, 12).padding(.vertical, 8)
                     .background(RoundedRectangle(cornerRadius: 16)
                         .fill(m.role == "user" ? Color.accentColor.opacity(0.24) : ink.surfaceTertiary))
-                    if m.role == "user" { statusBadge }
+                    // 消息时间（桌面 MessageRow formatTs 同族 parity，2026-11-06）：气泡下
+                    // caption2 弱化行——用户行与状态徽标同行（桌面同款），解析失败/缺省省略。
+                    if m.role == "user" {
+                        HStack(spacing: 6) {
+                            messageTimeLabel
+                            statusBadge
+                        }
+                    } else {
+                        messageTimeLabel
+                    }
                     if let reason = failedReasonLabel {
                         // wp-8③：失败原因（wp-5 双路径共列 reason：事件路径 message.failed.reason =
                         // 快照路径 MessageRow.errorKind）；未分类失败（reason=NULL）不虚构文案。
@@ -818,6 +827,17 @@ private struct HubMessageRow: View {
     }
 
     // ── wp-8①：长按菜单（拷贝全文 / 失败行重发） ──
+
+    /// 消息时间标签（formatMessageTimeISO 解析失败/缺省 → 空视图，不占位）。
+    @ViewBuilder
+    private var messageTimeLabel: some View {
+        let t = formatMessageTimeISO(m.ts)
+        if !t.isEmpty {
+            Text(t)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
 
     /// 重发语义（ADR-07）：用户显式重发 = 新意图新键——sendMessage 每次调用生成新幂等键
     /// （DefaultCommandClient.kt:93 newUuid），不做键复用，Hub commands 表落独立记录。

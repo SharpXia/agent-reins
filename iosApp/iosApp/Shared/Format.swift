@@ -50,6 +50,32 @@ func formatMessageTime(_ epochMs: Int64) -> String {
     return ChatDateFormatters.crossDayTime.string(from: date)
 }
 
+// ISO8601 解析器（带小数秒/不带两把；构造昂贵，进程级复用——同 ChatDateFormatters 纪律）。
+private let isoFractional: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return f
+}()
+private let isoPlain: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime]
+    return f
+}()
+
+/// 消息时间（ISO8601/epoch 毫秒串 → 当天 HH:mm / 跨天 M-d HH:mm）。
+/// 服务端快照行 timestamp（RFC3339Nano，Go 序列化带纳秒小数+时区偏移）、事件路径信封 ts
+/// 同走此入口；解析失败或空返回 ""（行渲染侧据此省略，不虚构时间）。
+func formatMessageTimeISO(_ raw: String?) -> String {
+    guard let raw, !raw.isEmpty else { return "" }
+    var date = raw.contains(".")
+        ? isoFractional.date(from: raw)
+        : nil
+    if date == nil { date = isoPlain.date(from: raw) }
+    if let date { return formatMessageTime(Int64(date.timeIntervalSince1970 * 1000)) }
+    if let ms = Int64(raw) { return formatMessageTime(ms) }
+    return ""
+}
+
 /// 日分隔文案：今天 / 昨天 / M月d日（跨年补年份）。
 func dayHeaderLabel(_ atMs: Int64) -> String {
     let date = Date(timeIntervalSince1970: Double(atMs) / 1000)

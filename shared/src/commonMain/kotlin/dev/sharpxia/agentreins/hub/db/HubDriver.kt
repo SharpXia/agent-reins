@@ -15,8 +15,11 @@ import dev.sharpxia.agentreins.hubdb.HubDatabase
  *  + hubConversations.activeRunId（run.* 事件捕获，wp-8 Stop 取值）。
  *  3 = 契约 v1.1.0 去 session 化表结构（conversationId 主键 + hubConvKeys；1 = 0.5.0 的 sessionKey 主键代）。
  *  0.5.1/0.5.2 曾改表未升版本号——守卫放行旧结构，v3 SQL 打 v1 表抛异常经 uncaught handler SIGABRT，
- *  即真机「点开会话即崩」根因；本版本号今后与 Hub.sq 结构变更必须同步升。 */
-internal const val HUB_DB_VERSION = 7L
+ *  即真机「点开会话即崩」根因；本版本号今后与 Hub.sq 结构变更必须同步升。
+ *  8 = additive（2026-11-06 真机修复）：message.created 容缺解码 + seq 兜底 + deleteDeliveredOptimisticExcept
+ *  （Hub.sq 新查询）；升版另承担「存量事件流已消费、cursor 已越过无 seq 事件」的自愈面——drop 重建
+ *  清 cursor → 冷启动快照全量重取，0.5.4 已损坏设备（详情页空）免重装即恢复。 */
+internal const val HUB_DB_VERSION = 8L
 
 /** 版本记账行键（hubSyncState；beta-0.5.4 真机死库根因修复——PRAGMA 层归 SQLiter，见 openHubDatabase）。 */
 private const val DB_VERSION_KEY = "db_version"

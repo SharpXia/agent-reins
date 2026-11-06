@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- APNs 远程推送（wp-17 客户端上报 + 服务端推送链路）；distribution 签名时
+	     profile 自动注入 production 环境，此处按惯例声明 development。 -->
+	<key>aps-environment</key>
+	<string>development</string>
+</dict>
+</plist>

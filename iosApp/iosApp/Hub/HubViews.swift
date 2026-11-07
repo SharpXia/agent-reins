@@ -32,11 +32,22 @@ struct HubRootView: View {
         .environment(hub)
         .task {
             if ProcessInfo.processInfo.environment["AGENTREINS_DEV_TAB"] == "settings" { hub.selectedTab = 1 }
-            if ProcessInfo.processInfo.environment["AGENTREINS_DEV_CONV"] == "1" {
-                try? await Task.sleep(nanoseconds: 2_500_000_000)
-                if let first = hub.conversations.first {
+            if let convKey = ProcessInfo.processInfo.environment["AGENTREINS_DEV_CONV"], !convKey.isEmpty {
+                // "1" = 首个会话（既有口径）；非 "1" 值 = label/conversationId 前缀直达指定会话
+                // （长会话锚定走查用，如 main）。轮询等投影就绪（登录 bootstrap 数秒）最多 20s。
+                var target: UiConversation?
+                for _ in 0..<20 {
+                    // 空-label 会话（agent 主线卡 label=""，列表显示走 agentId）按 agentId 兜底匹配。
+                    target = hub.conversations.first {
+                        convKey == "1" || $0.label.contains(convKey)
+                            || $0.agentId.contains(convKey) || $0.conversationId.hasPrefix(convKey)
+                    }
+                    if target != nil { break }
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                }
+                if let target {
                     hub.selectedTab = 0
-                    hub.devOpen(first)
+                    hub.devOpen(target)
                 }
             }
             // Dev 发送探针：AGENTREINS_DEV_SEND_KEY=<label 或 conversationId 前缀> + AGENTREINS_DEV_SEND=<文本>
@@ -341,32 +352,44 @@ struct HubChatView: View {
     @State private var compacting = false
     /// wp-7①：底部锚定态（初始锚定；只被用户驱动的滚动翻转，见 setAtBottom）。
     @State private var atBottom = true
+    /// b8：底部哨兵视口位置（非观测盒，0.4.6 纪律：逐帧值不进 @State）——
+    /// 贴底/按钮判定的唯一几何信号。offset 公式（contentHeight−containerSize）与真实
+    /// 可滚上限差一个恒定底部安全区偏移（实测恒 ~117pt、containerSize 不含 safeAreaInset
+    /// composer 区），offset 路线无法修准，弃用。
+    @State private var sentinelBox = SentinelBox()
+    /// 视口高（ScrollView 自身尺寸，与哨兵同一 named space 参照；仅布局变化时写入）。
+    @State private var viewportHeight: CGFloat = 0
     /// wp-7①：最近一次滚动几何（非观测盒——逐帧更新不得触发 body 重渲）。
     @State private var probeBox = ScrollProbeBox()
     /// wp-7①：当前滚动相是否用户驱动（tracking/interacting/decelerating）。
     @State private var userDrivenScroll = false
+    /// b8：手势前科——程序化滚动也会呈 decelerating 相，与用户惯性不可按相区分；
+    /// 以「本轮滚动链是否出现过手势」判定。
+    @State private var recentUserGesture = false
     /// #4（2026-11-07 UX 轮）：软键盘可见态（keyboardWillChangeFrame 驱动）——键盘弹出
     /// 改变滚动几何但不经用户手势（userDrivenScroll=false），配合贴底跟随补滚动（见 timeline）。
     @State private var keyboardVisible = false
-    /// 钉底在途（统一机制）：键盘唤起瞬移（#4 二轮）与回底按钮点击（#3' 三轮）共用——置位后由
-    /// onScrollGeometryChange 逐帧 scrollTo 收敛（滑动/惯性中单次 scrollTo 会被在途滚动吞掉，
-    /// 逐帧重放直达底部），落底（容差内）即清；用户重新抓取列表（tracking）取消。
+    /// 钉底在途（统一机制）：进页锚定（b8）、键盘唤起瞬移（#4 二轮）与回底按钮点击共用——
+    /// 置位后由 onScrollGeometryChange 逐帧 proxy.scrollTo("bottom") 重放收敛（SwiftUI 下
+    /// 单次 scrollTo 落 LazyVStack 估算点且滚动中会被吞；逐帧重放每次都是全新命令，随物化
+    /// 修正推进——ScrollPosition 系 API 在本视图实测整体失效，勿再迁移），落底（8pt 口径，
+    /// b8）即清；用户重新抓取列表（tracking）取消。
     @State private var bottomJumpActive = false
     /// #3（2026-11-07 UX 轮）：待删除确认的本地消息（长按菜单入口 → 会话页二次确认弹层）。
     @State private var pendingDeleteMessage: UiMessage?
-    /// #3'（2026-11-07 二轮）：回到底部按钮可见性——最后一条不在视口（超出贴底容差）即显示，
-    /// 逐帧更新（含内容增长驱动的几何变化，不等用户手势）。
-    /// #3'（2026-11-07 三轮改版）：回到底部按钮可见性——「末行底边离开视口」即显示。
-    /// 判定 = 距底距离 > max(贴底容差, 末行实测高度)：末行还在屏上（看见最新一条）→ 隐藏，
-    /// 末行底边滚出 → 显示；带 24pt 迟滞防阈值抖动。逐帧几何驱动（b4 口径，无滚动干扰）。
+    /// #3'（2026-11-07 b8 口径返工）：回底按钮显隐唯一依据——距底 > 8pt 容差即显示（
+    /// 「最后可见项不是底部哨兵」），≤ 容差即隐藏。b6 的 max(贴底容差, 末行实测高度)+迟滞
+    /// 组合按用户口径整体退场（lastRowHeight 上报链同撤）。
     @State private var showJumpToBottom = false
-    /// 最后一行实测高度（行内 onGeometryChange 上报，仅末行写入；长 markdown 回复可达千 pt）。
-    @State private var lastRowHeight: CGFloat = 0
     @Environment(\.inkColors) private var ink
     let conv: UiConversation
 
     /// 距底容差（pt）：吸收 overscroll 回弹/行内边距；上翻超过该值即视为离底。
     private static let bottomSlack: CGFloat = 80
+    /// 回底按钮判定容差（b8 口径）：距底 ≤ 此值 = 最后可见项是底部哨兵。
+    private static let jumpShowTolerance: CGFloat = 8
+    /// b8：滚动坐标系名（哨兵探针与视口测量的同一参照系）。
+    private static let scrollSpace = "hub.chat.scroll"
 
     /// wp-8②：当前会话实时行——conv 是导航时刻快照，hasActiveRun/activeRunId 随 run.* 事件
     /// 后续翻转，Stop 按钮态一律从会话列表现值取，不得用快照（会话列表 Flow 持续推送）。
@@ -475,7 +498,8 @@ struct HubChatView: View {
     }
 
     /// wp-12：时间线（消息滚动区 + 滚动锚定/贴底跟随/翻页恢复接线，wp-7①/wp-12 原样平移）——
-    /// body 中与空态占位互斥渲染：空→非空切换时 ScrollView 新建并 onAppear 锚底（语义不变）。
+    /// b8：程序化滚动保留 ScrollViewReader/proxy 路径（ScrollPosition 系 API 在本视图实测
+    /// 整体失效，见 bottomJumpActive 注释）。
     private var timeline: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -496,11 +520,17 @@ struct HubChatView: View {
                     }
                     ForEach(hub.messages, id: \.messageId) { m in
                         HubMessageRow(m: m, onDelete: { pendingDeleteMessage = m }).id(m.messageId)
-                            // #3'（2026-11-07 三轮改版）：末行高度上报（全部行挂观察、仅末行写入——
-                            // 不做条件包装，避免滚动中行结构身份翻转干扰 LazyVStack 测量；
-                            // b5 的 onScrollVisibilityChange 方案即因此破坏滚动且不触发，已撤）。
-                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
-                                if m.messageId == hub.messages.last?.messageId { lastRowHeight = h }
+                            // b8：末行视口位置探针（用户口径「last visible 是最底下的 item」——
+                            // 判定基准=最后一条消息行，不是垫行）。全部行挂观察、仅末行写入
+                            // （不做条件包装防结构翻转，b6 同款）；写入进非观测盒不触发重渲。
+                            .onGeometryChange(for: CGFloat.self) { geo in
+                                geo.frame(in: .named(HubChatView.scrollSpace)).maxY
+                            } action: { y in
+                                if m.messageId == hub.messages.last?.messageId {
+                                    sentinelBox.viewportY = y
+                                    let showJump = y > viewportHeight + Self.jumpShowTolerance
+                                    if showJump != showJumpToBottom { showJumpToBottom = showJump }
+                                }
                             }
                     }
                     // #6（2026-11-07 UX 轮）：底部贴距收窄——原 vertical 10 + 高度 4 垫行合计
@@ -510,47 +540,60 @@ struct HubChatView: View {
                 }
                 .padding(.horizontal, 14).padding(.top, 10)
             }
+            .coordinateSpace(name: Self.scrollSpace)
+            // b8：视口高（同一参照系；仅键盘/旋转等布局变化时写入，非逐帧）。
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                if viewportHeight != h { viewportHeight = h }
+            }
             .onScrollGeometryChange(for: ScrollProbe.self) { geo in
                 ScrollProbe(offsetY: geo.contentOffset.y,
                             contentHeight: geo.contentSize.height,
                             containerHeight: geo.containerSize.height,
+                            boundsHeight: geo.bounds.height,
                             insetBottom: geo.contentInsets.bottom)
             } action: { _, new in
                 probeBox.latest = new
-                // #3'（2026-11-07 三轮改版）：按钮可见性——距底 > max(容差, 末行高度) 显示、
-                // ≤ 该值（迟滞 24pt）隐藏（末行还在屏上 = 看得见最新一条）。逐帧几何驱动。
-                let distance = new.maxOffset - new.offsetY
-                let hideThreshold = max(Self.bottomSlack, lastRowHeight + 8)
-                if distance > hideThreshold + 24 {
-                    if !showJumpToBottom { showJumpToBottom = true }
-                } else if distance <= hideThreshold {
-                    if showJumpToBottom { showJumpToBottom = false }
-                }
-                // 钉底在途：逐帧 scrollTo 收敛（键盘 resize / 回底按钮共用），落底（容差内）即清。
+                // 贴底/按钮判定统一走哨兵几何信号（sentinelBox.viewportY，见其声明注释）；
+                // offset 公式因参照系偏移不可用，仅存档 probe 供键盘瞬移等消费。
+                // 钉底在途：逐帧 scrollTo 重放收敛（进页锚定/键盘 resize 共用），哨兵
+                // 进入视口底 8pt 内即清。
                 if bottomJumpActive {
                     proxy.scrollTo("bottom", anchor: .bottom)
-                    setAtBottom(probe: new)
-                    if distance <= Self.bottomSlack { bottomJumpActive = false }
+                    setAtBottom(sentinelY: sentinelBox.viewportY)
+                    if sentinelBox.viewportY <= viewportHeight + Self.jumpShowTolerance {
+                        bottomJumpActive = false
+                    }
                     return
                 }
                 // 流式 append 与程序化跟随滚动（animating）不改锚定态：内容增长会把
                 // 哨兵推到视口下方，若据此解锚，下一帧起跟随永久停摆。
                 guard userDrivenScroll else { return }
-                setAtBottom(probe: new)
+                setAtBottom(sentinelY: sentinelBox.viewportY)
             }
             .onScrollPhaseChange { _, new in
-                // 用户驱动相 = 手指/惯性；idle（含内容增长）与 animating（程序化跟随）除外。
-                let userDriven: Bool
                 switch new {
-                case .tracking, .interacting, .decelerating: userDriven = true
-                case .idle, .animating: userDriven = false
-                @unknown default: userDriven = false
+                case .tracking, .interacting:
+                    // 用户手指在场：开新手势链。
+                    recentUserGesture = true
+                    userDrivenScroll = true
+                case .decelerating:
+                    // 手势惯性 = 用户驱动；程序化对齐（defaultScrollAnchor/scrollTo 点定位）
+                    // 也呈 decelerating——无手势前科不算用户驱动（b8：误算会让对齐中途的
+                    // dist 偏大翻转锚定态、跟随停摆）。
+                    userDrivenScroll = recentUserGesture
+                case .idle:
+                    // 用户手势链结束补判一次（惯性停在半途按最终几何定锚定态，80pt 容差）；
+                    // 程序化滚动的 idle 不补判、且清除手势前科。
+                    if recentUserGesture { setAtBottom(sentinelY: sentinelBox.viewportY) }
+                    recentUserGesture = false
+                    userDrivenScroll = false
+                case .animating:
+                    userDrivenScroll = false
+                @unknown default:
+                    userDrivenScroll = false
                 }
-                userDrivenScroll = userDriven
                 // 用户重新抓取列表 = 取消自动钉底（人意愿优先于瞬移目标）。
                 if new == .tracking { bottomJumpActive = false }
-                // 手势/惯性结束在半途时用最终几何补判一次（惯性停在距底 30pt 也算在底）。
-                if !userDriven, let p = probeBox.latest { setAtBottom(probe: p) }
             }
             .onChange(of: hub.messages.count) { _, _ in
                 // wp-12：翻页行合入列表（顶部插入）后滚回触发前最老一行，保住阅读位置——
@@ -570,7 +613,13 @@ struct HubChatView: View {
                 guard atBottom || ownSend else { return }
                 proxy.scrollTo("bottom", anchor: .bottom)
             }
-            .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
+            .onAppear {
+                // b8 进页锚定：置钉底在途逐帧重放收敛（单次 scrollTo 恒落 LazyVStack 估算
+                // 点且物化修正后无校正——用户 b7 真机报「进入会话不能自动滑到底部」；重放
+                // 每次都是全新命令、随物化修正推进，末行进入视口底 8pt 内即清）。
+                bottomJumpActive = true
+                proxy.scrollTo("bottom", anchor: .bottom)
+            }
             // #4（2026-11-06 UX 轮）：键盘收起双通道——滑动列表渐进收起（interactively，
             // 系统键盘伴随）；点时间线空白处一次性收起（tap 不与长按菜单/按钮冲突）。
             .scrollDismissesKeyboard(.interactively)
@@ -593,14 +642,16 @@ struct HubChatView: View {
                 bottomJumpActive = true
                 proxy.scrollTo("bottom", anchor: .bottom)
             }
-            // #3'（2026-11-07 三轮）：回到底部悬浮按钮（输入区上方、最后一行不可见时出现）——
-            // 点击立即触发：置钉底在途 + 无动画瞬移（滑动/惯性中单次动画 scrollTo 会被在途
-            // 滚动吞掉；钉底逐帧重放直达，见 geometry action）。
+            // #3'（b8 口径）：回到底部悬浮按钮——点击中断惯性并动画滚到底部哨兵：先带动画
+            // 滚动（静止态平滑），同时置钉底在途——动画被在途滚动吞掉/估算落点不足时由逐帧
+            // 重放兜底必到底（b5 教训：滚动中单次 scrollTo 不可靠）。
             .overlay(alignment: .bottomTrailing) {
                 if showJumpToBottom {
                     Button {
                         bottomJumpActive = true
-                        proxy.scrollTo("bottom", anchor: .bottom)
+                        withAnimation(.smooth(duration: 0.3)) {
+                            proxy.scrollTo("bottom", anchor: .bottom)
+                        }
                     } label: {
                         Image(systemName: "chevron.down.circle.fill")
                             .font(.title3)
@@ -767,9 +818,11 @@ struct HubChatView: View {
         return c.agentId.isEmpty ? "会话" : c.agentId
     }
 
-    /// wp-7①：按滚动几何重判底部锚定态（仅写状态于翻转时，逐帧空转零重渲）。
-    private func setAtBottom(probe p: ScrollProbe) {
-        let nowAtBottom = (p.maxOffset - p.offsetY) <= Self.bottomSlack
+    /// wp-7①：按哨兵几何重判底部锚定态（仅写状态于翻转时，逐帧空转零重渲）。
+    /// b8：信号源从 offset 公式改为哨兵视口位置——offset 公式与真实可滚上限差恒定
+    /// 底部安全区偏移（实测 ~117pt），贴底时仍报「离底」，判定永假。
+    private func setAtBottom(sentinelY y: CGFloat) {
+        let nowAtBottom = y <= viewportHeight + Self.bottomSlack
         if nowAtBottom != atBottom { atBottom = nowAtBottom }
     }
 
@@ -902,13 +955,23 @@ private struct SlashCommandPanel: View {
 }
 
 /// wp-7①：滚动几何探针（onScrollGeometryChange 变换产物），供锚定态判定。
+/// b8：末行视口位置（named space，用户口径的「最底下的 item」底边）——0.4.6 纪律的
+/// 滚动路径非观测盒，逐帧更新不触发 body 重渲。
+private final class SentinelBox {
+    var viewportY: CGFloat = .infinity
+}
+
 private struct ScrollProbe: Equatable {
     let offsetY: CGFloat
     let contentHeight: CGFloat
     let containerHeight: CGFloat
+    let boundsHeight: CGFloat
     let insetBottom: CGFloat
 
-    var maxOffset: CGFloat { contentHeight + insetBottom - containerHeight }
+    /// b8 修正：可滚上限按 UIKit bounds（含 safeAreaInset composer 区）——SwiftUI 的
+    /// containerSize 不含该区（实测 668 vs 785），旧公式恒虚报 ~117pt：按钮常显、
+    /// 钉底收敛的 8pt 判定永不被满足（逐帧重放空转）。
+    var maxOffset: CGFloat { contentHeight - boundsHeight + insetBottom }
 }
 
 /// wp-7①：滚动几何暂存盒（引用类型 + 非观测）——逐帧写入不触发 body 重渲，

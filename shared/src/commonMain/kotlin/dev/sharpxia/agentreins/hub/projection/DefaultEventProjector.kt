@@ -113,6 +113,8 @@ private data class DataRunStatus(
     val retry: DataRunStatusRetry? = null,
     val errorMessage: String? = null,
     val stopReason: String? = null,
+    /** 2026-11-07：Bridge 对子 Agent 会话键（agent:<id>:subagent:*）帧附加的呈现说明（'子 Agent 执行中'）。 */
+    val detail: String? = null,
 )
 
 @Serializable
@@ -505,7 +507,7 @@ class DefaultEventProjector(
     private fun onToolStarted(envelope: EventEnvelope) {
         val d = decode(DataToolEvent.serializer(), envelope.data) ?: return skip()
         val callKey = d.resolvedKey ?: return skip() // 无调用关联键无法串联三态，跳过（丢弃计数）
-        val convId = resolveConversation(envelope, null, allowTwoHop = false)
+        val convId = resolveConversation(envelope, null, allowTwoHop = false, workActivityFallback = true)
         db.hubQueries.upsertToolStarted(
             gatewayId = envelope.gatewayId,
             runId = envelope.runId ?: return skip(), // tool 域信封必带 runId（06 §2.2）；缺即毒帧跳过
@@ -523,7 +525,7 @@ class DefaultEventProjector(
     private fun onToolFinished(envelope: EventEnvelope, status: String) {
         val d = decode(DataToolEvent.serializer(), envelope.data) ?: return skip()
         val callKey = d.resolvedKey ?: return skip()
-        val convId = resolveConversation(envelope, null, allowTwoHop = false)
+        val convId = resolveConversation(envelope, null, allowTwoHop = false, workActivityFallback = true)
         db.hubQueries.upsertToolFinished(
             gatewayId = envelope.gatewayId,
             runId = envelope.runId ?: return skip(),
@@ -538,11 +540,12 @@ class DefaultEventProjector(
     }
 
     /** wp-15 可选项：run.status（Bridge chat status/aborted 变体）→ 每 run 最新阶段帧。
-     *  只认自学习映射（v7 分域，同 tool.* 注释）。 */
+     *  只认自学习映射（v7 分域，同 tool.* 注释）；2026-11-07 起子 Agent 会话键回落归属主线卡
+     *  （workActivityFallback，仅本域与 tool.*——消息域不经此）。 */
     private fun onRunStatus(envelope: EventEnvelope) {
         val d = decode(DataRunStatus.serializer(), envelope.data) ?: return skip()
         val runId = envelope.runId ?: dataRunId(envelope) ?: return skip()
-        val convId = resolveConversation(envelope, null, allowTwoHop = false)
+        val convId = resolveConversation(envelope, null, allowTwoHop = false, workActivityFallback = true)
         db.hubQueries.upsertRunStatus(
             gatewayId = envelope.gatewayId,
             runId = runId,
@@ -562,6 +565,9 @@ class DefaultEventProjector(
         }
         d.errorMessage?.let { return it.take(SUMMARY_MAX) }
         d.stopReason?.let { return it.take(SUMMARY_MAX) }
+        // 2026-11-07：Bridge 子 Agent 帧附加说明（'子 Agent 执行中'）——优先级低于重试/错误，
+        // 高于无说明（retry/errorMessage 与它不会同时出现：子 Agent 帧是干净状态帧）。
+        d.detail?.let { return it.take(SUMMARY_MAX) }
         return null
     }
 
@@ -718,7 +724,12 @@ class DefaultEventProjector(
      * ② 自发送回执链——message.created 的 idempotencyKey 在本地命令队列（或乐观行）中携带
      * conversationId，学习后写映射（自学习即翻回 twoHop=0）；③ 仍无 → null（skip，校准兜底）。
      */
-    private fun resolveConversation(envelope: EventEnvelope, idempotencyKey: String?, allowTwoHop: Boolean): String? {
+    private fun resolveConversation(
+        envelope: EventEnvelope,
+        idempotencyKey: String?,
+        allowTwoHop: Boolean,
+        workActivityFallback: Boolean = false,
+    ): String? {
         val sk = envelope.sessionKey ?: return null
         val g = envelope.gatewayId
         db.hubQueries.selectConversationByKey(g, sk).executeAsOneOrNull()?.let { row ->
@@ -735,6 +746,19 @@ class DefaultEventProjector(
                     db.hubQueries.upsertConvKey(g, sk, convId)
                     return convId
                 }
+        }
+        if (workActivityFallback) {
+            // 2026-11-07 x总拍板（子 Agent 执行中提示）：子 Agent 会话键（agent:<id>:subagent:*）
+            // 的工作过程事件（tool.*/run.status 二域）归属到同 agent 主线卡——主卡工作条可见
+            // 「任务在子 Agent 上进行」（配 Bridge detail='子 Agent 执行中'）。仅呈现级归属：
+            // 不落 conv key 行（键不建卡）、消息域不经此（子 Agent 转录不污染主线卡时间线）。
+            val parts = sk.split(':')
+            if (parts.size >= 4 && parts[0] == "agent" && parts[2] == "subagent") {
+                val mainKey = "agent:${parts[1]}:main"
+                db.hubQueries.selectConversationByKey(g, mainKey).executeAsOneOrNull()
+                    ?.takeIf { it.twoHop == 0L }
+                    ?.let { return it.conversationId }
+            }
         }
         return null
     }

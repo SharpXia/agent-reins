@@ -353,6 +353,9 @@ struct HubChatView: View {
     @State private var keyboardBottomJump = false
     /// #3（2026-11-07 UX 轮）：待删除确认的本地消息（长按菜单入口 → 会话页二次确认弹层）。
     @State private var pendingDeleteMessage: UiMessage?
+    /// #3'（2026-11-07 二轮）：回到底部按钮可见性——最后一条不在视口（超出贴底容差）即显示，
+    /// 逐帧更新（含内容增长驱动的几何变化，不等用户手势）。
+    @State private var showJumpToBottom = false
     @Environment(\.inkColors) private var ink
     let conv: UiConversation
 
@@ -408,23 +411,9 @@ struct HubChatView: View {
         .padding(.horizontal, 14).padding(.top, 10)
     }
 
-    /// wp-15：工作过程披露条（置顶于时间线上方，与审批横条同位不进滚动区）——只在有已捕获
-    /// 内容时出现（零噪声）；数据 = HubStore.workActivity（当前打开会话，open 时订阅）。
-    /// 无工具活动/阶段帧的会话整条不渲染，历史会话也不虚构（断线窗口丢失面不回填）。
-    /// #4（2026-11-07 二轮）：回复流式在途时阶段呈现合成「生成回复中」（文本流起点是呈现
-    /// 语义，桥/投影不另发帧）。
-    @ViewBuilder
-    private var workProcessSection: some View {
-        if let wa = hub.workActivity, !wa.tools.isEmpty || !wa.phases.isEmpty {
-            WorkProcessBar(activity: wa, runActive: isRunActive, streamingReply: replyStreaming)
-                .padding(.horizontal, 14).padding(.top, 10)
-        }
-    }
-
-    /// 回复流式在途判定：存在非用户流式行（assistant streaming / dstream 占位行）。
-    private var replyStreaming: Bool {
-        hub.messages.contains { $0.state == "streaming" && $0.role != "user" }
-    }
+    /// #2'（2026-11-07 二轮，x总改版）：「工作过程」披露条整体撤显示——进行中信号收敛到回复
+    /// 占位行（「正在思考…/xx 正在处理中…」动画文案，见 HubMessageRow）；workActivity 数据面
+    /// 保留（isThinkingNow 判定依赖）。
 
     /// wp-12：已渲染最大真实 seq（桌面 ConversationScreen.maxRenderedSeq 同口径）——
     /// 乐观行占位 seq（Int64.max）与 failed 行不计入；streaming 行（含 dstream 占位行）
@@ -508,6 +497,9 @@ struct HubChatView: View {
                             insetBottom: geo.contentInsets.bottom)
             } action: { _, new in
                 probeBox.latest = new
+                // #3'（2026-11-07 二轮）：回到底部按钮可见性（逐帧、不等用户手势）。
+                let away = (new.maxOffset - new.offsetY) > Self.bottomSlack
+                if away != showJumpToBottom { showJumpToBottom = away }
                 // #4 二轮：键盘唤起瞬移在途——键盘 resize 使容器几何逐帧变化，逐帧 scrollTo
                 // 钉底（内容随键盘顶起、始终贴底），落底（容差内）即清交还常规锚定判定。
                 if keyboardBottomJump {
@@ -574,6 +566,27 @@ struct HubChatView: View {
                 keyboardBottomJump = true
                 proxy.scrollTo("bottom", anchor: .bottom)
             }
+            // #3'（2026-11-07 二轮）：回到底部悬浮按钮（输入区上方、尾行不可见时出现）。
+            .overlay(alignment: .bottomTrailing) {
+                if showJumpToBottom {
+                    Button {
+                        withAnimation(.easeOut(duration: 0.25)) {
+                            proxy.scrollTo("bottom", anchor: .bottom)
+                        }
+                    } label: {
+                        Image(systemName: "chevron.down.circle.fill")
+                            .font(.title3)
+                            .foregroundStyle(.secondary)
+                            .padding(9)
+                            .background(Circle().fill(.thinMaterial))
+                            .overlay(Circle().stroke(ink.borderTertiary, lineWidth: 1))
+                    }
+                    .padding(.trailing, 12)
+                    .padding(.bottom, 6)
+                    .accessibilityLabel("回到底部")
+                }
+            }
+            .animation(.easeInOut(duration: 0.15), value: showJumpToBottom)
         }
     }
 
@@ -590,7 +603,6 @@ struct HubChatView: View {
             if !sessionApprovals.isEmpty {
                 approvalBanner
             }
-            workProcessSection
             // wp-12：时间线空态占位（桌面 ConversationScreen「暂无消息」同型，空态纪律
             // 对齐会话列表空态）——空列表（打开瞬态/真空会话）整块替换时间线呈居中占位，
             // 首批快照落地即被时间线替换（ScrollView 重建，onAppear 锚底照走）。
@@ -866,9 +878,16 @@ private struct HubMessageRow: View {
                 VStack(alignment: m.role == "user" ? .trailing : .leading, spacing: 3) {
                     Group {
                         if m.content.isEmpty && m.state == "streaming" {
-                            // wp-7②：typing 指示动画——快照来源 streaming 行与 wp-5 live delta
-                            // 占位行（dstream:<runId>，首 delta 前 content 为空）同型呈现。
-                            TypingIndicator()
+                            // #2'（2026-11-07 二轮，x总改版）：工作过程条撤显示——进行中信号收敛到
+                            // 回复占位行：thinking 帧在途呈「正在思考…」，否则「<agent> 正在处理中…」
+                            //（三点脉冲 + 文案）；正文返回即被 Markdown/typewriter 替换。
+                            // 覆盖面含 dstream 占位行（首 delta 前 content 为空）。
+                            HStack(spacing: 8) {
+                                TypingIndicator()
+                                Text(hub.isThinkingNow ? "正在思考…" : "\(Self.agentDisplayLabel(hub)) 正在处理中…")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
                         } else if m.role == "user" {
                             // wp-8③：空 SENDING 用户行维持发送中态——不渲染空气泡，占位点显示、
                             // 状态徽标照常翻转（sending→delivered）。
@@ -962,6 +981,13 @@ private struct HubMessageRow: View {
         m.role == "user"
             && (m.uiState == "failed" || m.state == "failed")
             && !m.content.isEmpty
+    }
+
+    /// 占位行动画文案的 agent 显示名（会话快照 label → agentId → 兜底，与列表口径一致）。
+    private static func agentDisplayLabel(_ hub: HubStore) -> String {
+        guard let c = hub.selected else { return "Agent" }
+        if !c.label.isEmpty { return c.label }
+        return c.agentId.isEmpty ? "Agent" : c.agentId
     }
 
     // ── wp-8③：失败原因（六值脱敏闭集 → 人读文案） ──
@@ -1115,138 +1141,8 @@ struct ApprovalCardView: View {
     }
 }
 
-// ── wp-15：工作过程折叠披露条（tool.* 客户端捕获，对齐 grokbot「Worked」形态） ──
-
-/// wp-15：会话页「工作过程」披露条。数据面 = HubStore.workActivity（投影库 hubToolEvents +
-/// hubRunStatus 合流快照，AgentBridge.hubWatchWorkActivity 推送）。
-///
-/// 已知丢失面（06 §10.2，UI 诚实义务）：tool.*/run.status 断线窗口或入站限流丢弃**不补发**，
-/// 本条只呈现本地已捕获部分——计数语义是「已捕获 N 次」而非「本次 run 共 N 次调用」，不虚构完整；
-/// 重连后已捕获部分保留（v6 两表快照重建不清）。
-private struct WorkProcessBar: View {
-    @Environment(\.inkColors) private var ink
-    @State private var expanded = false
-    let activity: UiWorkActivity
-    /// 活跃 run 态（会话实时行）：在途工具/阶段配合它呈现「进行中」而非静止图标。
-    let runActive: Bool
-    /// #4（2026-11-07 二轮）：回复流式在途（会话页合成）——阶段行呈现为「生成回复中」，
-    /// 覆盖 thinking/启动模型两个中间态（文本流已开始，前置阶段是陈旧信息）。
-    let streamingReply: Bool
-
-    private var runningCount: Int { activity.tools.filter { $0.status == "running" }.count }
-    private var completedCount: Int { activity.tools.filter { $0.status == "completed" }.count }
-    private var failedCount: Int { activity.tools.filter { $0.status == "failed" }.count }
-
-    /// 最新阶段帧（Flow 按 ts 升序推送，取末帧）；run 已终态时投影清行，此处天然为 nil。
-    private var latestPhase: UiRunPhase? { activity.phases.last }
-
-    /// 头部计数摘要（零值段省略；全零但有阶段帧时只显阶段）。
-    private var countSummary: String {
-        var parts: [String] = []
-        if runningCount > 0 { parts.append("进行中 \(runningCount)") }
-        if completedCount > 0 { parts.append("完成 \(completedCount)") }
-        if failedCount > 0 { parts.append("失败 \(failedCount)") }
-        return parts.joined(separator: " · ")
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            DisclosureGroup(isExpanded: $expanded) {
-                VStack(alignment: .leading, spacing: 8) {
-                    if let phase = latestPhase {
-                        phaseRow(phase)
-                    }
-                    ForEach(activity.tools, id: \.toolCallKey) { t in
-                        toolRow(t)
-                    }
-                }
-                .padding(.top, 6)
-            } label: {
-                HStack(spacing: 8) {
-                    Label("工作过程", systemImage: "wrench.and.screwdriver")
-                        .font(.subheadline.weight(.medium))
-                    if runActive, runningCount > 0 || latestPhase != nil {
-                        ProgressView().controlSize(.mini)
-                    }
-                    if !countSummary.isEmpty {
-                        Text(countSummary)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer(minLength: 0)
-                }
-            }
-            .font(.subheadline)
-        }
-        .padding(.horizontal, 12).padding(.vertical, 8)
-        .background(RoundedRectangle(cornerRadius: 12).fill(ink.surfaceTertiary))
-    }
-
-    /// 阶段行：Gateway 启动 phase 枚举的人读呈现（闭集映射 + 原样兜底，非身份字段不涉 ADR-14）；
-    /// #4：流式在途时呈现为「生成回复中」（覆盖 thinking/启动模型中间态）。
-    private func phaseRow(_ p: UiRunPhase) -> some View {
-        let phase = streamingReply && runActive ? "generating" : p.phase
-        return HStack(alignment: .top, spacing: 8) {
-            Image(systemName: phase == "aborted" ? "exclamationmark.triangle" : "gearshape.2")
-                .font(.caption)
-                .foregroundStyle(phase == "aborted" ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
-                .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(Self.phaseText(phase)).font(.caption.weight(.medium))
-                if let detail = p.detail, !detail.isEmpty {
-                    Text(detail).font(.caption2).foregroundStyle(.secondary)
-                }
-            }
-        }
-    }
-
-    /// 工具行：状态徽标 + 工具名（缺省「工具调用」，不虚构名称）+ 有界入参摘要单行。
-    private func toolRow(_ t: UiToolActivity) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            switch t.status {
-            case "completed":
-                Image(systemName: "checkmark.circle.fill").font(.caption).foregroundStyle(.green).padding(.top, 2)
-            case "failed":
-                Image(systemName: "xmark.octagon.fill").font(.caption).foregroundStyle(.red).padding(.top, 2)
-            default: // running（含未知值保守呈现为在途）
-                ProgressView().controlSize(.mini).padding(.top, 2)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(t.toolName.isEmpty ? "工具调用" : t.toolName)
-                    .font(.caption.weight(.medium))
-                if let summary = t.summary, !summary.isEmpty {
-                    Text(summary)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-            }
-        }
-    }
-
-    /// Gateway 启动阶段闭集 → 人读文本（protocol.schema.json ChatEvent status 变体 phase 枚举）；
-    /// 未知值原样透出（加易读性的命名替换即可，不改语义）。
-    private static func phaseText(_ phase: String) -> String {
-        switch phase {
-        case "waiting_for_state": return "等待会话状态"
-        case "preparing_workspace": return "准备工作区"
-        case "naming_worktree": return "命名工作树"
-        case "creating_worktree": return "创建工作树"
-        case "running_setup": return "运行初始化"
-        case "provisioning_environment": return "准备运行环境"
-        case "preparing_context": return "准备上下文"
-        case "memory_flushing": return "整理记忆"
-        case "starting_model": return "启动模型"
-        // #4（2026-11-07 二轮）：thinking = Bridge 由 Gateway thinking 流折帧的状态信号
-        //（每 run 一帧）；generating = 客户端由流式行合成的呈现态（不发帧）。
-        case "thinking": return "思考中"
-        case "generating": return "生成回复中"
-        case "aborted": return "已中止"
-        default: return phase.isEmpty ? "运行中" : phase
-        }
-    }
-}
+// ── wp-15：工作过程披露条已撤显示（2026-11-07 二轮 x总改版：进行中信号收敛到回复占位行
+//    「正在思考…/xx 正在处理中…」；workActivity 数据面在 HubStore 保留，isThinkingNow 消费） ──
 
 /// wp-9：待审批清单（设置页「待审批」计数入口的落点）：全部 pending 审批，
 /// 含归属未学习的行（卡上标「未关联会话」）——那里没有会话页可挂，唯一可见处在此。

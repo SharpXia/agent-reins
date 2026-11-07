@@ -59,7 +59,15 @@ final class HubStore {
     /// 收敛为准（成功即触发一次校准，秒级；兜底 R4 周期），行在卡出现后自动翻成置灰。
     private(set) var createdConversationFor: Set<String> = []
 
-    // ---------- wp-15：工具活动捕获（「工作过程」折叠披露条数据面） ----------
+    /// #2'（2026-11-07 二轮，x总改版）：thinking 帧在途判定——当前打开会话最新阶段帧
+    /// phase=thinking（run 终态投影清行，帧存在即在途）。数据链：Gateway thinking 流 →
+    /// 桥折帧 run.status{thinking} → 投影 hubRunStatus → observeWorkActivity。驱动回复
+    /// 占位行「正在思考…」（否则「<agent> 正在处理中…」）。
+    var isThinkingNow: Bool {
+        workActivity?.phases.last?.phase == "thinking"
+    }
+
+    // ---------- wp-15：工具活动捕获（数据面保留：thinking 判定 + 通知/未来复用） ----------
 
     /// 当前打开会话的工作过程快照（投影库 Flow 推送：hubToolEvents 捕获行 + hubRunStatus
     /// 阶段帧合流，AgentBridge.hubWatchWorkActivity）。两表为本地累积捕获态——断线窗口内的
@@ -444,6 +452,13 @@ final class HubStore {
     //   noteApprovalRequested）。conversationId 由桥侧 hubConvKeys 解析（未映射 = 空串），
     //   Swift 侧按归属可得性显式降级，不编造归属。
 
+    /// #4（2026-11-07 二轮）：本地通知派发门槛——仅前台（后台由 APNs 单通道承载，前台 APNs
+    /// 横幅已在 NotificationCoordinator.willPresent 全量抑制：前台=本地/后台=远端，无双响）；
+    /// 重建（rebuilding）期间的会话列表推送是快照重放，旧消息 unread 差异不算「新回复」。
+    private var shouldNotifyLocally: Bool {
+        UIApplication.shared.applicationState == .active && syncPhase != "rebuilding"
+    }
+
     /// 会话列表推送喂通知差异面（主线程，KMP 回调）。
     private func noteConversationsPush(_ list: [UiConversation]) {
         guard conversationsPrimed else {
@@ -465,6 +480,7 @@ final class HubStore {
             guard now > prev else { continue }                       // assistant final 才增 unread
             guard selected?.conversationId != id else { continue }   // 当前打开不提醒（scope 语义）
             guard !mutedConversations.contains(id) else { continue } // 按会话静音
+            guard shouldNotifyLocally else { continue }              // #4：后台/重建期不派发本地通知
             notifications.replyArrived(conversationId: id, label: displayLabel(c))
         }
     }
@@ -478,6 +494,7 @@ final class HubStore {
         guard isLoggedIn else { return }
         let attributed = !conversationId.isEmpty
         if attributed, mutedConversations.contains(conversationId) { return }
+        guard shouldNotifyLocally else { return } // #4：后台/重建期不派发本地通知（后台 APNs 承载）
         let label: String? = attributed
             ? conversations.first { $0.conversationId == conversationId }.map(displayLabel)
             : nil
@@ -496,6 +513,7 @@ final class HubStore {
     private func noteRunTerminal(conversationId: String, runId: String, status: String) {
         guard isLoggedIn, !conversationId.isEmpty else { return }
         guard !mutedConversations.contains(conversationId) else { return }
+        guard shouldNotifyLocally else { return } // #4：后台/重建期不派发本地通知（后台 APNs 承载）
         guard status == "failed" else { return } // completed 等其余值不推送（桥只发两种）
         let label = conversations.first { $0.conversationId == conversationId }
             .map(displayLabel) ?? "会话"

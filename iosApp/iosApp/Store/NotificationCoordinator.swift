@@ -89,13 +89,17 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
 
     // ---------- UNUserNotificationCenterDelegate ----------
 
-    /// 前台也呈现横幅 + 声音（验收「前台收到审批与回复通知」；系统默认前台不呈现，必须显式放行）。
+    /// #4（2026-11-07 二轮，重复推送根修）：前台 APNs 横幅全量抑制——前台呈现完全由本地通知
+    /// 承载（replyArrived/runFailed/approvalRequested 均有本地路径，且仅前台派发），后台由
+    /// APNs 承载（进程挂起，本地无法派发）——前台/后台单通道切分，杀掉「APNs + 本地」同响。
+    /// 当前打开会话的推送因此也不再弹（消息在时间线实时可见）；锁屏/后台的系统呈现不受本
+    /// 回调影响。载荷事件类型在 userInfo（桥侧信封元数据），如需按类型差异化再启用。
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        completionHandler([.banner, .sound])
+        completionHandler([])
     }
 
     /// 点按通知（含冷启动）：会话归属在 userInfo 时回调 onTapConversation，由 HubStore 跳转；

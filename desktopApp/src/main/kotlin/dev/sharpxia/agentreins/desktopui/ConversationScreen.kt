@@ -38,6 +38,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -126,6 +127,15 @@ internal fun ConversationScreen(
     // 「组合窗中回车 = 提交候选词」与「普通回车 = 发送」——纯 String 拿不到该信号。
     var input by remember { mutableStateOf(TextFieldValue("")) }
     val listState = rememberLazyListState()
+    // 2026-11-07 二轮：回到底部按钮可见性——最后一条 item 不在视口即显示（derivedStateOf
+    // 只在跨阈值时重composition，逐帧布局信息不触发）
+    val showJumpToBottom by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+            lastVisible < info.totalItemsCount - 1
+        }
+    }
     val scope = rememberCoroutineScope()
     // 已读上报基线：只认真实服务端 seq（乐观行占位 seq=Long.MAX_VALUE、failed 行非服务端消息，均不计入）
     var reportedReadUpTo by remember { mutableStateOf(0L) }
@@ -348,20 +358,9 @@ internal fun ConversationScreen(
             }
         }
 
-        // wp-15：工作过程披露条（审批横条同位、时间线上方，iOS workProcessSection parity）——
-        // 只在有已捕获内容（工具行或阶段帧）时出现，零噪声；无活动会话不渲染、历史会话不虚构
-        // （断线窗口丢失面不回填，06 §10.2）；run 终态阶段行由投影清行，UI 只渲染快照。
-        AnimatedVisibility(
-            visible = shouldRenderWorkBar(workActivity.tools, workActivity.phases),
-            enter = fadeIn() + expandVertically(),
-            exit = fadeOut() + shrinkVertically(),
-        ) {
-            WorkProcessBar(
-                activity = workActivity,
-                runActive = isRunActive,
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-            )
-        }
+        // 2026-11-07 二轮（x总改版）：工作过程披露条整体撤显示（iOS workProcessSection 同批）——
+        // 进行中信号收敛到回复占位行「正在思考…/xx 正在处理中…」；workActivity 数据面保留
+        // （占位行 thinking 判定消费）。
 
         // 消息时间线（wp-5：空态对齐会话列表空态纪律——居中主行 + 灰色副行）
         if (messages.isEmpty()) {
@@ -380,8 +379,10 @@ internal fun ConversationScreen(
                 }
             }
         } else {
+            // 2026-11-07 二轮：回到底部悬浮按钮容器（最后一条 item 不在视口时浮现，见 overlay）
+            Box(Modifier.fillMaxWidth().weight(1f)) {
             LazyColumn(
-                modifier = Modifier.fillMaxWidth().weight(1f),
+                modifier = Modifier.fillMaxWidth(),
                 state = listState,
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -431,8 +432,31 @@ internal fun ConversationScreen(
                     }
                 }
                 items(messages, key = { it.messageId }) { m ->
-                    MessageRow(m, client, conversationId, scope)
+                    MessageRow(
+                        m,
+                        client,
+                        conversationId,
+                        scope,
+                        thinkingNow = workActivity.phases.lastOrNull()?.phase == "thinking",
+                        agentLabel = label.ifBlank { "Agent" },
+                    )
                 }
+            }
+            // 2026-11-07 二轮：回到底部悬浮按钮（iOS HubChatView 同款语义；最后一条不可见即浮现）
+            if (showJumpToBottom) {
+                TextButton(
+                    onClick = {
+                        scope.launch {
+                            listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
+                        }
+                    },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(12.dp),
+                ) {
+                    Text("↓ 回到底部", fontSize = 12.sp)
+                }
+            }
             }
         }
 
@@ -547,6 +571,9 @@ private fun MessageRow(
     client: DefaultHubClient,
     conversationId: String,
     scope: kotlinx.coroutines.CoroutineScope,
+    /** 2026-11-07 二轮：thinking 帧在途 + agent 显示名（占位行动画文案用，见流式空行分支）。 */
+    thinkingNow: Boolean,
+    agentLabel: String,
 ) {
     when {
         m.role.isEmpty() -> CompactionSeparator()
@@ -577,7 +604,7 @@ private fun MessageRow(
             ) {
                 when {
                     m.role == "user" -> UserMessageRow(m)
-                    else -> AssistantMessageRow(m)
+                    else -> AssistantMessageRow(m, thinkingNow, agentLabel)
                 }
             }
         }
@@ -622,7 +649,7 @@ private fun UserMessageRow(m: UiMessage) {
 }
 
 @Composable
-private fun AssistantMessageRow(m: UiMessage) {
+private fun AssistantMessageRow(m: UiMessage, thinkingNow: Boolean, agentLabel: String) {
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.Start,
@@ -632,9 +659,11 @@ private fun AssistantMessageRow(m: UiMessage) {
             shape = RoundedCornerShape(12.dp),
         ) {
             when {
-                // 流式空行：typing 占位（…▌，wp-7 同型；05 §3.11：流式行允许跳过 delta，终态由 created 收敛）
+                // 2026-11-07 二轮（x总改版，iOS 同口径）：工作过程条撤显示——进行中信号收敛到
+                // 回复占位行：thinking 帧在途呈「正在思考…」，否则「<agent> 正在处理中…」；
+                // 正文返回即被 Markdown 路径替换（05 §3.11：流式行允许跳过 delta，终态由 created 收敛）
                 m.state == "streaming" && m.content.isBlank() -> Text(
-                    "…▌",
+                    (if (thinkingNow) "正在思考…" else "$agentLabel 正在处理中…") + "▌",
                     fontStyle = FontStyle.Italic,
                     color = Color(0xFF999999),
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),

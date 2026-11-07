@@ -72,9 +72,51 @@ import dev.sharpxia.agentreins.hub.UiApproval
 import dev.sharpxia.agentreins.hub.UiConversation
 import dev.sharpxia.agentreins.hub.UiMessage
 import dev.sharpxia.agentreins.hub.UiWorkActivity
+import dev.sharpxia.agentreins.hub.projection.CommandsList
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.launch
 
 private const val OPTIMISTIC_SEQ_SENTINEL: Long = Long.MAX_VALUE
+
+/** 动态斜杠命令目录内存缓存 TTL（2026-11-07 动态目录轮）：5 分钟，过期即重拉。 */
+private const val SLASH_COMMANDS_TTL_MS: Long = 5 * 60 * 1000L
+
+/**
+ * 动态斜杠命令目录内存缓存（桌面轻量单例，会话键 → (目录, 取数时刻)）：进程级共享、不落盘
+ * ——端点 #21 是纯读目录（服务端解析 conversationId，响应体无 sessionKey 外泄面），缓存
+ * 丢失的代价只是一次重拉。限流纪律：TTL + 仅 "/" 草稿触发拉取，远低于列表类 60 次/分/设备。
+ */
+private object SlashCommandsCache {
+    private val entries = mutableMapOf<String, Pair<CommandsList, Long>>()
+
+    /** 未过期返回目录，否则 null（过期与缺失同口径，调用方重拉）。 */
+    @Synchronized
+    fun valid(conversationId: String, nowMs: Long = System.currentTimeMillis()): CommandsList? =
+        entries[conversationId]
+            ?.takeIf { nowMs - it.second < SLASH_COMMANDS_TTL_MS }
+            ?.first
+
+    @Synchronized
+    fun put(conversationId: String, list: CommandsList, nowMs: Long = System.currentTimeMillis()) {
+        entries[conversationId] = list to nowMs
+    }
+}
+
+/**
+ * 端点 #21 拉取（纯读直调 REST，不走命令队列）：经 runtime.authStack 复用 bearer 刷新栈调
+ * HubApi.commands(conversationId)，与 loadEarlierMessages 同款通道纪律。返回 null = 通道
+ * 不可用（未登录）或 REST 未成功，调用方保留静态六降级；Cancel 不吞（屏幕销毁即放弃）。
+ */
+private suspend fun fetchSlashCommands(client: DefaultHubClient, conversationId: String): CommandsList? {
+    val stack = client.runtime.authStack ?: return null
+    return try {
+        stack.auth.withBearer { stack.api.commands(conversationId) }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
+    }
+}
 
 /**
  * 会话页（wp-6 验收④ + wp-10 交互 parity + wp-18 渲染）：消息时间线（乐观行 + 流式行 +
@@ -102,6 +144,8 @@ private const val OPTIMISTIC_SEQ_SENTINEL: Long = Long.MAX_VALUE
  * - 斜杠命令面板：draft 由 "/" 起手时悬浮于发送区上方，选中即动作（目录/前缀筛选/带参
  *   预填语义见 SlashCommandCatalog + SlashCommandRules——无参命令即选即发走发送同通道，
  *   带参命令预填命令文本续写参数；无命中/进入参数书写段自动收起，其余输入零干扰）；
+ * - 动态目录（2026-11-07 轮）：目录 = 端点 #21 动态条目 ∪ 静态六（动态优先静态保底），
+ *   "/" 草稿触发拉取、5 分钟 TTL 内存缓存、失败回落静态六（见 SlashCommandsCache）；
  * - Enter（无 Shift）发送、Shift+Enter 换行、Cmd/Ctrl+Enter 兜底发送（裁决纯函数
  *   resolveEnterKey；IME 组合中的 Enter 属提交候选词，不触发）；
  * - 活跃 run 期间「运行中发送将排队」提示（iOS wp-14 同文案同语义：chat.send 不透传
@@ -323,9 +367,48 @@ internal fun ConversationScreen(
         }
     }
 
+    // 2026-11-07 动态目录轮：动态斜杠命令目录（REST 端点 #21）会话态 + 草稿触发拉取（下方
+    // LaunchedEffect）；合并规则见 SlashCommandRules.mergedSlashCommands（动态优先、静态保底）。
+    var dynamicCommands by remember(conversationId) {
+        mutableStateOf(SlashCommandsCache.valid(conversationId))
+    }
+    var slashFetchInFlight by remember(conversationId) { mutableStateOf(false) }
+    var slashFetchFailed by remember(conversationId) { mutableStateOf(false) }
+    LaunchedEffect(input.text, conversationId) {
+        if (!input.text.startsWith("/")) {
+            // 退出斜杠态重置失败标记：下次再进 "/" 草稿即重试（桌面侧「重新聚焦」对位语义）
+            slashFetchFailed = false
+            return@LaunchedEffect
+        }
+        if (slashFetchInFlight || slashFetchFailed) return@LaunchedEffect
+        val cached = SlashCommandsCache.valid(conversationId)
+        if (cached != null) {
+            dynamicCommands = cached
+            return@LaunchedEffect
+        }
+        slashFetchInFlight = true
+        // 取数挂屏幕级 scope（而非本 effect 协程）：逐字符键入会重启本 effect 并取消在途
+        // REST，残留 in-flight 标记死锁；挂屏幕 scope 生命周期与「聚焦重试」语义一致。
+        scope.launch {
+            val fetched = fetchSlashCommands(client, conversationId)
+            slashFetchInFlight = false
+            if (fetched == null) {
+                // 失败保留静态六，不缓存不静默重试（下次退出/再进斜杠态或换会话再试）
+                slashFetchFailed = true
+            } else {
+                SlashCommandsCache.put(conversationId, fetched)
+                dynamicCommands = fetched
+            }
+        }
+    }
+
     // wp-6：斜杠命令建议——draft 起手 "/" 且未进入参数书写段时给出目录前缀命中；普通消息、
     // URL、多行草稿等其余输入零干扰不触发（筛选细则见 SlashCommandCatalog.suggestions）。
-    val slashSuggestions = SlashCommandCatalog.suggestions(forDraft = input.text)
+    // 动态目录轮：数据源换合并目录（动态 #21 ∪ 静态六），筛选与 Enter 裁决语义零改动。
+    val slashSuggestions = SlashCommandCatalog.suggestions(
+        forDraft = input.text,
+        catalog = mergedSlashCommands(dynamicCommands?.commands ?: emptyList()),
+    )
 
     Column(modifier = Modifier.fillMaxSize()) {
         // 头部：会话名（投影 label）

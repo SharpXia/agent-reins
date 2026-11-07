@@ -384,8 +384,16 @@ struct HubChatView: View {
 
     /// wp-14：斜杠命令建议——draft 起手 "/" 且未进入参数书写段时给出目录前缀命中；普通消息、
     /// URL、多行草稿等其余输入零干扰不触发（筛选细则见 SlashCommandCatalog.suggestions）。
+    /// #21（v1.1 additive 2026-11-07）：数据源 = 动态目录 ∪ 静态六合并（动态优先，见
+    /// SlashCommandCatalog.merged）；动态列表取 HubStore 缓存，未拉取/未命中即纯静态六。
     private var slashSuggestions: [SlashCommand] {
-        SlashCommandCatalog.suggestions(forDraft: draft)
+        SlashCommandCatalog.suggestions(forDraft: draft, from: slashCommands)
+    }
+
+    /// #21：合并命令目录——动态列表读 HubStore 缓存（fetchCommandsIfNeeded 在 composer
+    /// onChange 触发拉取），无动态项时即静态六原序，行为与旧版零差异。
+    private var slashCommands: [SlashCommand] {
+        SlashCommandCatalog.merged(dynamic: hub.commandsCache[conv.conversationId]?.commands ?? [])
     }
 
     /// wp-14：斜杠命令选中。无参命令即选即发——与发送键同一通道（hub.send → message.send 普通
@@ -645,6 +653,11 @@ struct HubChatView: View {
                     .lineLimit(1...4)
                     .padding(8)
                     .background(RoundedRectangle(cornerRadius: 18).fill(ink.surfaceTertiary))
+                    // #21：草稿以 "/" 起手时按需拉取动态命令目录（TTL 5 分钟缓存 + 在途去重
+                    // 在 HubStore.fetchCommandsIfNeeded；其余输入空转零网络）。
+                    .onChange(of: draft) { _, new in
+                        hub.fetchCommandsIfNeeded(conversationId: conv.conversationId, draft: new)
+                    }
                 if isRunActive {
                     // wp-8②：Stop 按钮（grokbot 式常驻）——活跃 run 期间替代发送键；中止后部分
                     // 输出保留由 Gateway 权威收敛（run.aborted 回流投影库，UI 只翻转回发送键）。
@@ -786,11 +799,11 @@ private struct SlashCommand: Identifiable, Equatable {
     var id: String { name }
 }
 
-/// wp-14：命令目录初版（客户端自建）。scope 命名的 Gateway 原生斜杠六命令；steer/followup
+/// wp-14：命令目录初版（客户端自建静态六）。scope 命名的 Gateway 原生斜杠六命令；steer/followup
 /// 对应 chat.send queueMode 词汇族（protocol.schema.json ChatSendParams.queueMode，
 /// research/01:113；research/01:236 注明 sessions.steer 为 queueMode:"interrupt" 废弃别名）。
-/// 目录动态化可后续接 Gateway commands.list（方法注册表在册、scope operator.read）——本轮
-/// 按拍板「零改动」不接，静态目录可增行扩展。
+/// #21（v1.1 additive 2026-11-07）：目录动态化已接 Gateway commands.list（REST #21 有界透传，
+/// HubStore.fetchCommandsIfNeeded 拉取）——静态六降级为「失败回落/保底」目录，仍可增行扩展。
 private enum SlashCommandCatalog {
     static let all: [SlashCommand] = [
         SlashCommand(name: "/new", summary: "开启全新会话上下文", takesArgument: false),
@@ -804,11 +817,43 @@ private enum SlashCommandCatalog {
     /// 触发与筛选：draft 以 "/" 起手且尚未出现空白（用户仍在选命令、未写参数）时，按整段
     /// draft 对命令名做前缀匹配；draft 为单独 "/" 时展示全目录；无命中返回空 = 面板隐藏，
     /// 不拦自由输入（用户仍可发送任意文本，含未知斜杠命令——Gateway 侧原生裁决）。
-    static func suggestions(forDraft draft: String) -> [SlashCommand] {
+    /// 数据源由调用方传入（merged 动态 ∪ 静态结果），本函数只做筛选不改目录。
+    static func suggestions(forDraft draft: String, from all: [SlashCommand]) -> [SlashCommand] {
         guard draft.hasPrefix("/") else { return [] }
         guard !draft.contains(" "), !draft.contains("\t"), !draft.contains("\n") else { return [] }
         if draft == "/" { return all }
         return all.filter { $0.name.hasPrefix(draft) }
+    }
+
+    /// #21：动态 ∪ 静态六合并——归一键 = 去前导 "/"（动态 name 本无 "/"——Gateway mapCommand
+    /// 已剥；静态 name 带 "/"；防御性再剥一次防上游形态变化），动态优先、静态保底（服务端
+    /// 目录是权威，同名静态行让位），保持动态在前静态在后的稳定次序。动态项展示/发送文本 =
+    /// textAliases 首选，防御性补前导 "/"（契约未钉死别名带前缀；裸别名会被面板
+    /// hasPrefix("/") 筛选静默消失，对位桌面 SlashCommandRules.mergedSlashCommands），
+    /// 缺省 "/" + name；Kotlin description 属性 ObjC 导出为 description_
+    /// （与 NSObject.description 撞名自动加下划线），Kotlin 侧字段名不变。
+    static func merged(dynamic: [CommandListItem]) -> [SlashCommand] {
+        var merged: [SlashCommand] = []
+        var seen: Set<String> = []
+        seen.reserveCapacity(dynamic.count + all.count)
+        for item in dynamic {
+            let key = normalizedKey(item.name)
+            guard !key.isEmpty, seen.insert(key).inserted else { continue }
+            merged.append(SlashCommand(
+                name: item.textAliases?.first
+                    .flatMap { $0.isEmpty ? nil : ($0.hasPrefix("/") ? $0 : "/" + $0) }
+                    ?? "/" + item.name,
+                summary: item.description_,
+                takesArgument: item.acceptsArgs))
+        }
+        for cmd in all where seen.insert(normalizedKey(cmd.name)).inserted {
+            merged.append(cmd)
+        }
+        return merged
+    }
+
+    private static func normalizedKey(_ name: String) -> String {
+        name.hasPrefix("/") ? String(name.dropFirst()) : name
     }
 }
 
@@ -1286,7 +1331,9 @@ private struct StreamingTypewriter: View {
     private static let tickNanos: UInt64 = 16_000_000
 
     var body: some View {
-        MarkdownView(content: String(content.prefix(revealedCount ?? content.count)))
+        // streaming=true：typewriter 逐字前缀行跳过 JSON 卡嗅探（仅 final 嗅探，对位桌面
+        // jsonCardPayloadOrNull 的 streaming 闸——[]/{} 这类瞬时合法前缀不闪卡）。
+        MarkdownView(content: String(content.prefix(revealedCount ?? content.count)), streaming: true)
             .onAppear {
                 if revealedCount == nil { revealedCount = content.count; lastSeen = content }
             }

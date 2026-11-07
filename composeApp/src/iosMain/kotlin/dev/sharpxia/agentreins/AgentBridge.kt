@@ -13,6 +13,7 @@ import dev.sharpxia.agentreins.hub.UiWorkActivity
 import dev.sharpxia.agentreins.hub.auth.DeviceInfo
 import dev.sharpxia.agentreins.hub.db.createHubDriver
 import dev.sharpxia.agentreins.hub.db.openHubDatabase
+import dev.sharpxia.agentreins.hub.projection.CommandsList
 import dev.sharpxia.agentreins.hub.projection.EventEnvelope
 import dev.sharpxia.agentreins.hubdb.HubDatabase
 import kotlinx.coroutines.CoroutineScope
@@ -254,6 +255,22 @@ class AgentBridge {
     /** 发送消息（幂等队列 + 乐观行；进度经 command.acked/message.created 事件翻转）。 */
     fun hubSend(conversationId: String, text: String) {
         scope.launch { runCatching { hubClient?.commands?.sendMessage(conversationId, text) } }
+    }
+
+    /**
+     * 动态斜杠命令目录查询（端点 #21，v1.1 additive 2026-11-07；**纯读直调，不走幂等队列**——
+     * 命令目录是查询面无副作用，写路径纪律不适用）。读机制与 [hubDevices] 同式（authStack +
+     * withBearer 直调 REST）；onResult 非 null = 成功（可能为空目录，truncated 等其余字段按需
+     * 消费）；null = 通道不可用（未登录/网络不可达/Hub FAILED）——调用方回落静态六命令目录、
+     * 下次触发重试，尽力而为增强面（不弹错误 UI，与 hubReportApnsToken 同纪律）。
+     */
+    fun hubCommands(conversationId: String, onResult: (CommandsList?) -> Unit) {
+        scope.launch {
+            onResult(runCatching {
+                val stack = hubRuntime.authStack ?: throw HubException.notLoggedIn()
+                stack.auth.withBearer { stack.api.commands(conversationId) }
+            }.getOrNull())
+        }
     }
 
     /**

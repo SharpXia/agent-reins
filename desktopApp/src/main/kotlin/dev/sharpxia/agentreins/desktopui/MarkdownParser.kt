@@ -17,7 +17,8 @@ internal sealed interface MdBlock {
     data class Heading(val level: Int, val spans: List<MdSpan>) : MdBlock
     /** 段落：多行原文按行独立解析后合并（保留作者换行，聊天消息依赖换行排版）。 */
     data class Paragraph(val lines: List<List<MdSpan>>) : MdBlock
-    data class CodeBlock(val code: String) : MdBlock
+    /** [language] = 围栏 info string 首段（```json → "json"）：JSON 卡分支按它免首字符闸门；此前连语言都丢弃。 */
+    data class CodeBlock(val code: String, val language: String? = null) : MdBlock
     data class ListBlock(val items: List<MdListItem>) : MdBlock
 }
 
@@ -40,6 +41,13 @@ internal sealed interface MdSpan {
 
 /** 流式行光标（wp-6 既有形态：内容尾随 ▌）。 */
 internal const val MD_CURSOR = "▌"
+
+/**
+ * JSON 判定前剥离流式光标（MarkdownText 用）：流式行代码块末尾的 ▌（wp-6「content + ▌」
+ * 语义）不是 JSON 语法成分，不剥会把合法终态误判成解析失败而永远回落既有渲染。
+ */
+internal fun stripMdCursor(text: String): String =
+    if (text.endsWith(MD_CURSOR)) text.removeSuffix(MD_CURSOR) else text
 
 private val MD_HEADING = Regex("""^(#{1,6})\s+(.+)$""")
 private val MD_LIST_ITEM = Regex("""^(\s*)([-*+]|\d{1,9}[.)])\s+(.+)$""")
@@ -107,6 +115,10 @@ internal fun parseMarkdownBlocks(text: String, cursor: Boolean = false): List<Md
             trimmed.startsWith("```") || trimmed.startsWith("~~~") -> {
                 flushParagraph(); flushList()
                 val fence = trimmed.take(3)
+                // info string 首段作语言标注（```json extra → "json"）：dropWhile 兼容 4+ 反引号围栏，
+                // 首段（首个空白前）即语言，其余参数按 CommonMark 惯例忽略
+                val language = trimmed.dropWhile { it == '`' || it == '~' }.trim()
+                    .substringBefore(' ').takeIf { it.isNotEmpty() }
                 val code = StringBuilder()
                 i++
                 while (i < lines.size) {
@@ -117,7 +129,7 @@ internal fun parseMarkdownBlocks(text: String, cursor: Boolean = false): List<Md
                 }
                 // 未闭合围栏：剩余全部按代码块（流式渐进安全，不把后半段当正文误渲染）
                 if (code.isNotEmpty()) code.deleteCharAt(code.length - 1)
-                blocks += MdBlock.CodeBlock(code.toString())
+                blocks += MdBlock.CodeBlock(code.toString(), language)
             }
             line.isBlank() -> { flushParagraph(); flushList(); i++ }
             else -> {

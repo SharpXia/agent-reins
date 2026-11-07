@@ -11,6 +11,7 @@ import dev.sharpxia.agentreins.hub.auth.RefreshRequest
 import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
 import dev.sharpxia.agentreins.hub.projection.ApprovalDecisionRequest
 import dev.sharpxia.agentreins.hub.projection.CommandReceipt
+import dev.sharpxia.agentreins.hub.projection.CommandsList
 import dev.sharpxia.agentreins.hub.projection.ConversationsPage
 import dev.sharpxia.agentreins.hub.projection.CreateConversationRequest
 import dev.sharpxia.agentreins.hub.projection.EventsPage
@@ -34,6 +35,8 @@ import dev.sharpxia.agentreins.hub.projection.CancelRunRequest
  *   = 忽略未知字段、宽松解析、不因新增字段失败
  * - 通用（08 §1.1）：每响应带 `x-hub-api-version: 1` 与 `x-request-id`（排障必须引用）；
  *   错误形状见 [HubErrorPayload]；命令类端点共用 202 + CommandReceipt（ADR-07：进度只经事件流）
+ * - 端点 #21（v1.1 additive，2026-11-07）：GET /v1/conversations/{conversationId}/commands
+ *   （动态斜杠命令目录）——additive 新增端点，不升版、不重钉 tag；调用方按 08 §1.1 忽略未知字段
  */
 interface HubApi {
     // ── 认证（#1 / #2，公开端点） ─────────────────────────────────────────
@@ -85,6 +88,15 @@ interface HubApi {
 
     /** Agent 状态查询（#18，纯投影派生无副作用；限流走列表类）。 */
     suspend fun agentStatus(gatewayId: String, agentId: String): AgentStatusResponse
+
+    /**
+     * 端点 #21（v1.1 additive，2026-11-07）：动态斜杠命令目录——Gateway commands.list 有界透传，
+     * scope=text/includeArgs=false 服务端钉死（契约形状 HubModels.CommandListItem）；服务端解析
+     * conversationId，无查询参数、无分页。纯读无副作用，限流走列表类（08 §9.1 每设备 60 次/分钟）；
+     * 404 = 会话不存在/无权（HUB-BIZ-002 防枚举既有语义），503 = 桥离线/查询超时/上游不可用。
+     * truncated=true 表示列表被截断（Gateway 500 上限或桥帧预算），客户端按已有列表渲染即可。
+     */
+    suspend fun commands(conversationId: String): CommandsList
 
     /** 会话重命名命令 conversation.rename（#19）；结果经 session.updated 事件与列表投影更新。404 HUB-BIZ-002。 */
     suspend fun renameConversation(conversationId: String, req: RenameConversationRequest): CommandReceipt

@@ -12,6 +12,7 @@ import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
 import dev.sharpxia.agentreins.hub.projection.ApprovalDecisionRequest
 import dev.sharpxia.agentreins.hub.projection.CancelRunRequest
 import dev.sharpxia.agentreins.hub.projection.CommandReceipt
+import dev.sharpxia.agentreins.hub.projection.CommandsList
 import dev.sharpxia.agentreins.hub.projection.ConversationsPage
 import dev.sharpxia.agentreins.hub.projection.CreateConversationRequest
 import dev.sharpxia.agentreins.hub.projection.EventsPage
@@ -116,6 +117,10 @@ class DefaultHubApi(
 
     override suspend fun agentStatus(gatewayId: String, agentId: String): AgentStatusResponse =
         get("/gateways/$gatewayId/agents/$agentId/status")
+
+    /** #21（v1.1 additive）：动态斜杠命令目录；路径参数不含用户自由文本，直拼安全（既有 get 样板）。 */
+    override suspend fun commands(conversationId: String): CommandsList =
+        get("/conversations/$conversationId/commands")
 
     override suspend fun renameConversation(conversationId: String, req: RenameConversationRequest): CommandReceipt =
         patch("/conversations/$conversationId", req)

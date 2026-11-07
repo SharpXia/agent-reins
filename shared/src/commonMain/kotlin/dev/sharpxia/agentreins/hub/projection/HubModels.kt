@@ -214,6 +214,38 @@ data class AgentStatusResponse(
     val lastSeenAt: String? = null,
 )
 
+/**
+ * 端点 #21 命令目录项（v1.1 additive，2026-11-07）：Gateway commands.list 的**有界透传视图**——
+ * 服务端只回白名单字段，args/nativeName 等内幕字段不过客户端面（去会话化纪律同时生效：
+ * 请求/响应体零 sessionId/sessionKey）。展示/发送文本取 textAliases 首选（Gateway mapCommand
+ * 已剥前导 "/"，name 本无斜杠），缺省由客户端补 "/"；category 为 Gateway 六分类的可读枚举
+ * （session/options/status/management/media/tools），未知值客户端原样展示。
+ */
+@Serializable
+data class CommandListItem(
+    /** 归一命令名（无前导 "/"，Gateway 已剥）；客户端合并去重键 = 去前导 "/" 后本值。 */
+    val name: String,
+    /** 展示/发送文本别名（契约 "/" 前缀闭集 ≤20）；缺省时客户端以 "/" + name 兜底。 */
+    val textAliases: List<String>? = null,
+    /** 人读描述（≤2000，客户端面板一行截断展示）。 */
+    val description: String,
+    /** Gateway 六分类（session/options/status/management/media/tools）；上游缺省即 null。 */
+    val category: String? = null,
+    /** 来源：native / skill / plugin。 */
+    val source: String,
+    /** true = 接参数：选中预填「名+空格」续写（既有行为，零改动）。 */
+    val acceptsArgs: Boolean,
+    /** 仅 skill 来源带（展示名）；native/plugin 缺省 null。 */
+    val skillDisplayName: String? = null,
+)
+
+/** 端点 #21 响应体（v1.1 additive）：truncated=true 表示列表被截断（Gateway 500 上限无分页或桥帧预算 256KiB）。 */
+@Serializable
+data class CommandsList(
+    val commands: List<CommandListItem> = emptyList(),
+    val truncated: Boolean? = null,
+)
+
 @Serializable
 data class CommandReceipt(
     val commandId: String,

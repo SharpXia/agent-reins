@@ -138,6 +138,57 @@ final class HubStore {
 
     private var devicesCache: [DeviceInfo]? = nil
 
+    // ---------- #21：动态斜杠命令目录（v1.1 additive，2026-11-07；纯读增强面） ----------
+
+    /// 动态命令目录缓存（conversationId → REST #21 回执）。纯内存、随登出清空；TTL 5 分钟
+    /// （拍板口径），过期后下次 "/" 起手重拉。失败不缓存——静态六继续兜底，下次触发重试。
+    private(set) var commandsCache: [String: CommandsList] = [:]
+
+    /// 缓存拉取时刻（TTL 判定基准；与 commandsCache 同键同生命周期）。
+    private var commandsFetchedAt: [String: Date] = [:]
+
+    /// 在途去重：同会话并发触发只发一次请求（列表类限流每设备 60 次/分钟，不做并发重放）。
+    private var commandsInFlight: Set<String> = []
+
+    /// 拉取失败标记（conversationId）：失败后维持静态六；同「/ 输入段」内不逐键重试——
+    /// 否则离线时打 "/hello" 会逐键各发一请求（撞限流口径）。退出 "/" 起手再重新进入 =
+    /// 新触发段，允许重试（≈「下次聚焦重试」口径，重进会话页同样重开触发段）。
+    private var commandsFailed: Set<String> = []
+
+    /// 「/ 输入段」判定基准：上一次触发时草稿是否以 "/" 起手（非 "/" → "/" 的翻转 = 新段）。
+    private var commandsSlashSession: [String: Bool] = [:]
+
+    private static let commandsCacheTTL: TimeInterval = 300
+
+    /// 草稿以 "/" 起手时按需拉取动态目录（触发面 = composer onChange(of: draft)；缓存新鲜即空转，
+    /// 其余输入零干扰不触发）。失败（onResult null）静默吞——维持静态六目录，不弹错误 UI
+    /// （尽力而为增强面，与 hubReportApnsToken 同纪律）。
+    func fetchCommandsIfNeeded(conversationId: String, draft: String) {
+        let slashDraft = draft.hasPrefix("/")
+        guard isLoggedIn, slashDraft else {
+            commandsSlashSession[conversationId] = false
+            return
+        }
+        let newSlashSession = commandsSlashSession[conversationId] != true
+        commandsSlashSession[conversationId] = true
+        if let fetchedAt = commandsFetchedAt[conversationId],
+           Date().timeIntervalSince(fetchedAt) < Self.commandsCacheTTL { return }
+        guard !commandsInFlight.contains(conversationId) else { return }
+        if commandsFailed.contains(conversationId), !newSlashSession { return }
+        commandsInFlight.insert(conversationId)
+        bridge.hubCommands(conversationId: conversationId) { [weak self] list in
+            guard let self else { return }
+            self.commandsInFlight.remove(conversationId)
+            guard let list else {
+                self.commandsFailed.insert(conversationId)
+                return
+            }
+            self.commandsFailed.remove(conversationId)
+            self.commandsCache[conversationId] = list
+            self.commandsFetchedAt[conversationId] = Date()
+        }
+    }
+
     // ---------- wp-11：设备管理错误态（与同页审批卡显式降级纪律一致） ----------
 
     /// 设备清单拉取失败（hubDevices devices null = 未登录/网络不可达/Hub FAILED）：设置页设备
@@ -828,6 +879,12 @@ final class HubStore {
         devicesCache = nil
         devicesError = nil
         revokeFailure = nil
+        // #21：动态命令目录随登出清空（重登后从空缓存 bootstrap，下次 "/" 起手重拉）
+        commandsCache = [:]
+        commandsFetchedAt = [:]
+        commandsInFlight = []
+        commandsFailed = []
+        commandsSlashSession = [:]
         chatPush = false
         // wp-10：连接相位复位（同步栈已停转，重登后 watchPhase 重新挂订阅）
         syncPhase = "catching"

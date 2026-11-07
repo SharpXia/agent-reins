@@ -173,7 +173,6 @@ internal class DesktopNotificationCoordinator(
     /** 登录后首个推送只记基线（bootstrap 快照积压不算「到达」，iOS conversationsPrimed 同构）。 */
     private var primed = false
     private val lastUnread = HashMap<String, Int>()
-    private val replySuppressUntilNanos = HashMap<String, Long>()
     private var latestConversations: List<UiConversation> = emptyList()
 
     internal fun handleEvent(classified: Classified) {
@@ -196,7 +195,6 @@ internal class DesktopNotificationCoordinator(
             // 全空推送 = 登出清库后的空窗：基线清零（重登快照从零重记，不误报「到达」）
             primed = false
             lastUnread.clear()
-            replySuppressUntilNanos.clear()
             return
         }
         if (!primed) {
@@ -212,11 +210,8 @@ internal class DesktopNotificationCoordinator(
             if (prev == null || now <= prev) return@forEach
             if (c.conversationId == openConversationId) return@forEach // 当前打开不提醒
             // wp-9：按会话静音（iOS HubStore.noteConversationsPush 同位 guard）——位置在「当前
-            // 打开」之后、抑制窗之前，与 iOS 同序
+            // 打开」之后，与 iOS 同序
             if (c.conversationId in mutedIds) return@forEach
-            // run.completed 抑制窗内（同一 run 结束，完成通知已含「回来看」信号）吞掉防双响
-            val until = replySuppressUntilNanos[c.conversationId]
-            if (until != null && nowNanos() < until) return@forEach
             notify(
                 Request(
                     kind = Kind.REPLY,
@@ -231,7 +226,6 @@ internal class DesktopNotificationCoordinator(
     internal fun handleReset() {
         primed = false
         lastUnread.clear()
-        replySuppressUntilNanos.clear()
         latestConversations = emptyList()
     }
 
@@ -254,34 +248,25 @@ internal class DesktopNotificationCoordinator(
     private fun notifyRunTerminal(gatewayId: String, conversationId: String, completed: Boolean, runId: String?) {
         // 未映射会话：无归属、无法跳转，显式降级不提醒（不编造归属，iOS noteRunTerminal 同纪律）
         if (conversationId.isEmpty()) return
-        // wp-9：按会话静音（iOS HubStore.noteRunTerminal 同位 guard）——吞回复/终态口径的终态侧；
-        // 早于 3s 抑制窗置位（iOS 同序：静音即 return，窗不设——静音期间回复本就被吞，窗无意义）
+        // wp-9：按会话静音（iOS HubStore.noteRunTerminal 同位 guard）——终态侧静音即 return
         if (conversationId in mutedConversationIds()) return
         // wp-4 修法二发起方门（两端协调器同口径）：他端发起 / compact 触发的 run 终态静默
         // （未读增量仍由会话列表承载）；null 门 = 旧装配/单测兼容（放行）
         val gate = runOriginGate
         if (gate != null && !gate(gatewayId, runId)) return
+        // 2026-11-07 用户拍板：run 完成不再推送——heartbeat 周期 run 的「运行完成」是噪声，
+        // 实际回复由 unread 增量路径（REPLY）承载；原「完成+回复」3s 双响抑制窗随之移除
+        //（窗若保留会吞掉完成后的真实回复通知）。失败仍提醒（异常需要知道，iOS 同口径）。
+        if (completed) return
         val label = labelOf(conversationId)
-        if (completed) {
-            replySuppressUntilNanos[conversationId] = nowNanos() + REPLY_SUPPRESS_WINDOW_NANOS
-            notify(
-                Request(
-                    kind = Kind.RUN_COMPLETED,
-                    conversationId = conversationId,
-                    title = "运行完成",
-                    body = "「$label」的任务已运行完成",
-                ),
-            )
-        } else {
-            notify(
-                Request(
-                    kind = Kind.RUN_FAILED,
-                    conversationId = conversationId,
-                    title = "运行失败",
-                    body = "「$label」的任务运行失败",
-                ),
-            )
-        }
+        notify(
+            Request(
+                kind = Kind.RUN_FAILED,
+                conversationId = conversationId,
+                title = "运行失败",
+                body = "「$label」的任务运行失败",
+            ),
+        )
     }
 
     private fun notify(request: Request) {
@@ -296,11 +281,6 @@ internal class DesktopNotificationCoordinator(
 
     private fun displayLabel(c: UiConversation): String =
         if (c.label.isNotEmpty()) c.label else c.agentId.ifEmpty { "会话" }
-
-    internal companion object {
-        /** run.completed 后的回复抑制窗（iOS noteRunTerminal 同值 3s）。 */
-        internal const val REPLY_SUPPRESS_WINDOW_NANOS: Long = 3_000_000_000L
-    }
 }
 
 /**

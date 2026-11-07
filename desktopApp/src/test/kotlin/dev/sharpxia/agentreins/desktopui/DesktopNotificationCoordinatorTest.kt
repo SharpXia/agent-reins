@@ -15,7 +15,8 @@ import kotlinx.coroutines.cancel
 
 /**
  * wp-18 macOS 本地通知规则单测（desktopApp jvmTest）：触发面清单（审批/回复/run 终态）、
- * 归属降级、回复差异面（基线/非当前打开/抑制窗）、reset、osascript 脚本构造与静默降级。
+ * 归属降级、回复差异面（基线/非当前打开；2026-11-07 起 run 完成不再推送、抑制窗已移除）、
+ * reset、osascript 脚本构造与静默降级。
  * 口径与 iOS wp-13（HubStore.noteConversationsPush / noteApprovalRequested / noteRunTerminal
  * + NotificationCoordinator）逐一对应，回归锚 = 桌面↔iOS 通知触发面 parity 不漂移。
  */
@@ -143,19 +144,17 @@ class DesktopNotificationCoordinatorTest {
     // ── run 终态触发 ──
 
     @Test
-    fun runTerminalNotifiesCompletedAndFailed() {
+    fun runTerminalCompletedSilentFailedNotifies() {
+        // 2026-11-07 用户拍板：run 完成不再推送（heartbeat 周期 run 的完成通知是噪声，实际
+        // 回复由 unread 增量路径承载）；失败仍提醒（异常需要知道）。
         val notifier = FakeNotifier()
-        val clock = FakeClock()
-        val c = coordinator(notifier, clock = clock)
+        val c = coordinator(notifier)
         c.handleConversationsPush(listOf(conv("conv-1", 0), conv("conv-2", 0)))
         c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = true, runId = null))
+        assertTrue(notifier.received.isEmpty(), "completed 不再推送")
         c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-2", completed = false, runId = null))
-        assertEquals(2, notifier.received.size)
-        val completed = notifier.received[0]
-        assertEquals(DesktopNotificationCoordinator.Kind.RUN_COMPLETED, completed.kind)
-        assertEquals("运行完成", completed.title)
-        assertEquals("「会话conv-1」的任务已运行完成", completed.body)
-        val failed = notifier.received[1]
+        assertEquals(1, notifier.received.size)
+        val failed = notifier.received.single()
         assertEquals(DesktopNotificationCoordinator.Kind.RUN_FAILED, failed.kind)
         assertEquals("运行失败", failed.title)
         assertEquals("「会话conv-2」的任务运行失败", failed.body)
@@ -189,28 +188,30 @@ class DesktopNotificationCoordinatorTest {
     }
 
     @Test
-    fun runTerminalNotifiesWhenOriginGateAllows() {
-        // 本端发起（message.send 登记 → isRunLocal true）：门放行 → 通知 + 3s 抑制窗照常置位
+    fun runTerminalCompletedSilentAndReplyNotSuppressed() {
+        // 门放行 + completed：完成通知退场，且原 3s 抑制窗已移除——紧随的 assistant final
+        // unread 增量必须照常提醒（回归锚：移除抑制窗不得吞真实回复）
         val notifier = FakeNotifier()
-        val clock = FakeClock()
-        val c = coordinator(notifier, clock = clock)
+        val c = coordinator(notifier)
         c.runOriginGate = { gatewayId, runId -> gatewayId == "gw1" && runId == "r1" }
         c.handleConversationsPush(listOf(conv("conv-1", 0)))
         c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = true, runId = "r1"))
-        assertEquals(1, notifier.received.size)
-        assertEquals(DesktopNotificationCoordinator.Kind.RUN_COMPLETED, notifier.received.single().kind)
-        clock.advanceMillis(1000)
+        assertTrue(notifier.received.isEmpty(), "completed 不再推送")
         c.handleConversationsPush(listOf(conv("conv-1", 2)))
-        assertTrue(notifier.received.size == 1, "放行路径的 3s 回复抑制窗保持有效")
+        assertEquals(1, notifier.received.size)
+        assertEquals(DesktopNotificationCoordinator.Kind.REPLY, notifier.received.single().kind)
     }
 
     @Test
     fun gateNotSetKeepsLegacyBehavior() {
-        // 门未装配（旧装配/单测兼容）：不抑制，仅按归属降级（回归锚：wp-4 前行为不漂移）
+        // 门未装配（旧装配/单测兼容）：不抑制，仅按归属降级（回归锚：wp-4 前行为不漂移；
+        // completed 2026-11-07 起整体静默与门无关，用 failed 验证门未装配时放行）
         val notifier = FakeNotifier()
         val c = coordinator(notifier)
         c.handleConversationsPush(listOf(conv("conv-1", 0)))
         c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = true, runId = "r1"))
+        assertTrue(notifier.received.isEmpty(), "completed 整体静默与门无关")
+        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = false, runId = "r2"))
         assertEquals(1, notifier.received.size)
     }
 
@@ -272,26 +273,18 @@ class DesktopNotificationCoordinatorTest {
     }
 
     @Test
-    fun runCompletedSuppressesReplyWithinThreeSeconds() {
+    fun runCompletedSilentReplyNotifiesImmediately() {
+        // 2026-11-07：run 完成通知退场、3s 抑制窗移除——紧随 completion 的 assistant final
+        // unread 增量立即提醒（不吞真实回复）；其他会话回复不受影响
         val notifier = FakeNotifier()
-        val clock = FakeClock()
-        val c = coordinator(notifier, clock = clock)
+        val c = coordinator(notifier)
         c.handleConversationsPush(listOf(conv("conv-1", 0), conv("conv-2", 0)))
-        // run.completed → 完成通知 + 3s 抑制窗（同一 run 结束，防「完成」+「回复」双响）
         c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = true, runId = null))
-        assertEquals(1, notifier.received.size)
-        clock.advanceMillis(1000)
+        assertTrue(notifier.received.isEmpty(), "completed 不再推送")
         c.handleConversationsPush(listOf(conv("conv-1", 2), conv("conv-2", 0)))
-        assertTrue(notifier.received.size == 1, "窗内回复应被吞")
-        // 其他会话不受抑制窗影响
-        c.handleConversationsPush(listOf(conv("conv-1", 2), conv("conv-2", 1)))
-        assertEquals(2, notifier.received.size)
-        assertEquals(DesktopNotificationCoordinator.Kind.REPLY, notifier.received[1].kind)
-        // 窗过后同会话回复正常提醒
-        clock.advanceMillis(2500) // 累计 3.5s > 3s
-        c.handleConversationsPush(listOf(conv("conv-1", 4), conv("conv-2", 1)))
-        assertEquals(3, notifier.received.size)
-        assertEquals("conv-1", notifier.received[2].conversationId)
+        assertEquals(1, notifier.received.size)
+        assertEquals(DesktopNotificationCoordinator.Kind.REPLY, notifier.received.single().kind)
+        assertEquals("conv-1", notifier.received.single().conversationId)
     }
 
     @Test
@@ -309,21 +302,19 @@ class DesktopNotificationCoordinatorTest {
     // ── reset（登录态离场） ──
 
     @Test
-    fun resetRebaselinesAndDropsSuppressWindow() {
+    fun resetRebaselinesSilently() {
         val notifier = FakeNotifier()
-        val clock = FakeClock()
-        val c = coordinator(notifier, clock = clock)
+        val c = coordinator(notifier)
         c.handleConversationsPush(listOf(conv("conv-1", 5)))
         c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = true, runId = null))
-        clock.advanceMillis(500)
         c.handleReset() // 登录态离场重置（生产经 Msg.Reset 由消费协程调用；此处直调验证语义）
-        // 重登快照从零重记基线：旧 unread 同值不算「到达」，不误报
+        // 重登快照从零重记基线：旧 unread 同值不算「到达」，不误报；completed 也不推送
         c.handleConversationsPush(listOf(conv("conv-1", 5)))
-        assertTrue(notifier.received.size == 1, "重登基线推送不得提醒")
-        // 抑制窗随 reset 清掉：窗内（500ms < 3s）到来的回复不被吞
+        assertTrue(notifier.received.isEmpty(), "重登基线推送不得提醒")
+        // 基线后的 unread 增量正常提醒
         c.handleConversationsPush(listOf(conv("conv-1", 7)))
-        assertEquals(2, notifier.received.size)
-        assertEquals(DesktopNotificationCoordinator.Kind.REPLY, notifier.received[1].kind)
+        assertEquals(1, notifier.received.size)
+        assertEquals(DesktopNotificationCoordinator.Kind.REPLY, notifier.received.single().kind)
     }
 
     @Test
@@ -357,10 +348,10 @@ class DesktopNotificationCoordinatorTest {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         try {
             c.start(scope)
-            c.onEventEnvelope(envelope(EventEnvelope.RUN_COMPLETED))
+            c.onEventEnvelope(envelope(EventEnvelope.RUN_FAILED))
             assertTrue(latch.await(5, TimeUnit.SECONDS), "消费协程未在超时内派发通知")
             assertEquals(1, notifier.received.size)
-            assertEquals(DesktopNotificationCoordinator.Kind.RUN_COMPLETED, notifier.received.single().kind)
+            assertEquals(DesktopNotificationCoordinator.Kind.RUN_FAILED, notifier.received.single().kind)
         } finally {
             scope.cancel()
         }
@@ -419,17 +410,15 @@ class DesktopNotificationCoordinatorTest {
     }
 
     @Test
-    fun mutedRunTerminalDoesNotArmReplySuppressWindow() {
-        // 静音吞终态走早于抑制窗置位的路径（iOS 同序）：静音解除后回复不再受旧 run 的窗牵连
+    fun mutedRunTerminalDoesNotBlockLaterReply() {
+        // 静音吞终态（completed 现已整体静默，与抑制窗无关）：静音解除后回复照常提醒
         val notifier = FakeNotifier()
-        val clock = FakeClock()
         var muted = setOf("conv-1")
-        val c = coordinator(notifier, clock = clock, mutedIds = { muted })
+        val c = coordinator(notifier, mutedIds = { muted })
         c.handleConversationsPush(listOf(conv("conv-1", 0)))
         c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = true, runId = null))
         assertTrue(notifier.received.isEmpty())
         muted = emptySet()
-        clock.advanceMillis(500) // 若置窗则 500ms < 3s 会吞下面的回复
         c.handleConversationsPush(listOf(conv("conv-1", 1)))
         assertEquals(1, notifier.received.size)
         assertEquals(DesktopNotificationCoordinator.Kind.REPLY, notifier.received.single().kind)

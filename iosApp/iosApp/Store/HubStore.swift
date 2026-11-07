@@ -135,11 +135,6 @@ final class HubStore {
     private var conversationsPrimed = false
     private var lastUnreadByConversation: [String: Int] = [:]
 
-    /// run.completed 与紧随其后的 assistant final 同批到达（顺序不保证）：完成通知派发后
-    /// 短窗内的「有新回复」吞掉，防同一 run 结束双响（运行完成 + 有新回复）。失败 run 通常
-    /// 无 final 行，不受此窗影响。登出清空。
-    private var replySuppressUntil: [String: ContinuousClock.Instant] = [:]
-
     private let notifications = NotificationCoordinator.shared
 
     /// 订阅会话列表（loggedIn 后调用一次；重复调用由桥侧换订阅）。每次推送同时喂通知差异面
@@ -429,8 +424,6 @@ final class HubStore {
             guard now > prev else { continue }                       // assistant final 才增 unread
             guard selected?.conversationId != id else { continue }   // 当前打开不提醒（scope 语义）
             guard !mutedConversations.contains(id) else { continue } // 按会话静音
-            // 完成去重窗（见 noteRunTerminal）：run.completed 派发后短窗内的回复吞掉，防双响。
-            if let until = replySuppressUntil[id], ContinuousClock.now < until { continue }
             notifications.replyArrived(conversationId: id, label: displayLabel(c))
         }
     }
@@ -455,22 +448,17 @@ final class HubStore {
 
     /// run 终态事件（桥 eventTap 回调，主线程）。conversationId 空串 = 未映射会话：无归属、
     /// 无法静音判定与跳转，显式降级不提醒（不编造归属，与 UiApproval conversationId 同纪律）。
+    /// 2026-11-07 用户拍板：run 完成不再推送——heartbeat 周期 run 的「运行完成」是噪声，
+    /// 实际回复由 unread 增量路径（noteConversationsPush → replyArrived）承载；原「完成+回复」
+    /// 双响 3s 抑制窗随之移除（窗若保留会吞掉完成后的真实回复通知）。失败仍提醒（异常需要
+    /// 知道，且失败 run 无回复可依赖）。
     private func noteRunTerminal(conversationId: String, runId: String, status: String) {
         guard isLoggedIn, !conversationId.isEmpty else { return }
         guard !mutedConversations.contains(conversationId) else { return }
+        guard status == "failed" else { return } // completed 等其余值不推送（桥只发两种）
         let label = conversations.first { $0.conversationId == conversationId }
             .map(displayLabel) ?? "会话"
-        if status == "failed" {
-            notifications.runFailed(conversationId: conversationId, label: label)
-            return
-        }
-        guard status == "completed" else { return } // 其余值不识别即丢弃（桥只发两种）
-        // 完成去重（在回复路径生效，见 noteConversationsPush）：run.completed 派发后短窗内的
-        // 「有新回复」吞掉——同一 run 结束，完成通知已含「回来看」信号（run.completed 与
-        // message.created 同批到达、先后不保证，故用时间窗而非时序判定）。窗内到达的第二条
-        // 独立回复同样被吞（罕见，窗口后下一条正常提醒）。
-        replySuppressUntil[conversationId] = ContinuousClock.now.advanced(by: .seconds(3))
-        notifications.runCompleted(conversationId: conversationId, label: label)
+        notifications.runFailed(conversationId: conversationId, label: label)
     }
 
     /// 通知点按跳会话（coordinator 回调；可能在非主线程，回主队列再动 UI 态）。
@@ -787,7 +775,6 @@ final class HubStore {
         // mutedConversations 为本地偏好，跨登出保留。
         conversationsPrimed = false
         lastUnreadByConversation = [:]
-        replySuppressUntil = [:]
         bridge.hubLogout()
     }
 }

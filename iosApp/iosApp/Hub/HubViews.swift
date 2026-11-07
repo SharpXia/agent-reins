@@ -346,6 +346,9 @@ struct HubChatView: View {
     /// #4（2026-11-07 UX 轮）：软键盘可见态（keyboardWillChangeFrame 驱动）——键盘弹出
     /// 改变滚动几何但不经用户手势（userDrivenScroll=false），配合贴底跟随补滚动（见 timeline）。
     @State private var keyboardVisible = false
+    /// #4（2026-11-07 二轮，用户复验反馈）：键盘唤起瞬移在途——键盘 resize 期间容器几何逐帧
+    /// 变化，置位后由 onScrollGeometryChange 逐帧钉底收敛，落底即清（见 timeline action）。
+    @State private var keyboardBottomJump = false
     /// #3（2026-11-07 UX 轮）：待删除确认的本地消息（长按菜单入口 → 会话页二次确认弹层）。
     @State private var pendingDeleteMessage: UiMessage?
     @Environment(\.inkColors) private var ink
@@ -496,6 +499,14 @@ struct HubChatView: View {
                             insetBottom: geo.contentInsets.bottom)
             } action: { _, new in
                 probeBox.latest = new
+                // #4 二轮：键盘唤起瞬移在途——键盘 resize 使容器几何逐帧变化，逐帧 scrollTo
+                // 钉底（内容随键盘顶起、始终贴底），落底（容差内）即清交还常规锚定判定。
+                if keyboardBottomJump {
+                    proxy.scrollTo("bottom", anchor: .bottom)
+                    setAtBottom(probe: new)
+                    if (new.maxOffset - new.offsetY) <= Self.bottomSlack { keyboardBottomJump = false }
+                    return
+                }
                 // 流式 append 与程序化跟随滚动（animating）不改锚定态：内容增长会把
                 // 哨兵推到视口下方，若据此解锚，下一帧起跟随永久停摆。
                 guard userDrivenScroll else { return }
@@ -544,7 +555,14 @@ struct HubChatView: View {
                 keyboardVisible = f.minY < UIScreen.main.bounds.height - 1
             }
             .onChange(of: keyboardVisible) { _, visible in
-                guard visible, atBottom else { return }
+                // #4 二轮（用户复验反馈）：键盘唤起 → 聊天内容瞬移到底部——无条件（不等
+                // atBottom）、无动画；键盘 resize 期间由滚动几何钉底收敛（见 action），
+                // 收键盘清在途标记。
+                guard visible else {
+                    keyboardBottomJump = false
+                    return
+                }
+                keyboardBottomJump = true
                 proxy.scrollTo("bottom", anchor: .bottom)
             }
         }

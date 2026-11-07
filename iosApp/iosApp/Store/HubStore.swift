@@ -75,6 +75,30 @@ final class HubStore {
     /// superseded = 连接降级（警示）。纯观察面，登出复位 catching。
     private(set) var syncPhase: String = "catching"
 
+    /// #3（2026-11-07 二轮，用户拍板）：提醒条去抖显示——非 linked 相位**持续超 2.5s** 才显示。
+    /// 动机：崩溃防护改为离开前台即断开（见 App.swift scenePhase），每次解锁/回前台都有一段
+    /// 1–2s 的快速重连（catching→linked），逐次弹条是噪声；首次登录 bootstrap、真断线等慢同步
+    /// 超过阈值照常显示。linked/登出立即隐藏；相位在非 linked 间翻转时已显示的不闪隐藏。
+    private(set) var syncBannerVisible = false
+
+    private var bannerDebounceTask: Task<Void, Never>?
+
+    private static let bannerDebounceNanos: UInt64 = 2_500_000_000
+
+    private func notePhaseForBanner(_ phase: String) {
+        bannerDebounceTask?.cancel()
+        bannerDebounceTask = nil
+        if phase == "linked" || !isLoggedIn {
+            syncBannerVisible = false
+            return
+        }
+        bannerDebounceTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: Self.bannerDebounceNanos)
+            guard let self, !Task.isCancelled, self.syncPhase != "linked", self.isLoggedIn else { return }
+            self.syncBannerVisible = true
+        }
+    }
+
     // ---------- wp-12：历史翻页（加载更早） ----------
 
     /// 「加载更早」按钮可见性：初始由「会话 lastSeq > 已载行数」乐观判定（≤50 行会话不出按钮——
@@ -178,7 +202,9 @@ final class HubStore {
         // 防御性小写归一（beta-0.5.4 真机缺陷教训）：桥契约是小写字符串，任何上游漂移
         // 在此归一，避免横条恒琥珀+恒无文字（switch 全落 default）。
         bridge.hubWatchPhase { [weak self] phase in
-            self?.syncPhase = phase.lowercased()
+            let p = phase.lowercased()
+            self?.syncPhase = p
+            self?.notePhaseForBanner(p)
         }
     }
 
@@ -335,8 +361,23 @@ final class HubStore {
     func send(_ text: String) {
         guard let c = selected else { return }
         ownSendScrollPending = true
+        // #2'（2026-11-07 二轮）：活跃 run 期间发送 = 排队——记发送时刻会话 lastSeq 为水位，
+        // 此后落库的用户行（seq 越过水位）在 run 收尾前呈「排队中」徽标（isQueuedRow）。
+        if let live = liveSelected, live.hasActiveRun {
+            queuedSendWatermark = max(queuedSendWatermark, live.lastSeq)
+        }
         bridge.hubSend(conversationId: c.conversationId, text: text)
     }
+
+    /// #2'（2026-11-07 二轮，用户拍板「排队中作为消息状态显示」）：行级排队判定——活跃 run
+    /// 期间发出（seq 越过水位）的用户行；乐观行（占位 seq=Int64.max）恒命中。run 收尾
+    /// （hasActiveRun=false）后整体翻回常规状态徽标（已送达/已读），随会话切换重置。
+    func isQueuedRow(_ m: UiMessage) -> Bool {
+        guard m.role == "user", let c = liveSelected, c.hasActiveRun else { return false }
+        return m.seq > queuedSendWatermark
+    }
+
+    private(set) var queuedSendWatermark: Int64 = 0
 
     // ---------- 崩溃防护 + 本地清理（2026-11-07 UX 轮） ----------
 
@@ -513,6 +554,7 @@ final class HubStore {
         restoreArmed = false
         canLoadEarlier = false
         reportedReadUpTo = 0
+        queuedSendWatermark = 0 // #2'：排队水位随会话期重置
     }
 
     /// 乐观行占位 seq（DefaultCommandClient message.send 插行 seq=Long.MAX_VALUE，message.created
@@ -771,6 +813,9 @@ final class HubStore {
         chatPush = false
         // wp-10：连接相位复位（同步栈已停转，重登后 watchPhase 重新挂订阅）
         syncPhase = "catching"
+        syncBannerVisible = false
+        bannerDebounceTask?.cancel()
+        bannerDebounceTask = nil
         // wp-13：通知差异面基线随投影数据一并作废（重登 bootstrap 快照不是新事件）；
         // mutedConversations 为本地偏好，跨登出保留。
         conversationsPrimed = false

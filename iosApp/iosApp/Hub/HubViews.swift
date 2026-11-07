@@ -14,10 +14,12 @@ struct HubRootView: View {
         VStack(spacing: 0) {
             // wp-10：连接提示条挂顶层（TabView 之上，跨 tab 常驻）：断连/重建/接管在途显示，
             // 追平（linked）自动消失——wp-8 降级态面在连接维度的补位。
-            if hub.isLoggedIn, hub.syncPhase != "linked" {
+            if hub.isLoggedIn, hub.syncBannerVisible {
                 HubSyncPhaseBanner(phase: hub.syncPhase)
             }
             // tab 态在 HubStore（wp-13：通知点按需从任意 tab 带回会话栈），此处只绑定。
+            // #3（2026-11-07 二轮）：提示条改去抖显示（syncBannerVisible）——解锁/回前台的
+            // 快速重连（1–2s 追平）不再逐次弹条；首次登录 bootstrap / 真断线等慢同步照常显示。
             TabView(selection: $hub.selectedTab) {
                 NavigationStack { HubHomeView() }
                     .tabItem { Label("会话", systemImage: "bubble.left.and.bubble.right.fill") }
@@ -409,12 +411,19 @@ struct HubChatView: View {
     /// wp-15：工作过程披露条（置顶于时间线上方，与审批横条同位不进滚动区）——只在有已捕获
     /// 内容时出现（零噪声）；数据 = HubStore.workActivity（当前打开会话，open 时订阅）。
     /// 无工具活动/阶段帧的会话整条不渲染，历史会话也不虚构（断线窗口丢失面不回填）。
+    /// #4（2026-11-07 二轮）：回复流式在途时阶段呈现合成「生成回复中」（文本流起点是呈现
+    /// 语义，桥/投影不另发帧）。
     @ViewBuilder
     private var workProcessSection: some View {
         if let wa = hub.workActivity, !wa.tools.isEmpty || !wa.phases.isEmpty {
-            WorkProcessBar(activity: wa, runActive: isRunActive)
+            WorkProcessBar(activity: wa, runActive: isRunActive, streamingReply: replyStreaming)
                 .padding(.horizontal, 14).padding(.top, 10)
         }
+    }
+
+    /// 回复流式在途判定：存在非用户流式行（assistant streaming / dstream 占位行）。
+    private var replyStreaming: Bool {
+        hub.messages.contains { $0.state == "streaming" && $0.role != "user" }
     }
 
     /// wp-12：已渲染最大真实 seq（桌面 ConversationScreen.maxRenderedSeq 同口径）——
@@ -597,16 +606,8 @@ struct HubChatView: View {
                     .padding(.horizontal, 12).padding(.top, 6)
             }
             Divider()
-            if isRunActive {
-                // wp-14：队列模式提示文案（本轮仅文案提示）——chat.send 不透传 queueMode 参数
-                //（schema ChatSendParams.queueMode steer/followup/collect/interrupt 本轮不接），
-                // 运行中发送按 Gateway 默认队列语义排队，文案与该实际行为对齐；语义透传留待后续。
-                Label("运行中发送将排队", systemImage: "hourglass")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 14).padding(.top, 6)
-            }
+            // #2'（2026-11-07 二轮）：原「运行中发送将排队」composer 提示移除——排队语义
+            // 上移为发送消息自身的「排队中」状态徽标（信息在消息现场，不再占 composer 行）。
             HStack(spacing: 10) {
                 TextField("发消息…", text: $draft, axis: .vertical)
                     .lineLimit(1...4)
@@ -982,7 +983,13 @@ private struct HubMessageRow: View {
     private var statusBadge: some View {
         let ui = m.uiState
         HStack(spacing: 4) {
-            if m.state == "streaming" {
+            if hub.isQueuedRow(m) {
+                // #2'（2026-11-07 二轮，用户拍板）：排队中作为消息状态显示——活跃 run 期间
+                // 发出的用户行（含乐观行），替代原 composer 的「运行中发送将排队」提示；
+                // run 收尾后自动翻回常规徽标。
+                Image(systemName: "hourglass").font(.caption2)
+                Text("排队中").font(.caption2)
+            } else if m.state == "streaming" {
                 Image(systemName: "waveform").font(.caption2)
             } else if ui == "sending" {
                 Image(systemName: "clock").font(.caption2)
@@ -1122,6 +1129,9 @@ private struct WorkProcessBar: View {
     let activity: UiWorkActivity
     /// 活跃 run 态（会话实时行）：在途工具/阶段配合它呈现「进行中」而非静止图标。
     let runActive: Bool
+    /// #4（2026-11-07 二轮）：回复流式在途（会话页合成）——阶段行呈现为「生成回复中」，
+    /// 覆盖 thinking/启动模型两个中间态（文本流已开始，前置阶段是陈旧信息）。
+    let streamingReply: Bool
 
     private var runningCount: Int { activity.tools.filter { $0.status == "running" }.count }
     private var completedCount: Int { activity.tools.filter { $0.status == "completed" }.count }
@@ -1172,15 +1182,17 @@ private struct WorkProcessBar: View {
         .background(RoundedRectangle(cornerRadius: 12).fill(ink.surfaceTertiary))
     }
 
-    /// 阶段行：Gateway 启动 phase 枚举的人读呈现（闭集映射 + 原样兜底，非身份字段不涉 ADR-14）。
+    /// 阶段行：Gateway 启动 phase 枚举的人读呈现（闭集映射 + 原样兜底，非身份字段不涉 ADR-14）；
+    /// #4：流式在途时呈现为「生成回复中」（覆盖 thinking/启动模型中间态）。
     private func phaseRow(_ p: UiRunPhase) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: p.phase == "aborted" ? "exclamationmark.triangle" : "gearshape.2")
+        let phase = streamingReply && runActive ? "generating" : p.phase
+        return HStack(alignment: .top, spacing: 8) {
+            Image(systemName: phase == "aborted" ? "exclamationmark.triangle" : "gearshape.2")
                 .font(.caption)
-                .foregroundStyle(p.phase == "aborted" ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                .foregroundStyle(phase == "aborted" ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 2) {
-                Text(Self.phaseText(p.phase)).font(.caption.weight(.medium))
+                Text(Self.phaseText(phase)).font(.caption.weight(.medium))
                 if let detail = p.detail, !detail.isEmpty {
                     Text(detail).font(.caption2).foregroundStyle(.secondary)
                 }
@@ -1226,6 +1238,10 @@ private struct WorkProcessBar: View {
         case "preparing_context": return "准备上下文"
         case "memory_flushing": return "整理记忆"
         case "starting_model": return "启动模型"
+        // #4（2026-11-07 二轮）：thinking = Bridge 由 Gateway thinking 流折帧的状态信号
+        //（每 run 一帧）；generating = 客户端由流式行合成的呈现态（不发帧）。
+        case "thinking": return "思考中"
+        case "generating": return "生成回复中"
         case "aborted": return "已中止"
         default: return phase.isEmpty ? "运行中" : phase
         }

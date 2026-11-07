@@ -46,6 +46,8 @@ import dev.sharpxia.agentreins.hub.UiWorkActivity
 internal fun WorkProcessBar(
     activity: UiWorkActivity,
     runActive: Boolean,
+    /** 2026-11-07 二轮：回复流式在途（会话页合成）——阶段行呈现「生成回复中」（iOS 同口径）。 */
+    streamingReply: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     // 展开态为会话页本地瞬态：随会话切换由 HubShell key(conversationId) 重挂自然重置
@@ -101,7 +103,7 @@ internal fun WorkProcessBar(
             // 展开体：最新阶段帧（单帧）+ 全部已捕获工具行（firstTs 升序，SQL ORDER BY 保证）
             if (expanded) {
                 HorizontalDivider(color = Color(0x22888888))
-                latestPhase?.let { PhaseRow(it) }
+                latestPhase?.let { PhaseRow(it, if (streamingReply && runActive) "generating" else it.phase) }
                 activity.tools.forEach { t ->
                     ToolRow(t)
                 }
@@ -112,10 +114,11 @@ internal fun WorkProcessBar(
 
 /**
  * 阶段行：Gateway 启动 phase 枚举的人读呈现（闭集映射 + 原样兜底，非身份字段不涉 ADR-14）；
- * aborted 变体呈警示色（iOS exclamationmark.triangle 橙色同语义）。
+ * aborted 变体呈警示色（iOS exclamationmark.triangle 橙色同语义）；
+ * [displayPhase] 为调用侧合成后的呈现相位（流式在途 → generating，2026-11-07 二轮）。
  */
 @Composable
-private fun PhaseRow(p: UiRunPhase) {
+private fun PhaseRow(p: UiRunPhase, displayPhase: String) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -123,14 +126,14 @@ private fun PhaseRow(p: UiRunPhase) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            if (p.phase == "aborted") "⚠" else "⚙",
+            if (displayPhase == "aborted") "⚠" else "⚙",
             fontSize = 12.sp,
-            color = if (p.phase == "aborted") Color(0xFFB7791F) else Color(0xFF888888),
+            color = if (displayPhase == "aborted") Color(0xFFB7791F) else Color(0xFF888888),
         )
         Spacer(Modifier.width(8.dp))
         Column {
             Text(
-                phaseDisplayText(p.phase),
+                phaseDisplayText(displayPhase),
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Medium,
             )

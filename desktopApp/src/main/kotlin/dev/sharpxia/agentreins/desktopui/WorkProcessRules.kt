@@ -71,6 +71,10 @@ internal fun phaseDisplayText(phase: String): String = when (phase) {
     "preparing_context" -> "准备上下文"
     "memory_flushing" -> "整理记忆"
     "starting_model" -> "启动模型"
+    // 2026-11-07 二轮：thinking = Bridge 由 Gateway thinking 流折帧的状态信号（每 run 一帧，
+    // 契约 phase 枚举 additive 扩值）；generating = 客户端由流式行合成的呈现态（不发帧）。
+    "thinking" -> "思考中"
+    "generating" -> "生成回复中"
     "aborted" -> "已中止"
     else -> phase.ifEmpty { "运行中" }
 }

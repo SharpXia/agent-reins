@@ -30,18 +30,14 @@ struct ChatView: View {
     @State private var scroll = ScrollPosition(edge: .bottom)
     /// 自动跟随的容差；小于此距离仍视为贴底。
     private let bottomLockThreshold: CGFloat = 48
-    /// 回底按钮的显示阈值要更严格，避免用户已经接近底部时按钮闪出。
-    private let jumpButtonThreshold: CGFloat = 96
+    /// 回底按钮判定容差：距底 ≤ 此值即视为「最后可见项就是底部标记」。
+    private let atBottomTolerance: CGFloat = 8
     /// 滚动路径禁止逐帧状态写入（0.4.6 真机教训：CGFloat 距离与 preference 锚值都是
     /// 每帧连续变化 → body 每帧重估 → 长会话滑动卡顿；布局期高频失效同时是惰性容器
     /// 滚动崩溃的压力源）。距离只在跨过语义阈值时落盘，各自一个 Bool、翻转才写。
     @State private var isNearBottom = true
-    @State private var isFarFromBottom = false
-    /// Latest user turn's head is more than 24pt below the viewport top — the user has
-    /// scrolled past the start of the current turn, so the jump button applies. When the
-    /// anchor row is not materialized the preference is absent and this stays false;
-    /// `isFarFromBottom` covers that case.
-    @State private var turnHeadBelowTop = false
+    /// 回底按钮显隐的唯一依据：最后可见项是底部标记才隐藏，否则显示。
+    @State private var isAtBottom = true
     /// 用户主动上拉后暂停流式跟随。仅由真实交互阶段置位，避免 markdown/思考内容
     /// 增长时 contentSize 短暂变大把「仍在底部」误判成用户离底。
     @State private var userPinnedUp = false
@@ -203,15 +199,7 @@ struct ChatView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
         }
-        .coordinateSpace(name: ChatScrollCoordinateSpace.name)
         .onAppear { ScrollBench.shared.armIfNeeded() }
-        .onPreferenceChange(LatestUserTopPreferenceKey.self) { value in
-            ScrollBench.shared.note("pref.latestUserTop")
-            // 语义化：只有「越过本回合头」这一个布尔值得写入。原始 y 值每帧都变，
-            // 直接落盘会触发逐帧 body 重估（0.4.6 滑动卡顿根因之一）。
-            let below = value.isFinite && value > 24
-            if below != turnHeadBelowTop { turnHeadBelowTop = below }
-        }
         .scrollPosition($scroll)
         // SW 反馈②：进页概率空白、滑动/回顶才出现——估算型 scrollTo 在 markdown 重内容
         // 上会落进 LazyVStack 虚高区。底部默认锚由框架在真实布局上定位/跟随内容增长，
@@ -222,10 +210,10 @@ struct ChatView: View {
             return max(0, maxOffset - geo.contentOffset.y)
         } action: { _, distance in
             // 距离只在跨阈值时落盘：逐帧写 CGFloat 会让 body 每帧重估（0.4.6 卡顿根因）。
+            let atBottom = distance <= atBottomTolerance
+            if atBottom != isAtBottom { isAtBottom = atBottom }
             let nearBottom = distance <= bottomLockThreshold
-            let farFromBottom = distance > jumpButtonThreshold
             if nearBottom != isNearBottom { isNearBottom = nearBottom }
-            if farFromBottom != isFarFromBottom { isFarFromBottom = farFromBottom }
             if nearBottom {
                 if userPinnedUp { userPinnedUp = false }
             } else if scrollPhase == .interacting || scrollPhase == .tracking {
@@ -270,12 +258,15 @@ struct ChatView: View {
         }
         .onPreferenceChange(ComposerHeightKey.self) { composerHeight = $0 }
         .overlay(alignment: .bottomTrailing) {
-            if shouldShowJumpButton {
+            if !isAtBottom {
                 Button {
                     Feedback.hapticTap(enabled: store.misc.hapticsEnabled)
-                    // The app's "bottom" is the latest user turn at the top of the
-                    // viewport. Keep this action aligned with send/turn-complete behavior.
-                    scrollToLatestUserTop()
+                    // 口径：last visible 不是底部标记就显示按钮；点击中断惯性滑动并
+                    // 动画滚到底部标记。programmatic scrollTo 会接管进行中的减速，
+                    // 不需要额外的阶段守卫。
+                    withAnimation(.smooth(duration: 0.3)) {
+                        scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
+                    }
                 } label: {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 15, weight: .medium))
@@ -391,7 +382,6 @@ struct ChatView: View {
                     _ = store.bridge.loadSection(key: key)
                 }
             )
-            .background(latestUserAnchor(for: row, lastUserId: lastUserId))
             .onAppear {
                 consumeAnchorIfNeeded(rows: rows)
             }
@@ -423,7 +413,6 @@ struct ChatView: View {
                 showTailSpinner: tailSpinner,
                 onBoundaryAppear: { _ in }
             )
-            .background(latestUserAnchor(for: row, lastUserId: lastUserId))
         }
         ForEach(store.conv.pendingOutbox, id: \.idempotencyKey) { cmd in
             PendingOutboxItem(cmd: cmd)
@@ -447,8 +436,8 @@ struct ChatView: View {
 
     private var runActive: Bool { store.conv.runActive }
 
-    /// SW 反馈⑥：发送/回合完成和回底按钮都定位到最新用户消息为内容区第一条 item
-    /// （Grok 式回合头）。不再把助手长回复的真实尾部当作按钮语义上的底部。
+    /// SW 反馈⑥：发送/回合完成定位到最新用户消息为内容区第一条 item（Grok 式回合头）。
+    /// 回底按钮不走此语义（那里就是纯粹的滚到底部标记），仅发送/回合完成共用。
     private func scrollToLatestUserTop() {
         userPinnedUp = false
         followRevision &+= 1
@@ -469,38 +458,6 @@ struct ChatView: View {
         } else {
             scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
         }
-    }
-
-    /// The jump button follows the same semantic anchor as send/turn completion: the
-    /// latest user message is at the top of the viewport. If that row is currently
-    /// materialized, its measured position is authoritative; otherwise use the real
-    /// bottom distance as a conservative fallback while the user is far above it.
-    private var shouldShowJumpButton: Bool {
-        guard userPinnedUp, hasContent else { return false }
-        if turnHeadBelowTop { return true }
-        return isFarFromBottom
-    }
-
-    @ViewBuilder
-    private func latestUserAnchor(for row: ChatRow, lastUserId: String?) -> some View {
-        if isLatestUserRow(row, lastUserId: lastUserId) {
-            GeometryReader { proxy in
-                Color.clear.preference(
-                    key: LatestUserTopPreferenceKey.self,
-                    value: proxy.frame(in: .named(ChatScrollCoordinateSpace.name)).minY
-                )
-            }
-        } else {
-            Color.clear
-        }
-    }
-
-    private func isLatestUserRow(_ row: ChatRow, lastUserId: String?) -> Bool {
-        guard let lastUserId else { return false }
-        if case let .entry(_, entry) = row {
-            return entry.id == lastUserId
-        }
-        return false
     }
 
     private var streamingTail: Bool {
@@ -777,19 +734,6 @@ private final class ChatRowsCache {
 }
 
 enum ChatAnchorTag: Hashable { case bottom }
-
-private enum ChatScrollCoordinateSpace {
-    static let name = "agentreins.chat.scroll"
-}
-
-private struct LatestUserTopPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = .nan
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        let next = nextValue()
-        if next.isFinite { value = next }
-    }
-}
 
 /// composer 高度上抛（回底按钮避让，真机反馈③）
 private struct ComposerHeightKey: PreferenceKey {

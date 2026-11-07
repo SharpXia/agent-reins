@@ -367,7 +367,8 @@ class AgentBridge(internal val model: AppModel) {
     private var autoPromptSent = false
 
     /** Dev 预览条目：Markdown 全要素 + 流式尾 + 工具卡三态 + 思考卡 + 待发气泡。 */
-    private fun previewEntries(): List<BridgeEntry> = listOf(
+    private fun previewEntries(): List<BridgeEntry> {
+        val base = listOf(
         BridgeEntry(kind = "message", id = "pv-1", role = "user", content = "帮我总结一下 KMP 的优缺点，用 Markdown",
             timestampMs = SystemTimeHolder.nowMs()),
         BridgeEntry(kind = "thinking", id = "pv-t1", text = "用户想要 Markdown 格式的对比总结\n整理优势和劣势两大部分"),
@@ -390,7 +391,28 @@ Kotlin Multiplatform 让 **业务逻辑** 一份代码多端复用：
             state = "running", durationMs = -1),
         BridgeEntry(kind = "message", id = "pv-3", role = "assistant", content = "正在补充流式输出的一段话，这条处于",
             timestampMs = SystemTimeHolder.nowMs(), streaming = true),
-    )
+        )
+        // 长会话走查：30 轮问答、行高差异大（标题/列表/代码块/表格混排），把进页锚底
+        // 的估算落点误差放大到可观察。仅 AGENTREINS_DEV_PREVIEW_MARKDOWN=1 生效。
+        val rounds = (1..30).flatMap { i ->
+            val filler = (1..(2 + i % 5)).joinToString("\n\n") { p ->
+                "第 $i 轮说明第 $p 段：这一段用来放大 Markdown 结排后的行高差异，" +
+                    "内容长度随轮次变化，便于观察锚定落点是否稳定在真实底部。"
+            }
+            listOf(
+                BridgeEntry(kind = "message", id = "pv-u$i", role = "user",
+                    content = "第 $i 轮：检查模块 $i 的构建配置并说明原因。",
+                    timestampMs = SystemTimeHolder.nowMs()),
+                BridgeEntry(kind = "message", id = "pv-a$i", role = "assistant",
+                    content = "### 检查结果（第 $i 轮）\n\n$filler\n\n" +
+                        "- 结论一：配置项 `kotlin.mpp.$i` 正常\n" +
+                        "- 结论二：依赖版本对齐\n\n" +
+                        "```kotlin\nprintln(\"round $i ok\")\n```",
+                    timestampMs = SystemTimeHolder.nowMs()),
+            )
+        }
+        return base.dropLast(1) + rounds + base.takeLast(1)
+    }
 
     // ---- 动作（AppModel 全量动作面 1:1 透传，Swift 侧不触碰 Kotlin 内部状态） ----
 

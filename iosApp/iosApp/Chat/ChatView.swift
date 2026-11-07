@@ -27,7 +27,9 @@ struct ChatView: View {
 
     private var timelineMode: Bool { store.timeline.agentId != nil }
 
-    @State private var scroll = ScrollPosition(edge: .bottom)
+    /// 初始即 item 锚定到尾部标记：内容异步到达/懒物化增高时由框架维持锚点贴底；
+    /// 用户拖拽后绑定回到偏移语义，跟随交由 contentSignature 兜底逻辑。
+    @State private var scroll = ScrollPosition(id: ChatAnchorTag.bottom, anchor: .bottom)
     /// 自动跟随的容差；小于此距离仍视为贴底。
     private let bottomLockThreshold: CGFloat = 48
     /// 回底按钮判定容差：距底 ≤ 此值即视为「最后可见项就是底部标记」。
@@ -296,8 +298,6 @@ struct ChatView: View {
             let warmCount = min(markdownPrewarmContents.count, 32)
             let settleNs = UInt64(220_000_000 + min(warmCount * 12_000_000, 360_000_000))
             try? await Task.sleep(nanoseconds: settleNs)
-            scroll.scrollTo(id: ChatAnchorTag.bottom, anchor: .bottom)
-            try? await Task.sleep(nanoseconds: 120_000_000)
             withAnimation(.easeOut(duration: 0.28)) {
                 initialPresentationReady = true
             }

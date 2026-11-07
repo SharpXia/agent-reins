@@ -348,9 +348,10 @@ struct HubChatView: View {
     /// #4（2026-11-07 UX 轮）：软键盘可见态（keyboardWillChangeFrame 驱动）——键盘弹出
     /// 改变滚动几何但不经用户手势（userDrivenScroll=false），配合贴底跟随补滚动（见 timeline）。
     @State private var keyboardVisible = false
-    /// #4（2026-11-07 二轮，用户复验反馈）：键盘唤起瞬移在途——键盘 resize 期间容器几何逐帧
-    /// 变化，置位后由 onScrollGeometryChange 逐帧钉底收敛，落底即清（见 timeline action）。
-    @State private var keyboardBottomJump = false
+    /// 钉底在途（统一机制）：键盘唤起瞬移（#4 二轮）与回底按钮点击（#3' 三轮）共用——置位后由
+    /// onScrollGeometryChange 逐帧 scrollTo 收敛（滑动/惯性中单次 scrollTo 会被在途滚动吞掉，
+    /// 逐帧重放直达底部），落底（容差内）即清；用户重新抓取列表（tracking）取消。
+    @State private var bottomJumpActive = false
     /// #3（2026-11-07 UX 轮）：待删除确认的本地消息（长按菜单入口 → 会话页二次确认弹层）。
     @State private var pendingDeleteMessage: UiMessage?
     /// #3'（2026-11-07 二轮）：回到底部按钮可见性——最后一条不在视口（超出贴底容差）即显示，
@@ -482,6 +483,13 @@ struct HubChatView: View {
                     }
                     ForEach(hub.messages, id: \.messageId) { m in
                         HubMessageRow(m: m, onDelete: { pendingDeleteMessage = m }).id(m.messageId)
+                            // #3'（2026-11-07 三轮，判定修正）：按钮可见性由最后一行可见性驱动
+                            //（行内容露出 25% 即「看到最新一条」→ 隐藏），替代距离容差——
+                            // 原容差判定会误留按钮（最新消息已见但距底仍超容差）。
+                            .modifier(LastRowVisibilityDriver(
+                                isLast: m.messageId == hub.messages.last?.messageId,
+                                onChange: { visible in showJumpToBottom = !visible },
+                            ))
                     }
                     // #6（2026-11-07 UX 轮）：底部贴距收窄——原 vertical 10 + 高度 4 垫行合计
                     // 视觉空隙 ~24pt 偏大；改 top 10 / bottom 0 + 垫行 2，尾行距输入区分隔线
@@ -497,15 +505,11 @@ struct HubChatView: View {
                             insetBottom: geo.contentInsets.bottom)
             } action: { _, new in
                 probeBox.latest = new
-                // #3'（2026-11-07 二轮）：回到底部按钮可见性（逐帧、不等用户手势）。
-                let away = (new.maxOffset - new.offsetY) > Self.bottomSlack
-                if away != showJumpToBottom { showJumpToBottom = away }
-                // #4 二轮：键盘唤起瞬移在途——键盘 resize 使容器几何逐帧变化，逐帧 scrollTo
-                // 钉底（内容随键盘顶起、始终贴底），落底（容差内）即清交还常规锚定判定。
-                if keyboardBottomJump {
+                // 钉底在途：逐帧 scrollTo 收敛（键盘 resize / 回底按钮共用），落底（容差内）即清。
+                if bottomJumpActive {
                     proxy.scrollTo("bottom", anchor: .bottom)
                     setAtBottom(probe: new)
-                    if (new.maxOffset - new.offsetY) <= Self.bottomSlack { keyboardBottomJump = false }
+                    if (new.maxOffset - new.offsetY) <= Self.bottomSlack { bottomJumpActive = false }
                     return
                 }
                 // 流式 append 与程序化跟随滚动（animating）不改锚定态：内容增长会把
@@ -522,6 +526,8 @@ struct HubChatView: View {
                 @unknown default: userDriven = false
                 }
                 userDrivenScroll = userDriven
+                // 用户重新抓取列表 = 取消自动钉底（人意愿优先于瞬移目标）。
+                if new == .tracking { bottomJumpActive = false }
                 // 手势/惯性结束在半途时用最终几何补判一次（惯性停在距底 30pt 也算在底）。
                 if !userDriven, let p = probeBox.latest { setAtBottom(probe: p) }
             }
@@ -560,19 +566,20 @@ struct HubChatView: View {
                 // atBottom）、无动画；键盘 resize 期间由滚动几何钉底收敛（见 action），
                 // 收键盘清在途标记。
                 guard visible else {
-                    keyboardBottomJump = false
+                    bottomJumpActive = false
                     return
                 }
-                keyboardBottomJump = true
+                bottomJumpActive = true
                 proxy.scrollTo("bottom", anchor: .bottom)
             }
-            // #3'（2026-11-07 二轮）：回到底部悬浮按钮（输入区上方、尾行不可见时出现）。
+            // #3'（2026-11-07 三轮）：回到底部悬浮按钮（输入区上方、最后一行不可见时出现）——
+            // 点击立即触发：置钉底在途 + 无动画瞬移（滑动/惯性中单次动画 scrollTo 会被在途
+            // 滚动吞掉；钉底逐帧重放直达，见 geometry action）。
             .overlay(alignment: .bottomTrailing) {
                 if showJumpToBottom {
                     Button {
-                        withAnimation(.easeOut(duration: 0.25)) {
-                            proxy.scrollTo("bottom", anchor: .bottom)
-                        }
+                        bottomJumpActive = true
+                        proxy.scrollTo("bottom", anchor: .bottom)
                     } label: {
                         Image(systemName: "chevron.down.circle.fill")
                             .font(.title3)
@@ -850,6 +857,22 @@ private struct ScrollProbe: Equatable {
 /// 仅在手势结束补判时读取。
 private final class ScrollProbeBox {
     var latest: ScrollProbe?
+}
+
+/// #3'（2026-11-07 三轮）：最后一行可见性 → 回底按钮可见性的驱动器。挂在末行（非末行空操作）；
+/// 行内容露出 25% 即视为「看到最新一条」，按钮隐藏——替代原距离容差判定（会误留按钮）。
+/// iOS 18 onScrollVisibilityChange（部署目标 18），LazyVStack 行物化/布局变化均触发。
+private struct LastRowVisibilityDriver: ViewModifier {
+    let isLast: Bool
+    let onChange: (Bool) -> Void
+
+    func body(content: Content) -> some View {
+        if isLast {
+            content.onScrollVisibilityChange(threshold: 0.25) { visible in onChange(visible) }
+        } else {
+            content
+        }
+    }
 }
 
 private struct HubMessageRow: View {

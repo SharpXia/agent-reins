@@ -14,6 +14,7 @@ import dev.sharpxia.agentreins.hub.auth.DeviceInfo
 import dev.sharpxia.agentreins.hub.db.createHubDriver
 import dev.sharpxia.agentreins.hub.db.openHubDatabase
 import dev.sharpxia.agentreins.hub.projection.CommandsList
+import dev.sharpxia.agentreins.hub.projection.ModelsList
 import dev.sharpxia.agentreins.hub.projection.EventEnvelope
 import dev.sharpxia.agentreins.hubdb.HubDatabase
 import kotlinx.coroutines.CoroutineScope
@@ -269,6 +270,22 @@ class AgentBridge {
             onResult(runCatching {
                 val stack = hubRuntime.authStack ?: throw HubException.notLoggedIn()
                 stack.auth.withBearer { stack.api.commands(conversationId) }
+            }.getOrNull())
+        }
+    }
+
+    /**
+     * 会话模型目录查询（端点 #22，v1.1 additive 2026-11-08；**纯读直调，不走幂等队列**——
+     * 模型目录是查询面无副作用，写路径纪律不适用）。读机制与 [hubCommands] 同式（authStack +
+     * withBearer 直调 REST）；onResult 非 null = 成功（可能为空目录）；null = 通道不可用
+     * （未登录/网络不可达/Hub FAILED）——调用方不渲染交互卡、下次触发重试，尽力而为增强面
+     * （不弹错误 UI，与 hubCommands 同纪律）。
+     */
+    fun hubModels(conversationId: String, onResult: (ModelsList?) -> Unit) {
+        scope.launch {
+            onResult(runCatching {
+                val stack = hubRuntime.authStack ?: throw HubException.notLoggedIn()
+                stack.auth.withBearer { stack.api.models(conversationId) }
             }.getOrNull())
         }
     }

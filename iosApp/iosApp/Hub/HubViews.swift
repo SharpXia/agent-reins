@@ -317,6 +317,13 @@ private struct HubConversationRow: View {
                     if c.reconciling {
                         Text("对账中").font(.caption2).foregroundStyle(.secondary)
                     }
+                    Spacer(minLength: 0)
+                    // #1（2026-11-08）：最近活跃时间（title 行右侧弱化展示——桌面
+                    // ConversationCard preview 行 formatTs 同族 parity；解析失败省略不占位）
+                    Text(formatMessageTimeISO(c.lastActiveAt))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
                 }
                 if !c.preview.isEmpty {
                     Text(c.preview).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
@@ -399,6 +406,21 @@ struct HubChatView: View {
 
     /// wp-8②：活跃 run 态——grokbot 式 Stop 常驻 composer 的驱动源；列表未及推送时按无 run 处理（安全降级）。
     private var isRunActive: Bool { liveConv?.hasActiveRun == true }
+
+    /// #22（2026-11-08）：模型交互卡出现判定——最后一条用户行是 `/model` 无参查看形态
+    /// （大小写不敏感，Gateway mapCommand 归一），且其回复已落定（最后一条消息为 assistant
+    /// final 行——乐观行在途/流式未落定/run 活跃期间均不出现，卡不抢在回复前），且当前无
+    /// 活跃 run。出现即在时间线尾部渲染模型目录卡（数据 = REST #22 缓存，卡片 .task 触发
+    /// 拉取），点按钮发 `/model <id>`——发送后最后用户行变为带参形态，判定自然失效收卡。
+    private var modelsCardActive: Bool {
+        guard let live = liveConv, !live.hasActiveRun else { return false }
+        let msgs = hub.messages
+        guard let lastUserIdx = msgs.lastIndex(where: { $0.role == "user" }) else { return false }
+        guard msgs[lastUserIdx].content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "/model"
+        else { return false }
+        guard let last = msgs.last else { return false }
+        return last.role == "assistant" && last.state == "final"
+    }
 
     /// wp-8②：Stop 可执行 = 活跃 run 且 activeRunId 已习得（wp-5 v4 投影）。映射未学习场景
     /// （activeRunId 为 null——DefaultEventProjector.setRun 在 resolveConversation 失败时直接
@@ -533,6 +555,16 @@ struct HubChatView: View {
                                 }
                             }
                     }
+                    // #22（2026-11-08）：斜杠交互卡——/model 无参命令回复落定后，时间线尾部
+                    // 渲染模型目录卡（REST #22 数据面），点按钮发 `/model <id>` 完成切换
+                    // （组合指令快捷路径：第一个命令发出后，后续切换只点卡片按钮）。
+                    if modelsCardActive {
+                        ModelsInteractiveCard(conversationId: conv.conversationId) { item in
+                            hub.send("/model \(item.id)")
+                        }
+                        .id("models-card")
+                        .padding(.top, 2)
+                    }
                     // #6（2026-11-07 UX 轮）：底部贴距收窄——原 vertical 10 + 高度 4 垫行合计
                     // 视觉空隙 ~24pt 偏大；改 top 10 / bottom 0 + 垫行 2，尾行距输入区分隔线
                     // ≈12pt（靠近但不贴死）。
@@ -611,6 +643,12 @@ struct HubChatView: View {
                 // 刚发出的消息与随后的服务端回复立即可见（聊天产品的自我消息语义）。
                 let ownSend = hub.consumeOwnSendScrollPending()
                 guard atBottom || ownSend else { return }
+                proxy.scrollTo("bottom", anchor: .bottom)
+            }
+            .onChange(of: modelsCardActive) { _, active in
+                // #22：交互卡出现时（回复落定瞬间）用户在底部即贴底，防卡被输入区压住不可见；
+                // 上翻阅读中不打扰。
+                guard active, atBottom else { return }
                 proxy.scrollTo("bottom", anchor: .bottom)
             }
             .onAppear {
@@ -954,6 +992,105 @@ private struct SlashCommandPanel: View {
     }
 }
 
+/// #22（2026-11-08）：斜杠交互卡——模型目录卡（端点 #22 数据面）。/model 无参命令回复
+/// 落定后出现于时间线尾部（modelsCardActive 判定），按供应商分节展示模型按钮，点按钮
+/// 发送 `/model <id>`（Gateway 原生模型标识原样回填，客户端不拼装不改写——ADR-14）。
+/// 数据 = HubStore.modelsCache（fetchModelsIfNeeded TTL 缓存 + 在途去重，与命令目录同
+/// 纪律）；拉取中呈进度态，空目录/截断如实标注；不可用模型按钮置灰（available=false，
+/// 不编造原因）。卡片纯本地视图零命令副作用，选择动作走 hub.send 既有通道。
+private struct ModelsInteractiveCard: View {
+    @State private var hub = HubStore.shared
+    let conversationId: String
+    let onSelect: (ModelOptionItem) -> Void
+    @Environment(\.inkColors) private var ink
+
+    var body: some View {
+        let list = hub.modelsCache[conversationId]
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "cpu").font(.caption2)
+                Text("切换模型").font(.caption.weight(.semibold))
+                Text("点击发送 /model <模型>")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if list?.truncated == true {
+                    Text("已截断").font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+            .foregroundStyle(.secondary)
+            if let list {
+                if list.models.isEmpty {
+                    Text("暂无可用模型")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    providerSections(list.models)
+                }
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("正在获取模型目录…").font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12).fill(ink.elevated))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(ink.borderTertiary, lineWidth: 1))
+        .task { hub.fetchModelsIfNeeded(conversationId: conversationId) }
+    }
+
+    /// 供应商分节按钮流（保持目录首现顺序；available=false 置灰）。
+    private func providerSections(_ models: [ModelOptionItem]) -> some View {
+        let grouped = Dictionary(grouping: models, by: { $0.provider })
+        let order = models.map(\.provider).reduce(into: [String]()) { acc, p in
+            if !acc.contains(p) { acc.append(p) }
+        }
+        return VStack(alignment: .leading, spacing: 8) {
+            ForEach(order, id: \.self) { provider in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(provider)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 132), spacing: 6)], spacing: 6) {
+                        ForEach(grouped[provider] ?? [], id: \.id) { item in
+                            modelButton(item)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func modelButton(_ item: ModelOptionItem) -> some View {
+        let available = item.available?.boolValue ?? true
+        return Button {
+            onSelect(item)
+        } label: {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(item.name)
+                    .font(.footnote.weight(.medium))
+                    .lineLimit(1)
+                Text(item.id)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 8).fill(ink.surfaceTertiary))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(ink.borderTertiary, lineWidth: 0.5))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!available)
+        .opacity(available ? 1 : 0.45)
+        .accessibilityLabel("切换模型到 \(item.name)\(available ? "" : "（不可用）")")
+    }
+}
+
 /// wp-7①：滚动几何探针（onScrollGeometryChange 变换产物），供锚定态判定。
 /// b8：末行视口位置（named space，用户口径的「最底下的 item」底边）——0.4.6 纪律的
 /// 滚动路径非观测盒，逐帧更新不触发 body 重渲。
@@ -1137,10 +1274,10 @@ private struct HubMessageRow: View {
     private var statusBadge: some View {
         let ui = m.uiState
         HStack(spacing: 4) {
-            if hub.isQueuedRow(m) {
-                // #2'（2026-11-07 二轮，用户拍板）：排队中作为消息状态显示——活跃 run 期间
-                // 发出的用户行（含乐观行），替代原 composer 的「运行中发送将排队」提示；
-                // run 收尾后自动翻回常规徽标。
+            if ui == "queued" {
+                // #3（2026-11-08）：排队中 = 消息级落库状态（发送时 run 活跃），run 终态由
+                // 投影层统一释放翻已送达——替代旧会话级水位判定（旧口径把发消息自己触发的
+                // run 也染上排队，且水位=0 时波及全会话历史行）。
                 Image(systemName: "hourglass").font(.caption2)
                 Text("排队中").font(.caption2)
             } else if m.state == "streaming" {
@@ -1152,6 +1289,8 @@ private struct HubMessageRow: View {
                 Image(systemName: "exclamationmark.triangle.fill").font(.caption2).foregroundStyle(.red)
                 Text("发送失败").font(.caption2).foregroundStyle(.red)
             } else if ui == "delivered" {
+                // 已送达 = 唯一的 ✓ 形态：出现即代表排队已释放/网关已确认，不再有
+                // 「打勾后又排队」的二义序列（#3）。
                 Image(systemName: "checkmark").font(.caption2).foregroundStyle(.secondary)
             }
         }

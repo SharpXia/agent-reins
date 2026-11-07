@@ -160,6 +160,36 @@ final class HubStore {
 
     private static let commandsCacheTTL: TimeInterval = 300
 
+    // ---------- #22：会话模型目录（v1.1 additive，2026-11-08；斜杠交互卡数据面） ----------
+
+    /// 模型目录缓存（conversationId → REST #22 回执）。纯内存、随登出清空；TTL 5 分钟
+    /// （与命令目录同拍板口径），过期后下次触发重拉。失败不缓存——交互卡不渲染（静默
+    /// 降级，与命令目录同纪律），下次触发重试。
+    private(set) var modelsCache: [String: ModelsList] = [:]
+
+    /// 缓存拉取时刻（TTL 判定基准；与 modelsCache 同键同生命周期）。
+    private var modelsFetchedAt: [String: Date] = [:]
+
+    /// 在途去重：同会话并发触发只发一次请求（列表类限流每设备 60 次/分钟）。
+    private var modelsInFlight: Set<String> = []
+
+    /// 触发面 = 交互卡出现判定为真时（会话页 timeline 组合侧调用）；缓存新鲜即空转。
+    /// 失败静默吞（onResult null 不入缓存），与 fetchCommandsIfNeeded 同纪律。
+    func fetchModelsIfNeeded(conversationId: String) {
+        guard isLoggedIn else { return }
+        if let fetchedAt = modelsFetchedAt[conversationId],
+           Date().timeIntervalSince(fetchedAt) < Self.commandsCacheTTL { return }
+        guard !modelsInFlight.contains(conversationId) else { return }
+        modelsInFlight.insert(conversationId)
+        bridge.hubModels(conversationId: conversationId) { [weak self] list in
+            guard let self else { return }
+            self.modelsInFlight.remove(conversationId)
+            guard let list else { return }
+            self.modelsCache[conversationId] = list
+            self.modelsFetchedAt[conversationId] = Date()
+        }
+    }
+
     /// 草稿以 "/" 起手时按需拉取动态目录（触发面 = composer onChange(of: draft)；缓存新鲜即空转，
     /// 其余输入零干扰不触发）。失败（onResult null）静默吞——维持静态六目录，不弹错误 UI
     /// （尽力而为增强面，与 hubReportApnsToken 同纪律）。
@@ -420,23 +450,12 @@ final class HubStore {
     func send(_ text: String) {
         guard let c = selected else { return }
         ownSendScrollPending = true
-        // #2'（2026-11-07 二轮）：活跃 run 期间发送 = 排队——记发送时刻会话 lastSeq 为水位，
-        // 此后落库的用户行（seq 越过水位）在 run 收尾前呈「排队中」徽标（isQueuedRow）。
-        if let live = liveSelected, live.hasActiveRun {
-            queuedSendWatermark = max(queuedSendWatermark, live.lastSeq)
-        }
+        // #3（2026-11-08）：排队态已下沉为消息级落库状态——KMP 侧 DefaultCommandClient 在
+        // 乐观行插行时按发送时刻会话 run 态落 queued/sending（run 终态 releaseQueuedRows
+        // 统一释放），Swift 侧只读 m.uiState 渲染，不再维护会话级水位判定（旧 isQueuedRow
+        // 水位=0 时把全会话用户行误染排队——#4 历史行误变的根因，已随水位机制一并退役）。
         bridge.hubSend(conversationId: c.conversationId, text: text)
     }
-
-    /// #2'（2026-11-07 二轮，用户拍板「排队中作为消息状态显示」）：行级排队判定——活跃 run
-    /// 期间发出（seq 越过水位）的用户行；乐观行（占位 seq=Int64.max）恒命中。run 收尾
-    /// （hasActiveRun=false）后整体翻回常规状态徽标（已送达/已读），随会话切换重置。
-    func isQueuedRow(_ m: UiMessage) -> Bool {
-        guard m.role == "user", let c = liveSelected, c.hasActiveRun else { return false }
-        return m.seq > queuedSendWatermark
-    }
-
-    private(set) var queuedSendWatermark: Int64 = 0
 
     // ---------- 崩溃防护 + 本地清理（2026-11-07 UX 轮） ----------
 
@@ -623,7 +642,6 @@ final class HubStore {
         restoreArmed = false
         canLoadEarlier = false
         reportedReadUpTo = 0
-        queuedSendWatermark = 0 // #2'：排队水位随会话期重置
     }
 
     /// 乐观行占位 seq（DefaultCommandClient message.send 插行 seq=Long.MAX_VALUE，message.created
@@ -885,6 +903,10 @@ final class HubStore {
         commandsInFlight = []
         commandsFailed = []
         commandsSlashSession = [:]
+        // #22：模型目录缓存随登出清空（同命令目录纪律）
+        modelsCache = [:]
+        modelsFetchedAt = [:]
+        modelsInFlight = []
         chatPush = false
         // wp-10：连接相位复位（同步栈已停转，重登后 watchPhase 重新挂订阅）
         syncPhase = "catching"

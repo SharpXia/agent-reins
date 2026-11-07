@@ -13,6 +13,7 @@ import dev.sharpxia.agentreins.hub.projection.ApprovalDecisionRequest
 import dev.sharpxia.agentreins.hub.projection.CancelRunRequest
 import dev.sharpxia.agentreins.hub.projection.CommandReceipt
 import dev.sharpxia.agentreins.hub.projection.CommandsList
+import dev.sharpxia.agentreins.hub.projection.ModelsList
 import dev.sharpxia.agentreins.hub.projection.ConversationsPage
 import dev.sharpxia.agentreins.hub.projection.CreateConversationRequest
 import dev.sharpxia.agentreins.hub.projection.EventsPage
@@ -121,6 +122,10 @@ class DefaultHubApi(
     /** #21（v1.1 additive）：动态斜杠命令目录；路径参数不含用户自由文本，直拼安全（既有 get 样板）。 */
     override suspend fun commands(conversationId: String): CommandsList =
         get("/conversations/$conversationId/commands")
+
+    /** #22（v1.1 additive）：会话模型目录；路径参数不含用户自由文本，直拼安全（既有 get 样板）。 */
+    override suspend fun models(conversationId: String): ModelsList =
+        get("/conversations/$conversationId/models")
 
     override suspend fun renameConversation(conversationId: String, req: RenameConversationRequest): CommandReceipt =
         patch("/conversations/$conversationId", req)

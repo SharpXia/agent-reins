@@ -373,10 +373,13 @@ deleteLocalMessage:
 DELETE FROM hubMessages WHERE conversationId = ? AND messageId = ?;
 
 -- 用户行回执到达：同 idempotencyKey 的本地乐观行（messageId=临时键）整体提升为服务端行，
--- 避免乐观行+服务端行双行并存（05 §3.9 义务 4 的 UI 翻转语义）
+-- 避免乐观行+服务端行双行并存（05 §3.9 义务 4 的 UI 翻转语义）。
+-- queued 保留（#3 2026-11-08：消息级排队态——乐观行发送时 run 活跃即置 queued，回执到达
+-- 不改变排队事实；排队释放由 run 终态 releaseQueuedRows 承担，不在此提前翻 delivered）
 promoteLocalEcho:
 UPDATE hubMessages SET messageId = :messageId, content = :content, seq = :seq,
-  uiState = 'delivered', commandId = :commandId, ts = :ts
+  uiState = CASE WHEN uiState = 'queued' THEN 'queued' ELSE 'delivered' END,
+  commandId = :commandId, ts = :ts
 WHERE idempotencyKey = :idempotencyKey;
 
 selectMessageByIdem:
@@ -384,6 +387,17 @@ SELECT idempotencyKey, conversationId FROM hubMessages WHERE idempotencyKey = ? 
 
 setMessageUiStateByIdem:
 UPDATE hubMessages SET uiState = ? WHERE idempotencyKey = ? AND state != 'failed';
+
+-- 已投递翻转（#3 2026-11-08：queued 豁免版）——GATEWAY_ACKED/COMPLETED ack 不覆盖消息级
+-- 排队态：网关收进队列 ≠ 排队释放，queued 行保持排队徽标直至 run 终态释放；失败翻转
+-- （UI_FAILED）仍走原 setMessageUiStateByIdem（失败必须覆盖排队）。
+setMessageUiStateDeliveredByIdem:
+UPDATE hubMessages SET uiState = 'delivered' WHERE idempotencyKey = ? AND state != 'failed' AND uiState != 'queued';
+
+-- 排队释放（#3 2026-11-08）：run 终态（hasActiveRun 1→0）时该会话全部 queued 用户行翻
+-- delivered——阻塞 run 结束 = 队列释放，其后各行按自身 run 顺序被处理（delivered 语义成立）。
+releaseQueuedRows:
+UPDATE hubMessages SET uiState = 'delivered' WHERE conversationId = ? AND uiState = 'queued';
 
 -- 回显去重（v8，2026-11-06 真机修复）：回显不带幂等键时（bridge 契约缺口，Gateway 载荷不携带），
 -- 同会话已过 DELIVERED 的乐观行（seq=Long.MAX 占位序）已被本权威行取代，清除防双气泡并存；

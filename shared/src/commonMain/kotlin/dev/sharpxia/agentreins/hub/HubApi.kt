@@ -12,6 +12,7 @@ import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
 import dev.sharpxia.agentreins.hub.projection.ApprovalDecisionRequest
 import dev.sharpxia.agentreins.hub.projection.CommandReceipt
 import dev.sharpxia.agentreins.hub.projection.CommandsList
+import dev.sharpxia.agentreins.hub.projection.ModelsList
 import dev.sharpxia.agentreins.hub.projection.ConversationsPage
 import dev.sharpxia.agentreins.hub.projection.CreateConversationRequest
 import dev.sharpxia.agentreins.hub.projection.EventsPage
@@ -97,6 +98,16 @@ interface HubApi {
      * truncated=true 表示列表被截断（Gateway 500 上限或桥帧预算），客户端按已有列表渲染即可。
      */
     suspend fun commands(conversationId: String): CommandsList
+
+    /**
+     * #22（v1.1 additive，2026-11-08）：会话模型目录——Gateway models.list 的服务端有界透传。
+     * conversationId 由服务端解析（无查询参数、无分页）。纯读无副作用，限流走列表类
+     * （08 §9.1 每设备 60 次/分钟）；404 = 会话不存在/无权（HUB-BIZ-002 防枚举既有语义），
+     * 503 = 桥离线/查询超时/上游不可用。truncated=true 表示列表被截断（条目上限 100 或
+     * 桥帧预算），客户端按已有列表渲染即可。消费面 = 斜杠交互卡（/model 命令回复落定后
+     * 渲染模型卡，点按钮发 `/model <id>`——发送走既有 message.send 通道）。
+     */
+    suspend fun models(conversationId: String): ModelsList
 
     /** 会话重命名命令 conversation.rename（#19）；结果经 session.updated 事件与列表投影更新。404 HUB-BIZ-002。 */
     suspend fun renameConversation(conversationId: String, req: RenameConversationRequest): CommandReceipt

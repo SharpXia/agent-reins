@@ -484,6 +484,13 @@ class DefaultEventProjector(
             conversationId = convId,
         )
         if (!active) {
+            // #3（2026-11-08）：排队释放——run 终态（hasActiveRun 1→0）= 阻塞 run 结束，
+            // 该会话全部 queued 用户行（发送时 run 活跃而置 queued 的行，DefaultCommandClient
+            // 乐观行落库口径）翻 delivered。消息级排队态的单一释放点：促发回执（promote）、
+            // ack（setMessageUiStateDeliveredByIdem）均不提前翻排队行。
+            db.hubQueries.releaseQueuedRows(convId)
+        }
+        if (!active) {
             // run 终态清除（v4）：失败/中止 run 无 message 终态事件可收敛其占位行（异锚身份），
             // 活跃 run 结束即清会话全部流式行——正常完成时占位行已被 created 清除，此处兜底
             // 防幽灵流式气泡；单活跃 run 模型下终态时刻不存在合法在途流。
@@ -690,9 +697,11 @@ class DefaultEventProjector(
         // 「✓ 又发送失败」观感。改为仅在网关确认后翻已投递：PERSISTED/DELIVERING 保持
         // sending（发送中徽标可见窗口），GATEWAY_ACKED/COMPLETED → delivered；COMPLETED
         // 语义仍由 message.created 权威内容收敛（此处只做保底）。
+        // #3（2026-11-08）：delivered 翻转走 queued 豁免版——网关把命令收进队列
+        // （GATEWAY_ACKED）≠ 排队释放，消息级 queued 行保持排队徽标直至 run 终态释放。
         when (d.status) {
             "GATEWAY_ACKED", "COMPLETED" ->
-                db.hubQueries.setMessageUiStateByIdem(UI_DELIVERED, d.idempotencyKey)
+                db.hubQueries.setMessageUiStateDeliveredByIdem(d.idempotencyKey)
             else -> Unit
         }
         learnMappingFromCommand(envelope, d.idempotencyKey)

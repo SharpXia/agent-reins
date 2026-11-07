@@ -121,14 +121,19 @@ class DefaultCommandClient(
             createdAt = now, updatedAt = now,
         )
         // message.send 同步插乐观行（messageId=幂等键临时占位，message.created 回执时提升为服务端行；
-        // seq=Long.MAX_VALUE 恒排末尾，回执后取服务端 seq）。wp-4：SEND 准入登记**不在提交前**——
-        // 挪到 submit 取得 PERSISTED 回执之后（回归修复 2026-11-06），提交未达（FAILED/网络失败）
-        // 的消息不登记，避免「没发出的消息」给会话开准入
+        // seq=Long.MAX_VALUE 恒排末尾，回执后取服务端 seq）。uiState 按发送时刻会话 run 态分档
+        // （#3 2026-11-08：排队态下沉为消息级落库状态——发送时 run 活跃 = 该行排队，run 终态
+        // releaseQueuedRows 统一释放；旧版 Swift 侧会话级水位判定会把全会话用户行误染排队，
+        // 且发消息自己触发的 run 会把自己染上排队，本落库口径同时修 #3/#4）。wp-4：SEND 准入
+        // 登记**不在提交前**——挪到 submit 取得 PERSISTED 回执之后（回归修复 2026-11-06），
+        // 提交未达（FAILED/网络失败）的消息不登记，避免「没发出的消息」给会话开准入
         if (type == "message.send" && conversationId != null) {
+            val runActive = db.hubQueries.selectConversation(conversationId).executeAsOneOrNull()
+                ?.hasActiveRun == 1L
             db.hubQueries.upsertMessage(
                 messageId = key, conversationId = conversationId, seq = Long.MAX_VALUE,
                 role = "user", content = payload, state = "final", reason = null,
-                uiState = "sending",
+                uiState = if (runActive) "queued" else "sending",
                 commandId = null, idempotencyKey = key, ts = now,
             )
         }

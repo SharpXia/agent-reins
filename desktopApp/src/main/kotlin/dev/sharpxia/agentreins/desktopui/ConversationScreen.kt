@@ -9,6 +9,8 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ContextMenuArea
 import androidx.compose.foundation.ContextMenuItem
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,6 +48,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
@@ -69,6 +72,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.sharpxia.agentreins.hub.DefaultHubClient
 import dev.sharpxia.agentreins.hub.UiApproval
+import dev.sharpxia.agentreins.hub.projection.ModelOptionItem
+import dev.sharpxia.agentreins.hub.projection.ModelsList
 import dev.sharpxia.agentreins.hub.UiConversation
 import dev.sharpxia.agentreins.hub.UiMessage
 import dev.sharpxia.agentreins.hub.UiWorkActivity
@@ -111,6 +116,44 @@ private suspend fun fetchSlashCommands(client: DefaultHubClient, conversationId:
     val stack = client.runtime.authStack ?: return null
     return try {
         stack.auth.withBearer { stack.api.commands(conversationId) }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
+    }
+}
+
+/**
+ * 会话模型目录内存缓存（#22，v1.1 additive 2026-11-08；桌面轻量单例，会话键 → (目录, 取数
+ * 时刻)）：进程级共享、不落盘，纪律与 [SlashCommandsCache] 全同（TTL 5 分钟、纯读目录、
+ * 限流远低于列表类 60 次/分/设备）。
+ */
+private object ModelsCache {
+    private val entries = mutableMapOf<String, Pair<ModelsList, Long>>()
+
+    /** 未过期返回目录，否则 null（过期与缺失同口径，调用方重拉）。 */
+    @Synchronized
+    fun valid(conversationId: String, nowMs: Long = System.currentTimeMillis()): ModelsList? =
+        entries[conversationId]
+            ?.takeIf { nowMs - it.second < SLASH_COMMANDS_TTL_MS }
+            ?.first
+
+    @Synchronized
+    fun put(conversationId: String, list: ModelsList, nowMs: Long = System.currentTimeMillis()) {
+        entries[conversationId] = list to nowMs
+    }
+}
+
+/**
+ * 端点 #22 拉取（#22，v1.1 additive 2026-11-08；纯读直调 REST，不走命令队列）：经
+ * runtime.authStack 复用 bearer 刷新栈调 HubApi.models(conversationId)，与 fetchSlashCommands
+ * 同款通道纪律。返回 null = 通道不可用（未登录）或 REST 未成功，调用方不渲染交互卡
+ * （静默降级，与命令目录同纪律）；Cancel 不吞（屏幕销毁即放弃）。
+ */
+private suspend fun fetchModels(client: DefaultHubClient, conversationId: String): ModelsList? {
+    val stack = client.runtime.authStack ?: return null
+    return try {
+        stack.auth.withBearer { stack.api.models(conversationId) }
     } catch (e: CancellationException) {
         throw e
     } catch (_: Exception) {
@@ -410,6 +453,25 @@ internal fun ConversationScreen(
         catalog = mergedSlashCommands(dynamicCommands?.commands ?: emptyList()),
     )
 
+    // #22（2026-11-08）：模型交互卡出现判定——最后一条用户行是 `/model` 无参查看形态
+    // （大小写不敏感，Gateway mapCommand 归一），且其回复已落定（最后一条消息为 assistant
+    // final 行——乐观行在途/流式未落定/run 活跃期间均不出现），且当前无活跃 run。出现即
+    // 触发目录拉取（ModelsCache TTL + 在途去重在下方 effect），点按钮发 `/model <id>`
+    // （组合指令快捷路径：第一个命令发出后，后续切换只点卡片按钮；发送后最后用户行变为
+    // 带参形态，判定自然失效收卡）。
+    val modelsCardActive = !isRunActive && run {
+        val lastUserIdx = messages.indexOfLast { it.role == "user" }
+        lastUserIdx >= 0 &&
+            messages[lastUserIdx].content.trim().lowercase() == "/model" &&
+            messages.lastOrNull()?.let { it.role == "assistant" && it.state == "final" } == true
+    }
+    LaunchedEffect(modelsCardActive) {
+        if (!modelsCardActive) return@LaunchedEffect
+        if (ModelsCache.valid(conversationId) != null) return@LaunchedEffect
+        val fetched = fetchModels(client, conversationId)
+        if (fetched != null) ModelsCache.put(conversationId, fetched)
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         // 头部：会话名（投影 label）
         Surface(color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)) {
@@ -524,6 +586,19 @@ internal fun ConversationScreen(
                         agentLabel = label.ifBlank { "Agent" },
                     )
                 }
+                // #22：模型交互卡（iOS ModelsInteractiveCard 桌面同构）——/model 回复落定后
+                // 出现于时间线尾部，按供应商分节展示模型按钮，点按钮发 `/model <id>`。
+                if (modelsCardActive) {
+                    item(key = "models-card") {
+                        ModelsInteractiveCard(
+                            conversationId = conversationId,
+                            onSelect = { item ->
+                                input = TextFieldValue("")
+                                scope.launch { client.commands?.sendMessage(conversationId, "/model ${item.id}") }
+                            },
+                        )
+                    }
+                }
             }
             // 2026-11-07 二轮：回到底部悬浮按钮（iOS HubChatView 同款语义；最后一条不可见即浮现）
             if (showJumpToBottom) {
@@ -560,19 +635,9 @@ internal fun ConversationScreen(
         // 发送区
         Surface(color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)) {
             Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
-                if (isRunActive) {
-                    // wp-6（iOS wp-14 队列提示同文案同语义）：队列模式提示文案——chat.send 不透传
-                    // queueMode 参数（schema ChatSendParams.queueMode steer/followup/collect/
-                    // interrupt 本轮不接），运行中发送按 Gateway 默认队列语义排队，文案与该实际
-                    // 行为对齐；语义透传留待后续。发送照常不阻塞：键盘 Enter 与无参斜杠命令选中
-                    // 仍可发（发送键位仍由 wp-8② Stop 常驻替代）。
-                    Text(
-                        "⏳ 运行中发送将排队",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(bottom = 6.dp),
-                    )
-                }
+                // #3（2026-11-08）：composer「运行中发送将排队」提示撤显示（iOS 2026-11-07
+                // 二轮同款）——排队语义上移为消息自身的「排队中」状态徽标（消息级落库状态，
+                // 见 UserMessageRow queued 分支），composer 行不再占位。
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -717,6 +782,9 @@ private fun UserMessageRow(m: UiMessage) {
         ) {
             Text(formatTs(m.ts), fontSize = 11.sp, color = Color(0xFF999999))
             when (m.uiState) {
+                // #3（2026-11-08）：排队中 = 消息级落库状态（发送时 run 活跃），run 终态由
+                // 投影层统一释放翻已送达——替代旧 composer 会话级队列提示。
+                "queued" -> TagChip("排队中", Color(0xFFB26A00), Modifier.padding(start = 6.dp))
                 "sending" -> TagChip("发送中…", Color(0xFF666666), Modifier.padding(start = 6.dp))
                 "failed" -> TagChip("发送失败", MaterialTheme.colorScheme.error, Modifier.padding(start = 6.dp))
                 "delivered" -> TagChip("已送达", Color(0xFF2E9E44), Modifier.padding(start = 6.dp))
@@ -844,6 +912,97 @@ private fun SlashCommandPanel(
                     HorizontalDivider(modifier = Modifier.padding(start = 12.dp))
                 }
             }
+        }
+    }
+}
+
+// ── #22（2026-11-08）：斜杠交互卡——模型目录卡（iOS ModelsInteractiveCard 桌面同构） ──
+
+/**
+ * 模型目录卡（端点 #22 数据面，v1.1 additive 2026-11-08）：/model 无参命令回复落定后
+ * 出现于时间线尾部（ConversationScreen.modelsCardActive 判定），按供应商分节展示模型
+ * 按钮，点按钮发送 `/model <id>`（Gateway 原生模型标识复用 #22 目录 id 原样回填，客户端
+ * 不拼装不改写——ADR-14）。数据 = [ModelsCache]（TTL 缓存 + effect 触发拉取，与命令目录
+ * 同纪律）；拉取中呈进度态，空目录/截断如实标注；不可用模型按钮置灰（available=false，
+ * 不编造原因）。卡片纯本地视图零命令副作用，选择动作走 sendMessage 既有通道。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ModelsInteractiveCard(
+    conversationId: String,
+    onSelect: (ModelOptionItem) -> Unit,
+) {
+    val cached = ModelsCache.valid(conversationId)
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("切换模型", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "点击发送 /model <模型>",
+                    fontSize = 11.sp,
+                    color = Color(0xFF999999),
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                )
+                if (cached?.truncated == true) {
+                    Text("已截断", fontSize = 11.sp, color = Color(0xFF999999))
+                }
+            }
+            if (cached != null) {
+                if (cached.models.isEmpty()) {
+                    Text("暂无可用模型", fontSize = 12.sp, color = Color(0xFF999999))
+                } else {
+                    val grouped = cached.models.groupBy { it.provider }
+                    grouped.forEach { (provider, models) ->
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(provider, fontSize = 11.sp, color = Color(0xFF777777))
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                models.forEach { item ->
+                                    ModelOptionButton(item, onSelect)
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(6.dp))
+                    Text("正在获取模型目录…", fontSize = 12.sp, color = Color(0xFF999999))
+                }
+            }
+        }
+    }
+}
+
+/** 单模型按钮：显示名 + id 小字；available=false 置灰禁用（不编造原因）。 */
+@Composable
+private fun ModelOptionButton(item: ModelOptionItem, onSelect: (ModelOptionItem) -> Unit) {
+    val available = item.available ?: true
+    TextButton(
+        onClick = { onSelect(item) },
+        enabled = available,
+        modifier = Modifier.alpha(if (available) 1f else 0.45f),
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+    ) {
+        Column(horizontalAlignment = Alignment.Start) {
+            Text(item.name, fontSize = 12.sp, maxLines = 1)
+            Text(
+                item.id,
+                fontSize = 10.sp,
+                color = Color(0xFF999999),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

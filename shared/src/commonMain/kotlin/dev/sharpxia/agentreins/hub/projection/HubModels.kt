@@ -246,6 +246,32 @@ data class CommandsList(
     val truncated: Boolean? = null,
 )
 
+/**
+ * 端点 #22 命令目录项（v1.1 additive，2026-11-08）：Gateway models.list 的**有界透传视图**
+ * ——服务端只回白名单字段（id/name/provider/available），contextWindow/thinkingLevels/
+ * runtimeChoices/agentRuntime 等内幕字段不过客户端面（去会话化纪律同时生效：请求/响应体
+ * 零 sessionId/sessionKey）。id 为 Gateway 原生模型标识（provider/model 规范形）——客户端
+ * 交互卡点按钮发送 `/model <id>` 即用此值，客户端不拼装不改写（ADR-14：原样保留不数值化）。
+ */
+@Serializable
+data class ModelOptionItem(
+    /** Gateway 原生模型标识（provider/model 规范形；交互卡发送文本取值）。 */
+    val id: String,
+    /** 模型显示名。 */
+    val name: String,
+    /** 供应商标识（交互卡分节/小字展示）。 */
+    val provider: String,
+    /** true/缺省 = 可选；false = 当前不可用（客户端按钮置灰，不编造原因）。 */
+    val available: Boolean? = null,
+)
+
+/** 端点 #22 响应体（v1.1 additive）：truncated=true 表示列表被截断（条目上限 100 或桥帧预算 256KiB）。 */
+@Serializable
+data class ModelsList(
+    val models: List<ModelOptionItem> = emptyList(),
+    val truncated: Boolean? = null,
+)
+
 @Serializable
 data class CommandReceipt(
     val commandId: String,

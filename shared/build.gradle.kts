@@ -24,8 +24,14 @@ kotlin {
         commonMain.dependencies {
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kotlinx.serialization.json)
+            implementation(libs.kotlinx.datetime)
             implementation(libs.ktor.client.core)
+            // Hub REST 客户端（hub/ 包，P1 起填充）：JSON 编解码 + Bearer 注入
+            implementation(libs.ktor.client.content.negotiation)
+            implementation(libs.ktor.serialization.kotlinx.json)
             implementation(libs.ktor.client.websockets)
+            // Hub 投影查询 Flow 化（selectConversations.asFlow 等）
+            implementation(libs.sqldelight.coroutines)
         }
         androidMain.dependencies {
             implementation(libs.ktor.client.okhttp)
@@ -51,6 +57,16 @@ kotlin {
                 implementation(libs.sqldelight.native.driver)
             }
         }
+        // iOS 专属依赖同时挂到 iosMain 中间层：叶子编译（Xcode 框架链路）一直可用，
+        // 但 compileIosMainKotlinMetadata 走 iosMain 类路径——main（c817869）上
+        // :shared:build 因此从未全绿（2026-11-01 A/B 实证：同样报 NativeSqliteDriver
+        // unresolved）。hub 化期间 :shared:build 作为出厂闸门，故补齐；运行行为零变化。
+        matching { it.name == "iosMain" }.configureEach {
+            dependencies {
+                implementation(libs.ktor.client.darwin)
+                implementation(libs.sqldelight.native.driver)
+            }
+        }
         commonTest.dependencies {
             implementation(kotlin("test"))
         }
@@ -58,17 +74,20 @@ kotlin {
         val desktopTest by getting {
             dependencies {
                 implementation(libs.sqldelight.sqlite.driver)
+                implementation(libs.kotlinx.coroutines.test)
             }
         }
     }
 }
 
-// M2.5 数据基座（ADR #5）：单库四表。缓存是加速层不是真相源（chat.history / sessions.list
-// 始终权威），schema 独立版本号见 CacheStore——破坏性变更 drop 重建，随时可整库重建。
+// Hub 投影库（hub 化 P2 起唯一本地库）：缓存是加速层不是真相源（快照 + 事件流始终权威），
+// 410/版本不符整库重建。sqlite-3-24 dialect：会话/已读 upsert 依赖 ON CONFLICT DO UPDATE（3.24+ 语法）。
 sqldelight {
     databases {
-        create("AgentReinsDatabase") {
-            packageName.set("dev.sharpxia.agentreins.db")
+        create("HubDatabase") {
+            packageName.set("dev.sharpxia.agentreins.hubdb")
+            srcDirs.setFrom("src/commonMain/sqldelight/dev/hubdb")
+            dialect(libs.sqldelight.dialect324)
         }
     }
 }

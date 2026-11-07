@@ -22,17 +22,10 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<key>HubDefaultBaseURL</key>
+	<string>https://$(HUB_PUBLIC_HOST)/v1</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
-	<key>NSAppTransportSecurity</key>
-	<dict>
-		<key>NSAllowsLocalNetworking</key>
-		<true/>
-	</dict>
-	<key>NSCameraUsageDescription</key>
-	<string>扫描 openclaw qr 生成的配对二维码，免去手动输入网关地址与批准步骤。</string>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>连接你自建的 OpenClaw 网关以查看与控制 Agent（局域网 / Tailscale）。</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

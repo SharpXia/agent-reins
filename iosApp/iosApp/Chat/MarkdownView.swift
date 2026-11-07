@@ -11,9 +11,210 @@ let markdownCacheMinimumLength = 120
 /// 排版。已知取舍：代码块自动折行（无横向滚动）；远程图片不取（按空处理）。
 struct MarkdownView: View {
     let content: String
+    /// 流式行（StreamingTypewriter 逐字前缀喂入）：true = 跳过 JSON 卡嗅探，仅 final 行嗅探
+    /// （对位桌面 jsonCardPayloadOrNull 的 streaming 闸——半流前缀可瞬时合法如 `[]`/`{}`，
+    /// 出卡后随载荷继续流入解析失效即回落，「闪卡-消失」比晚一拍出卡更伤）。
+    var streaming: Bool = false
 
     var body: some View {
-        LiteMarkdownBody(content: content).equatable()
+        LiteMarkdownBody(content: content, streaming: streaming).equatable()
+    }
+}
+
+/// JSON 卡嗅探（ADR-10 纯展示层判定）：仅 final 行（streaming=false）参与——content 去首尾
+/// 空白后首字符 ∈ [/{ 且 JSONSerialization 解析成功才判为 JSON 卡候选——progress_line
+///（`[1] status=…`）、`[logged]`、`[main 264be05]` 等 `[` 开头非 JSON 文本解析必然失败，
+/// 天然回落既有渲染。流式行整段绕过嗅探：StreamingTypewriter 逐字喂出的前缀可能瞬时恰好
+/// 构成合法 JSON（如 `[]`/`{}`），不能靠「不完整即解析失败」兜底；折叠态在 JsonCardView
+/// 的 @State（视图层），不进任何缓存。
+/// 判定只在此处发生，结果不写入 LiteMarkdownCache（缓存只存既有 markdown 块解析产物）。
+private enum JsonCardSniffer {
+    /// 解析成功返回顶层对象/数组；失败返回 nil（调用方走既有 markdown 管线，行为兜底不变）。
+    static func sniff(_ content: String) -> Any? {
+        let t = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = t.first, first == "[" || first == "{" else { return nil }
+        guard let data = t.data(using: .utf8),
+              let value = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        // fragmentsAllowed 未开：数字/字符串等标量顶层本就不可能进（首字符已限定 [/{）
+        return value
+    }
+
+    /// 工具列表卡判定：顶层数组且 ≥1 元素为对象、id 以 openclaw: 开头且含 label 字符串
+    /// （openclaw 工具列表形态，与桌面同构）。
+    static func toolListItems(_ value: Any) -> [JsonToolItem]? {
+        guard let arr = value as? [[String: Any]] else { return nil }
+        let items = arr.compactMap { dict -> JsonToolItem? in
+            guard let id = dict["id"] as? String, id.hasPrefix("openclaw:") else { return nil }
+            let label = dict["label"] as? String ?? id
+            return JsonToolItem(id: id, label: label, raw: dict)
+        }
+        return items.isEmpty ? nil : items
+    }
+
+    struct JsonToolItem: Identifiable {
+        let id: String
+        let label: String
+        let raw: [String: Any]
+
+        /// pretty 排序键后的原始 JSON 文本（单条展开/复制用）。
+        var rawText: String { JsonCardSniffer.pretty(raw) }
+    }
+
+    /// pretty（排序键）文本：与桌面同构；失败回落原文（调用方已确保 value 来自合法 JSON）。
+    static func pretty(_ value: Any) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: value,
+                                                     options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]),
+              let s = String(data: data, encoding: .utf8) else { return String(describing: value) }
+        return s
+    }
+}
+
+/// JSON 卡片（与桌面 MarkdownText 同构的两形态）：
+/// - 工具列表卡：label 列表 + id 小字辅助；单条点开展开该条原始 JSON，复制 = 该条原始 JSON；
+/// - 通用 JSON 卡：pretty（排序键）等宽 13（对齐既有 .code 字号/底色），超 8 行默认折叠
+///   （收起显示前 8 行 +「展开 N 行」），展开/收起 + 复制按钮。
+/// 折叠态存本视图 @State（视图层），不进 LiteMarkdownCache；行随 LazyVStack 物化重建即回默认态。
+private struct JsonCardView: View {
+    @Environment(\.inkColors) private var c
+    let raw: String
+    /// 嗅探产物（调用方已解析成功，直接持有免二次解析）。
+    let value: Any
+
+    /// 工具列表形态（nil = 通用 JSON 卡）。
+    private var toolItems: [JsonCardSniffer.JsonToolItem]? { JsonCardSniffer.toolListItems(value) }
+
+    /// 通用卡 pretty 文本与行数（折叠判定用）。
+    private var prettyText: String { JsonCardSniffer.pretty(value) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "curlybraces.square").font(.caption2)
+                Text(toolItems == nil ? "JSON" : "工具列表")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Button {
+                    UIPasteboard.general.string = raw
+                } label: {
+                    Label("复制", systemImage: "doc.on.doc")
+                        .font(.caption2)
+                        .labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("复制 JSON")
+            }
+            if let items = toolItems {
+                toolList(items)
+            } else {
+                genericCard
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 6).fill(c.surfaceTertiary))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(c.borderPrimary, lineWidth: 0.5))
+    }
+
+    /// 工具列表卡：单条点按展开/收起该条原始 JSON（展开态存本视图 @State）。
+    private func toolList(_ items: [JsonCardSniffer.JsonToolItem]) -> some View {
+        ToolListBody(items: items, ink: c)
+    }
+
+    /// 通用 JSON 卡：超 8 行默认折叠，展开/收起；折叠判定按 pretty 行数，行内容按渲染时现算
+    /// （不落缓存，流式行收敛 final 后内容不再变，重算成本可忽略）。
+    @State private var expanded = false
+
+    private var genericCard: some View {
+        GenericJsonBody(rawText: prettyText, ink: c, expanded: $expanded)
+    }
+}
+
+/// 工具列表卡正文（独立视图持有展开行 id 的 @State——与通用卡折叠态同存视图层）。
+private struct ToolListBody: View {
+    let items: [JsonCardSniffer.JsonToolItem]
+    let ink: InkColors
+    @State private var expandedId: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(items) { item in
+                VStack(alignment: .leading, spacing: 3) {
+                    Button {
+                        expandedId = expandedId == item.id ? nil : item.id
+                    } label: {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(item.label)
+                                .font(.system(size: 14))
+                            Text(item.id)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("展开 \(item.label)")
+                    if expandedId == item.id {
+                        HStack(alignment: .top, spacing: 6) {
+                            Text(item.rawText)
+                                .font(.system(size: 12, design: .monospaced))
+                                .lineSpacing(2)
+                                .textSelection(.enabled)
+                            Button {
+                                UIPasteboard.general.string = item.rawText
+                            } label: {
+                                Image(systemName: "doc.on.doc").font(.caption2)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("复制该条 JSON")
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+                .padding(.vertical, 5)
+                if item.id != items.last?.id {
+                    Rectangle().fill(ink.borderPrimary.opacity(0.5)).frame(height: 0.5)
+                }
+            }
+        }
+    }
+}
+
+/// 通用 JSON 卡正文：等宽 13（对齐既有 .code 字号），超 8 行默认折叠。
+private struct GenericJsonBody: View {
+    let rawText: String
+    let ink: InkColors
+    @Binding var expanded: Bool
+
+    /// 默认折叠阈值：收起显示前 8 行（与桌面同构）。
+    private static let foldLines = 8
+
+    private var lines: [String] { rawText.components(separatedBy: "\n") }
+
+    var body: some View {
+        let all = lines
+        VStack(alignment: .leading, spacing: 0) {
+            Text(all.prefix(expanded ? all.count : Self.foldLines).joined(separator: "\n"))
+                .font(.system(size: 13, design: .monospaced))
+                .lineSpacing(2)
+                .textSelection(.enabled)
+            if all.count > Self.foldLines {
+                Button {
+                    expanded.toggle()
+                } label: {
+                    Text(expanded ? "收起" : "展开 \(all.count - Self.foldLines) 行")
+                        .font(.caption)
+                        .foregroundStyle(Color.accentColor)
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 4)
+            }
+        }
     }
 }
 
@@ -25,13 +226,22 @@ struct MarkdownView: View {
 private struct LiteMarkdownBody: View, Equatable {
     @Environment(\.inkColors) private var c
     let content: String
+    /// 流式行闸：true = 跳过 JSON 卡嗅探（仅 final 嗅探，防半流瞬时合法前缀闪卡）。
+    var streaming: Bool = false
 
-    static func == (lhs: LiteMarkdownBody, rhs: LiteMarkdownBody) -> Bool { lhs.content == rhs.content }
+    static func == (lhs: LiteMarkdownBody, rhs: LiteMarkdownBody) -> Bool {
+        lhs.content == rhs.content && lhs.streaming == rhs.streaming
+    }
 
     var body: some View {
         let _ = ScrollBench.shared.count(.markdownBody)
         Group {
-            if LiteMarkdownParser.isPlain(content) {
+            // JSON 卡嗅探在 isPlain 之前：裸 JSON 可能被 isPlain 判为纯文本（单行无 markdown
+            // 字符），必须在快路径前拦下；嗅探失败（progress_line 等）回落既有管线原样。
+            // 流式行（streaming=true）整段绕过嗅探——半流前缀可瞬时合法（[]/{}），防闪卡。
+            if !streaming, let value = JsonCardSniffer.sniff(content) {
+                JsonCardView(raw: content, value: value)
+            } else if LiteMarkdownParser.isPlain(content) {
                 Text(verbatim: content)
             } else {
                 let blocks = ScrollBench.shared.time("md.blocksLookup") { LiteMarkdownCache.blocks(content) }
@@ -100,28 +310,37 @@ private struct LiteTableView: View {
     let header: [AttributedString]
     let rows: [[AttributedString]]
 
+    /// #5（2026-11-07 UX 轮）：单元格最大宽度——超出即换行，超长不可断词（URL/哈希）不截断
+    /// （横向滚动兜底可见），替代原 maxWidth:.infinity 均分列宽导致的「…」截断。
+    private static let maxCellWidth: CGFloat = 280
+
     var body: some View {
         let columns = max(header.count, rows.map(\.count).max() ?? 0)
-        Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
-            if !header.isEmpty {
-                GridRow {
-                    ForEach(0..<columns, id: \.self) { i in
-                        cell(i < header.count ? header[i] : AttributedString(), bold: true)
+        // #5（2026-11-07 UX 轮）：表格自然宽度超出气泡即横向滑动看全，不再挤压列宽截断；
+        // 窄表仍按内容收宽（minWidth 64 保证短列不至于挤成竖条）。边框/圆角随内容移动。
+        ScrollView(.horizontal, showsIndicators: true) {
+            Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
+                if !header.isEmpty {
+                    GridRow {
+                        ForEach(0..<columns, id: \.self) { i in
+                            cell(i < header.count ? header[i] : AttributedString(), bold: true)
+                        }
+                    }
+                    .background(c.surfaceTertiary)
+                }
+                ForEach(rows.indices, id: \.self) { r in
+                    Rectangle().fill(c.borderPrimary).frame(height: 1).gridCellUnsizedAxes(.horizontal)
+                    GridRow {
+                        ForEach(0..<columns, id: \.self) { i in
+                            cell(i < rows[r].count ? rows[r][i] : AttributedString(), bold: false)
+                        }
                     }
                 }
-                .background(c.surfaceTertiary)
             }
-            ForEach(rows.indices, id: \.self) { r in
-                Rectangle().fill(c.borderPrimary).frame(height: 1).gridCellUnsizedAxes(.horizontal)
-                GridRow {
-                    ForEach(0..<columns, id: \.self) { i in
-                        cell(i < rows[r].count ? rows[r][i] : AttributedString(), bold: false)
-                    }
-                }
-            }
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(c.borderPrimary, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
         }
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(c.borderPrimary, lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func cell(_ s: AttributedString, bold: Bool) -> some View {
@@ -129,7 +348,7 @@ private struct LiteTableView: View {
             .font(.system(size: 14, weight: bold ? .semibold : .regular))
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(minWidth: 64, maxWidth: Self.maxCellWidth, alignment: .leading)
     }
 }
 
@@ -426,8 +645,18 @@ private enum LiteMarkdownCache {
     }
 }
 
-/// ChatView 进页预热任务的入口（保持旧函数名，调用点不动）。
+/// 会话页进页预热任务的入口（Hub 会话页接入渲染引擎时调用）。
 @MainActor
 func prewarmMarkdown(_ contents: [String]) async {
     await LiteMarkdownCache.prewarm(contents)
+}
+
+/// 列表项起始判定（`- `/`* `/`+ ` 或 `1. `/`1) `）：快路径「无 Markdown 语法的短消息」判断用。
+/// 原随长消息切片逻辑同居 ChatRows.swift，P4 随旧会话页退役后收归本文件。
+func isListItemStart(_ line: Substring) -> Bool {
+    if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") { return true }
+    let digits = line.prefix { $0.isASCII && $0.isNumber }
+    guard !digits.isEmpty, digits.count <= 9 else { return false }
+    let rest = line.dropFirst(digits.count)
+    return rest.hasPrefix(". ") || rest.hasPrefix(") ")
 }

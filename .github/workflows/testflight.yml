@@ -42,11 +42,12 @@ jobs:
         run: |
           echo "${{ secrets.ASC_API_KEY_P8_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
 
-      - name: Write Config.local.xcconfig (TEAM_ID + JAVA_HOME)
+      - name: Write Config.local.xcconfig (TEAM_ID + JAVA_HOME + HUB_PUBLIC_HOST)
         run: |
           cat > iosApp/Configuration/Config.local.xcconfig <<EOF
           TEAM_ID=${{ secrets.APPLE_TEAM_ID }}
           JAVA_HOME=$JAVA_HOME
+          HUB_PUBLIC_HOST=${{ secrets.HUB_PUBLIC_HOST }}
           EOF
 
       - name: Build fastlane api key json

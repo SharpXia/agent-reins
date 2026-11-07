@@ -1,0 +1,529 @@
+-- Hub 投影库 v4（v3 = 契约 v1.1.0 去 session 化，tag hub-api-v1.1.1）。
+-- 全部表都是 Hub 快照+事件流的派生投影，可随时整库丢弃重建（05 §3.12）；
+-- 例外 hubCommands/hubSyncState 属于 O-01 持久化最小集（发送队列含幂等键、eventCursor）。
+--
+-- v4（2026-11-05 additive，wp-5 流式投影修复）：
+--   hubMessages 增 reason（失败原因，事件路径 message.failed.reason 与快照路径
+--   MessageRow.errorKind 共用同一列——wp-4 additive 六值脱敏闭集）；
+--   hubConversations 增 activeRunId（run.* 事件捕获当前活跃 runId，wp-8 Stop 按钮取值，
+--   REST #11 run.cancel 路径参数必带 runId；hasActiveRun=0 的写路径一律连带清空，防死 runId 残留）；
+--   缺行 message.delta 建 streaming 占位行（wp-1 探针定档无锚 delta，dstream:<runId> 合成身份
+--   与 created 行异锚）+ 权威终态落定时清除同会话其余流式占位行。
+-- v5（2026-11-05 additive，wp-11）：hubConversations 增 gatewayId（契约 ConversationRow required
+--   字段，此前投影落库即丢——卡片无法归属网关，#16 新建会话入口无 (gatewayId, agentId) 可判）。
+-- v6（2026-11-06 additive，wp-15 工具活动捕获）：
+--   hubToolEvents = tool.started/completed/failed 事件本地捕获（会话页「工作过程」折叠披露条数据面）；
+--   hubRunStatus = run.status 事件捕获的当前启动阶段（wp-15 可选项：Bridge chat status/aborted
+--   变体 → run.status additive，06 §3.2）。两表都是**累积捕获态**（与 hubApprovals 同族）：
+--   快照重建不清（快照不含工具事件，清了即丢；断线窗口丢失面见 06 §10.2，UI 不承诺完整），
+--   登出 wipeLocalData 清、会话删除/化身更替清、run 终态清对应 hubRunStatus 行。
+-- v7（2026-11-06 additive，wp-4 通知归属两跳学习）：
+--   hubSessionAgents = session 域两跳归属暂存 (gatewayId, sessionKey, agentId)——session.created/
+--   session.updated 载荷自带 (sessionKey, agentId)，未映射时暂存；卡片行自带 (gatewayId, agentId)，
+--   两跳连结后写 hubConvKeys（不建卡，卡片唯一来源=快照/校准铁律不变）。
+--   hubConvKeys 增 twoHop 标记列（0=自发送回执/自命令 ack 自学习，1=两跳连结）——消费分域：
+--   两跳行只供 run 终态与 approval.requested 的归属面（通知/审批卡），message.*（时间线/未读）、
+--   session.updated 身份（label/hasActiveRun/化身）、run.started 活跃翻转、tool.*/run.status 捕获
+--   一律只认自学习行——同 agent 的 channel/TG 会话与任务会话由此不混入主线卡（app 主会话隔离，
+--   2026-11-06 聚合轮 allowlist 收口的客户端对位）；session.removed 只对自学习行级联删卡。
+-- v1.1 关键契约事实（08 §8.1/§8.5）：REST ConversationRow 撤 sessionKey/sessionId/lifecycleRevision，
+-- 事件信封按域带 sessionKey（eventlog 强制校验：message/session/tool/approval/run 域必带、
+-- gateway/read 域不带）——两域无交集字段。因此：
+--   卡片主键 = conversationId（快照/列表校准是卡片唯一来源；「UI 只见 conversation」）；
+--   事件路由 = hubConvKeys 映射表 (gatewayId, sessionKey) → conversationId；
+--   映射学习 = 自发送回执链（message.created 的 idempotencyKey → 命令队列 conversationId）
+--   与自命令 ack（信封 sessionKey + 队列条目）；未映射事件不建卡，R4 周期校准兜底。
+
+CREATE TABLE hubGateways (
+    gatewayId TEXT NOT NULL PRIMARY KEY,
+    name TEXT NOT NULL,
+    online INTEGER NOT NULL DEFAULT 0,
+    lastSeenAt TEXT,
+    agentsJson TEXT NOT NULL DEFAULT '[]'   -- AgentRef 数组原样 JSON（只读展示，不建关系）
+);
+
+CREATE TABLE hubConversations (
+    conversationId TEXT NOT NULL PRIMARY KEY,  -- Hub ULID 句柄，化身更替后不变（05 §3.10）
+    gatewayId TEXT NOT NULL DEFAULT '',        -- v5：归属网关（ConversationRow required；wp-11 #16 入口判据 + 网关维度展示）
+    sessionKey TEXT,                           -- 映射学习成果（事件路由加速）；快照行无此值
+    label TEXT NOT NULL DEFAULT '',
+    agentId TEXT NOT NULL DEFAULT '',
+    lastMessagePreview TEXT NOT NULL DEFAULT '',
+    lastSeq INTEGER NOT NULL DEFAULT 0,        -- 当前化身内最新消息 seq（新化身从 1 重计）
+    lastActiveAt TEXT NOT NULL DEFAULT '',
+    unreadCount INTEGER NOT NULL DEFAULT 0,
+    hasActiveRun INTEGER NOT NULL DEFAULT 0,
+    activeRunId TEXT,                          -- v4：run.* 事件捕获的当前活跃 runId（wp-8 Stop 取值）；inactive 即清空
+    reconciling INTEGER NOT NULL DEFAULT 0,
+    -- 化身围栏持久基准（事件 session.updated 衍生态，非 REST 面镜像）：-1=未知（快照行），
+    -- 首个事件只记录；之后 revision 变化即化身更替（清消息/重置 seq/unread/cursor）。
+    lifecycleRevision INTEGER NOT NULL DEFAULT -1
+);
+CREATE INDEX hubConversations_byActive ON hubConversations(lastActiveAt DESC);
+
+-- 事件路由映射：卡片键（conversationId）与事件键（gatewayId, sessionKey）的桥（见文件头）。
+CREATE TABLE hubConvKeys (
+    gatewayId TEXT NOT NULL,
+    sessionKey TEXT NOT NULL,               -- 原样保留不解析（ADR-14）
+    conversationId TEXT NOT NULL,
+    twoHop INTEGER NOT NULL DEFAULT 0,      -- v7 wp-4：0=自学习（回执链/命令 ack）、1=两跳连结（消费分域，见文件头）
+    PRIMARY KEY (gatewayId, sessionKey)
+);
+
+-- v7 wp-4：session 域两跳归属暂存（session.created/updated 载荷的 (sessionKey, agentId)）。
+-- 暂存行在连结后保留（幂等 upsert，卡片整库重建后可再连结）；session.removed 与登出清。
+CREATE TABLE hubSessionAgents (
+    gatewayId TEXT NOT NULL,
+    sessionKey TEXT NOT NULL,               -- 原样保留不解析（ADR-14）
+    agentId TEXT NOT NULL,
+    PRIMARY KEY (gatewayId, sessionKey)
+);
+
+CREATE TABLE hubMessages (
+    messageId TEXT NOT NULL PRIMARY KEY,    -- Hub ULID，upsert 合并键（05 §3.11）
+    conversationId TEXT NOT NULL,
+    seq INTEGER NOT NULL,                   -- 当前化身内插入顺序（新化身从 1 重计）
+    role TEXT NOT NULL,                     -- user/assistant/""（""=compaction/reset 合成行，渲染分隔条）
+    content TEXT NOT NULL,
+    state TEXT NOT NULL,                    -- final/streaming/failed
+    reason TEXT,                            -- v4：失败原因（事件路径 message.failed.reason = 快照路径 MessageRow.errorKind，六值脱敏闭集；仅 failed 行非空）
+    uiState TEXT,                           -- 仅用户行：sending/delivered/read/failed
+    commandId TEXT,
+    idempotencyKey TEXT,
+    ts TEXT
+);
+CREATE INDEX hubMessages_byConv ON hubMessages(conversationId, seq);
+CREATE INDEX hubMessages_byIdem ON hubMessages(idempotencyKey);
+
+-- 本地发送队列（O-01/O-08）：idempotencyKey 客户端生成 UUID 生成后永不更换；终态移入历史展示。
+CREATE TABLE hubCommands (
+    idempotencyKey TEXT NOT NULL PRIMARY KEY,
+    commandId TEXT,                         -- PENDING_LOCAL 期尚未分配
+    conversationId TEXT,                    -- REST 句柄（message.send/read.mark 必有）
+    runId TEXT,
+    approvalId TEXT,
+    type TEXT NOT NULL,                     -- message.send/run.cancel/approval.decide/read.mark
+    payloadJson TEXT NOT NULL,              -- 请求载荷原样（重试必须同键同内容，HUB-BIZ-001 禁换键）
+    state TEXT NOT NULL,                    -- ADR-07 十态
+    errorCode TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+);
+CREATE INDEX hubCommands_byState ON hubCommands(state);
+
+CREATE TABLE hubReadCursors (
+    conversationId TEXT NOT NULL PRIMARY KEY,
+    readUpTo INTEGER NOT NULL DEFAULT 0     -- INV-7 只进不退：应用前取 max
+);
+
+CREATE TABLE hubApprovals (
+    approvalId TEXT NOT NULL PRIMARY KEY,
+    runId TEXT NOT NULL,
+    conversationId TEXT,                    -- 事件路由查映射；未命中为 NULL（UI 未接，无碍）
+    toolName TEXT NOT NULL,
+    payloadSummary TEXT NOT NULL,
+    status TEXT NOT NULL,                   -- pending/approved/rejected
+    decidedBy TEXT,                         -- app/host
+    updatedAt TEXT NOT NULL
+);
+
+-- wp-15 工具活动捕获（v6）：tool.* 三态按调用关联键累积。toolCallKey 是 Bridge 派生的调用
+-- 关联标识（06 §3.3），客户端按不透明字符串处理（ADR-14）——主键含 (gatewayId, runId) 防跨
+-- 网关/跨 run 复用碰撞，不解析内部结构。toolName/summary 宽松来源：契约注册形状
+-- DataToolStarted{toolName, toolCallKey, inputSummary} 与 Bridge 实际透传形状
+-- {name, toolCallId, args}（normalize/index.ts normalizeToolEvent）双兼容，投影层取并集键。
+CREATE TABLE hubToolEvents (
+    gatewayId TEXT NOT NULL,
+    runId TEXT NOT NULL,
+    toolCallKey TEXT NOT NULL,
+    conversationId TEXT,                    -- 事件路由学习成果（hubConvKeys 命中）；未映射 NULL
+    toolName TEXT NOT NULL DEFAULT '',      -- 契约 toolName / Bridge name；缺失 ''（UI 兜底呈现）
+    summary TEXT,                           -- 有界入参摘要（started 携带；输入侧契约 inputSummary / 实际 args）
+    status TEXT NOT NULL,                   -- running/completed/failed
+    firstTs TEXT NOT NULL,
+    lastTs TEXT NOT NULL,
+    PRIMARY KEY (gatewayId, runId, toolCallKey)
+);
+CREATE INDEX hubToolEvents_byConv ON hubToolEvents(conversationId);
+
+-- wp-15 可选项（v6）：run.status 事件捕获的 Run 当前启动阶段（06 §3.2 additive）。
+-- 每 (gatewayId, runId) 只留最新一帧（upsert 覆盖；retry 重报同 phase 帧直接覆盖）；run 终态
+-- （run.completed/failed/aborted）连带清行——终态后无在途阶段语义。
+CREATE TABLE hubRunStatus (
+    gatewayId TEXT NOT NULL,
+    runId TEXT NOT NULL,
+    conversationId TEXT,                    -- 事件路由学习成果；未映射 NULL
+    phase TEXT NOT NULL DEFAULT '',         -- Gateway 启动 phase 枚举原样（waiting_for_state…starting_model；aborted 变体记 aborted）
+    detail TEXT,                            -- 有界附加说明（retry attempt/max/reason 或 aborted errorMessage/stopReason；缺省 NULL）
+    ts TEXT NOT NULL,
+    PRIMARY KEY (gatewayId, runId)
+);
+CREATE INDEX hubRunStatus_byConv ON hubRunStatus(conversationId);
+
+-- O-01 持久化最小集：eventCursor（全局事件 ULID 单调不减）、snapshotWatermark。
+CREATE TABLE hubSyncState (
+    key TEXT NOT NULL PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+-- ── 查询 ─────────────────────────────────────────────────────────────────────
+
+insertGateway:
+INSERT OR REPLACE INTO hubGateways(gatewayId, name, online, lastSeenAt, agentsJson)
+VALUES (?, ?, ?, ?, ?);
+
+setGatewayOnline:
+UPDATE hubGateways SET online = ?, lastSeenAt = ? WHERE gatewayId = ?;
+
+-- 快照整体覆盖：投影表事务内清空（hubConvKeys/hubCommands/hubSyncState/hubApprovals/
+-- hubToolEvents/hubRunStatus 不清——映射与 O-01 持久化最小集、审批/工具活动累积态跨重建
+-- 保留，05 §3.6；快照不含工具事件，清了即丢已捕获部分，06 §10.2 已知丢失面不叠加人为丢失；
+-- 映射失效项由下句清理）
+clearGateways:
+DELETE FROM hubGateways;
+
+clearConversations:
+DELETE FROM hubConversations;
+
+clearConvKeysOrphan:
+DELETE FROM hubConvKeys WHERE conversationId NOT IN (SELECT conversationId FROM hubConversations);
+
+clearMessages:
+DELETE FROM hubMessages;
+
+clearReadCursors:
+DELETE FROM hubReadCursors;
+
+-- 登出全清（P4 验收⑤：登出 = 撤销当前设备 + 清全部本地数据）。与快照重建不同，
+-- 此处连映射、两跳暂存（v7 wp-4）、O-01 最小集（命令队列/游标）与审批/工具活动累积态
+-- （wp-15 v6）一并清：设备已撤销，本地不应残留任何账号数据；重登后从空库 bootstrap。
+clearConvKeys:
+DELETE FROM hubConvKeys;
+
+clearSessionAgents:
+DELETE FROM hubSessionAgents;
+
+clearCommands:
+DELETE FROM hubCommands;
+
+clearApprovals:
+DELETE FROM hubApprovals;
+
+clearToolEvents:
+DELETE FROM hubToolEvents;
+
+clearRunStatus:
+DELETE FROM hubRunStatus;
+
+clearSyncState:
+DELETE FROM hubSyncState;
+
+selectGateways:
+SELECT * FROM hubGateways ORDER BY name;
+
+-- 快照/列表落定的卡片灌入（v1.1 行无 sessionKey/revision；conversationId 是主键）。
+-- gatewayId 为快照/校准行 required（v5 透出）。activeRunId（v6 wp-3 活跃 run 权威回填，
+-- 2026-11-06）：快照/校准行可选字段透传（服务端 runs RUNNING 权威行 native_run_id），
+-- 三级合并——inactive 校准连带清空（防死 runId 残留，v4 语义不变）> 服务端权威值 > 缺省
+-- （老服务端行无此字段即 NULL）保留事件习得值（run.* 事件路径 setConversationActiveRun）。
+upsertConversation:
+INSERT INTO hubConversations
+(conversationId, gatewayId, sessionKey, label, agentId, lastMessagePreview, lastSeq, lastActiveAt,
+ unreadCount, hasActiveRun, activeRunId, reconciling, lifecycleRevision)
+VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, -1)
+ON CONFLICT(conversationId) DO UPDATE SET
+  gatewayId = excluded.gatewayId,
+  label = excluded.label,
+  agentId = excluded.agentId,
+  lastMessagePreview = excluded.lastMessagePreview,
+  -- MAX 合并（2026-11-06 UX 轮）：lastSeq 现含客户端 fallback 分配值（事件缺
+  -- sourceMessageSeq 时 = lastSeq+1，可与服务端域瞬时偏离）。校准回填不得回退
+  -- 该水位——回退会让下一轮 fallback 重新从低位起算，新行排序倒挂进历史区间。
+  -- 化身更替走 resetConversationIncarnation 显式清零，MAX 不阻碍重计。
+  lastSeq = MAX(hubConversations.lastSeq, excluded.lastSeq),
+  lastActiveAt = excluded.lastActiveAt,
+  unreadCount = excluded.unreadCount,
+  hasActiveRun = excluded.hasActiveRun,
+  activeRunId = CASE
+    WHEN excluded.hasActiveRun = 0 THEN NULL
+    WHEN excluded.activeRunId IS NOT NULL THEN excluded.activeRunId
+    ELSE hubConversations.activeRunId
+  END,
+  reconciling = excluded.reconciling;
+
+-- 映射学习/回填（自发送回执链与自命令 ack；只加速路由，不作存在性判定）。
+-- 自学习到达即把 twoHop 翻回 0（两跳暂存行可能先于首条自发送连结过同一键——自通道证据更权威，
+-- 消息时间线/未读与 session 身份面随自学习恢复全量消费）。
+upsertConvKey:
+INSERT INTO hubConvKeys(gatewayId, sessionKey, conversationId, twoHop) VALUES (?, ?, ?, 0)
+ON CONFLICT(gatewayId, sessionKey) DO UPDATE SET
+  conversationId = excluded.conversationId,
+  twoHop = 0;
+
+-- v7 wp-4 两跳连结写面：暂存 (g, sk, agentId) × 同 (g, agentId) 卡片 → 映射。冲突时保序：
+-- 已是自学习行（twoHop=0）不降级为两跳（快照重建后暂存重连结不得把自学习主键打回受限消费）。
+upsertConvKeyTwoHop:
+INSERT INTO hubConvKeys(gatewayId, sessionKey, conversationId, twoHop) VALUES (?, ?, ?, 1)
+ON CONFLICT(gatewayId, sessionKey) DO UPDATE SET
+  conversationId = excluded.conversationId,
+  twoHop = CASE WHEN hubConvKeys.twoHop = 0 THEN 0 ELSE 1 END;
+
+-- v7 wp-4：session 域两跳暂存（未映射 session.created/updated；幂等，agentId 取最新值）
+upsertSessionAgent:
+INSERT INTO hubSessionAgents(gatewayId, sessionKey, agentId) VALUES (?, ?, ?)
+ON CONFLICT(gatewayId, sessionKey) DO UPDATE SET agentId = excluded.agentId;
+
+deleteSessionAgent:
+DELETE FROM hubSessionAgents WHERE gatewayId = ? AND sessionKey = ?;
+
+-- 队列条目反查 conversationId（映射学习通道 b/c）
+selectCommandByKey:
+SELECT * FROM hubCommands WHERE idempotencyKey = ?;
+
+selectConversation:
+SELECT * FROM hubConversations WHERE conversationId = ?;
+
+selectConversationByKey:
+SELECT * FROM hubConvKeys WHERE gatewayId = ? AND sessionKey = ?;
+
+-- v7 wp-4 两跳连结查询：卡片行 (gatewayId, agentId) → 同源暂存行；卡片 (gatewayId, agentId) → 卡片
+-- （服务端聚合保证一 agent 至多一卡；ORDER BY lastActiveAt DESC 取最近活跃为防御性归一）。
+selectSessionAgentsByCard:
+SELECT * FROM hubSessionAgents WHERE gatewayId = ? AND agentId = ?;
+
+selectConversationIdByAgent:
+SELECT conversationId FROM hubConversations WHERE gatewayId = ? AND agentId = ?
+ORDER BY lastActiveAt DESC LIMIT 1;
+
+selectConversations:
+SELECT * FROM hubConversations ORDER BY lastActiveAt DESC;
+
+deleteConversation:
+DELETE FROM hubConversations WHERE conversationId = ?;
+
+deleteConvKey:
+DELETE FROM hubConvKeys WHERE gatewayId = ? AND sessionKey = ?;
+
+-- session.updated（映射命中后）：label 空 = 载荷未带，保留旧值；revision 持久基准更新；
+-- inactive 时连带清空 activeRunId（v4：聚合信号说无活跃 run，事件习得的 runId 不得残留）
+updateConversationIdentity:
+UPDATE hubConversations SET
+  label = CASE WHEN :label = '' THEN label ELSE :label END,
+  hasActiveRun = :hasActiveRun,
+  activeRunId = CASE WHEN :hasActiveRun = 0 THEN NULL ELSE activeRunId END,
+  lifecycleRevision = COALESCE(:revision, lifecycleRevision)
+WHERE conversationId = :conversationId;
+
+-- run.* 事件（v4）：hasActiveRun 翻转 + 当前活跃 runId 捕获/清空（wp-8 Stop 按钮取值；
+-- 终态事件 activeRunId 置 NULL，与 hasActiveRun=0 同步）
+setConversationActiveRun:
+UPDATE hubConversations SET hasActiveRun = ?, activeRunId = ? WHERE conversationId = ?;
+
+-- 化身更替（session.updated lifecycleRevision 变化）：旧代次封存移出、seq 从 1 重计、
+-- 未读清零、readCursor 重置（05 §3.10；消息行无化身列，以显式信号整体清空）；
+-- 旧化身活跃 run 一并作废（activeRunId 清空）
+resetConversationIncarnation:
+UPDATE hubConversations SET lastSeq = 0, unreadCount = 0, activeRunId = NULL WHERE conversationId = ?;
+
+setConversationUnread:
+UPDATE hubConversations SET unreadCount = ? WHERE conversationId = ?;
+
+setConversationReconciling:
+UPDATE hubConversations SET reconciling = ? WHERE conversationId = ?;
+
+-- 消息落定驱动会话尾行（message.created）
+touchConversationPreview:
+UPDATE hubConversations SET
+  lastMessagePreview = :preview, lastSeq = MAX(lastSeq, :seq), lastActiveAt = :lastActiveAt
+WHERE conversationId = :conversationId;
+
+upsertMessage:
+INSERT OR REPLACE INTO hubMessages
+(messageId, conversationId, seq, role, content, state, uiState, commandId, idempotencyKey, ts, reason)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+-- delta 追加（replace=false）：流式行内容拼接
+appendMessageContent:
+UPDATE hubMessages SET content = content || ? WHERE messageId = ?;
+
+-- delta 权威快照替换（replace=true）与 message.replaced 整替共用
+replaceMessageContent:
+UPDATE hubMessages SET content = ? WHERE messageId = ?;
+
+setMessageState:
+UPDATE hubMessages SET state = ? WHERE messageId = ?;
+
+-- 失败终态 + 原因落库（v4：事件路径 message.failed.reason；与快照路径 errorKind 共用 reason 列）
+setMessageStateReason:
+UPDATE hubMessages SET state = ?, reason = ? WHERE messageId = ?;
+
+-- 异锚收敛清除（v4，wp-5①主分支）：权威终态行落定时，同会话除保留行（含本行——同锚分支
+-- 由 upsert 覆盖收敛）外的全部流式占位行清除，防流式幽灵气泡+重复 final 气泡
+deleteStreamingPlaceholdersExcept:
+DELETE FROM hubMessages WHERE conversationId = ? AND state = 'streaming' AND messageId != ?;
+
+-- run 终态清除（v4）：失败/中止 run 无 message 终态事件可收敛其占位行，活跃 run 结束即
+-- 清除会话全部流式行（单活跃 run 模型一致性；正常完成时占位行已被 created 清除，此处为兜底）
+deleteStreamingRows:
+DELETE FROM hubMessages WHERE conversationId = ? AND state = 'streaming';
+
+-- 本地删除单条消息（2026-11-07 UX 轮）：脏数据清理出口——仅删投影库本地行，不发任何
+-- 服务端命令；服务端权威数据仍会经快照重建/校准回流（重建后行可能复活，语义=本地清理）
+deleteLocalMessage:
+DELETE FROM hubMessages WHERE conversationId = ? AND messageId = ?;
+
+-- 用户行回执到达：同 idempotencyKey 的本地乐观行（messageId=临时键）整体提升为服务端行，
+-- 避免乐观行+服务端行双行并存（05 §3.9 义务 4 的 UI 翻转语义）
+promoteLocalEcho:
+UPDATE hubMessages SET messageId = :messageId, content = :content, seq = :seq,
+  uiState = 'delivered', commandId = :commandId, ts = :ts
+WHERE idempotencyKey = :idempotencyKey;
+
+selectMessageByIdem:
+SELECT idempotencyKey, conversationId FROM hubMessages WHERE idempotencyKey = ? LIMIT 1;
+
+setMessageUiStateByIdem:
+UPDATE hubMessages SET uiState = ? WHERE idempotencyKey = ? AND state != 'failed';
+
+-- 回显去重（v8，2026-11-06 真机修复）：回显不带幂等键时（bridge 契约缺口，Gateway 载荷不携带），
+-- 同会话已过 DELIVERED 的乐观行（seq=Long.MAX 占位序）已被本权威行取代，清除防双气泡并存；
+-- 仍在途 SENDING 行与失败行不动（失败行由 UI 重发面管，SENDING 行等自己的回显/ack 收敛）。
+deleteDeliveredOptimisticExcept:
+DELETE FROM hubMessages
+WHERE conversationId = ? AND role = 'user' AND seq = 9223372036854775807
+  AND uiState = 'delivered' AND messageId != ?;
+
+selectMessage:
+SELECT * FROM hubMessages WHERE messageId = ?;
+
+-- 无信息量行显示过滤（2026-11-06 UX 轮 #3；时间线/未读/翻页三查询同规则）：
+-- ① assistant 空正文与「无回复」——OpenClaw 心跳模板的协议性无事答复（30 分钟一次，
+--    main 会话实测 129 行「无回复」+46 行空正文，模型原文非系统合成）；
+-- ② role='' 合成行中 content 带 <!-- 注释头的心跳模板行（真 compaction/reset 行不带）。
+-- 行照常落库（快照/翻页 seq 数学不受影响），仅显示与未读计数面过滤；服务端 unread
+-- 口径（reader listConversations）与推送面（push pushAlert）同规则收口，三面对齐。
+selectMessages:
+SELECT * FROM hubMessages
+WHERE conversationId = ?
+  AND (role != 'assistant' OR (TRIM(content) != '' AND TRIM(content) != '无回复'))
+  AND (role != '' OR content NOT LIKE '<!--%')
+ORDER BY seq;
+
+selectMessagesBefore:
+SELECT * FROM hubMessages
+WHERE conversationId = ? AND seq < ?
+  AND (role != 'assistant' OR (TRIM(content) != '' AND TRIM(content) != '无回复'))
+  AND (role != '' OR content NOT LIKE '<!--%')
+ORDER BY seq DESC LIMIT :limit;
+
+-- 本地未读重算（与 Hub 口径同式：当前化身内 seq > readUpTo 且 role=assistant 的 final 行；
+-- role="" 合成行不计）
+countUnread:
+SELECT COUNT(*) FROM hubMessages
+WHERE conversationId = ? AND seq > ? AND role = 'assistant' AND state = 'final'
+  AND TRIM(content) NOT IN ('', '无回复');
+
+deleteMessagesByConversation:
+DELETE FROM hubMessages WHERE conversationId = ?;
+
+insertCommand:
+INSERT OR REPLACE INTO hubCommands
+(idempotencyKey, commandId, conversationId, runId, approvalId, type, payloadJson, state, errorCode, createdAt, updatedAt)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+updateCommandState:
+UPDATE hubCommands SET state = ?, errorCode = ?, updatedAt = ? WHERE idempotencyKey = ?;
+
+updateCommandId:
+UPDATE hubCommands SET commandId = ?, updatedAt = ? WHERE idempotencyKey = ?;
+
+selectNonTerminalCommands:
+SELECT * FROM hubCommands WHERE state NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'INDETERMINATE');
+
+upsertReadCursor:
+INSERT INTO hubReadCursors(conversationId, readUpTo) VALUES (?, ?)
+ON CONFLICT(conversationId) DO UPDATE SET readUpTo = MAX(readUpTo, excluded.readUpTo);
+
+selectReadCursor:
+SELECT readUpTo FROM hubReadCursors WHERE conversationId = ?;
+
+-- 化身更替时 readCursor 重置（upsertReadCursor 的 MAX 会阻止归零，须显式覆写）
+setReadCursorValue:
+INSERT INTO hubReadCursors(conversationId, readUpTo) VALUES (?, ?)
+ON CONFLICT(conversationId) DO UPDATE SET readUpTo = excluded.readUpTo;
+
+deleteReadCursor:
+DELETE FROM hubReadCursors WHERE conversationId = ?;
+
+upsertApproval:
+INSERT OR REPLACE INTO hubApprovals
+(approvalId, runId, conversationId, toolName, payloadSummary, status, decidedBy, updatedAt)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+setApprovalStatus:
+UPDATE hubApprovals SET status = ?, decidedBy = ?, updatedAt = ? WHERE approvalId = ?;
+
+selectPendingApprovals:
+SELECT * FROM hubApprovals WHERE status = 'pending' ORDER BY updatedAt;
+
+-- ── wp-15 工具活动捕获（v6） ─────────────────────────────────────────────────
+
+-- tool.started：新调用建 running 行；重报（同键）不改终态（ON CONFLICT 只更新时间戳，
+-- 已完成/失败调用被迟到的重报 started 翻回 running 属重复投递场景——引擎 id 去重已挡，防御性保守）
+upsertToolStarted:
+INSERT INTO hubToolEvents(gatewayId, runId, toolCallKey, conversationId, toolName, summary, status, firstTs, lastTs)
+VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)
+ON CONFLICT(gatewayId, runId, toolCallKey) DO UPDATE SET
+  conversationId = COALESCE(excluded.conversationId, hubToolEvents.conversationId),
+  toolName = CASE WHEN excluded.toolName != '' THEN excluded.toolName ELSE hubToolEvents.toolName END,
+  summary = COALESCE(excluded.summary, hubToolEvents.summary),
+  lastTs = excluded.lastTs;
+
+-- tool.completed/failed：状态翻转。行不存在（started 丢失面，06 §10.2）即建行——
+-- toolName 缺失 ''（completed/failed 载荷无名称字段时），计数与呈现不虚构成具体工具名
+upsertToolFinished:
+INSERT INTO hubToolEvents(gatewayId, runId, toolCallKey, conversationId, toolName, summary, status, firstTs, lastTs)
+VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)
+ON CONFLICT(gatewayId, runId, toolCallKey) DO UPDATE SET
+  conversationId = COALESCE(excluded.conversationId, hubToolEvents.conversationId),
+  status = excluded.status,
+  toolName = CASE WHEN excluded.toolName != '' THEN excluded.toolName ELSE hubToolEvents.toolName END,
+  lastTs = excluded.lastTs;
+
+-- 会话页「工作过程」数据面：按首见时间升序（工作日志序）
+selectToolEventsByConversation:
+SELECT * FROM hubToolEvents WHERE conversationId = ? ORDER BY firstTs, rowid;
+
+-- 每会话累积上限裁剪（防无界增长）：保留最近 N 行，更早的清除
+pruneToolEvents:
+DELETE FROM hubToolEvents WHERE conversationId = :conversationId AND rowid NOT IN (
+  SELECT rowid FROM hubToolEvents WHERE conversationId = :conversationId ORDER BY rowid DESC LIMIT :limit
+);
+
+deleteToolEventsByConversation:
+DELETE FROM hubToolEvents WHERE conversationId = ?;
+
+-- run.status：每 (gatewayId, runId) 只留最新阶段帧（upsert 覆盖）
+upsertRunStatus:
+INSERT INTO hubRunStatus(gatewayId, runId, conversationId, phase, detail, ts)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(gatewayId, runId) DO UPDATE SET
+  conversationId = COALESCE(excluded.conversationId, hubRunStatus.conversationId),
+  phase = excluded.phase,
+  detail = excluded.detail,
+  ts = excluded.ts;
+
+selectRunStatusByConversation:
+SELECT * FROM hubRunStatus WHERE conversationId = ? ORDER BY ts;
+
+deleteRunStatusByRunId:
+DELETE FROM hubRunStatus WHERE gatewayId = ? AND runId = ?;
+
+deleteRunStatusByConversation:
+DELETE FROM hubRunStatus WHERE conversationId = ?;
+
+upsertSyncState:
+INSERT OR REPLACE INTO hubSyncState(key, value) VALUES (?, ?);
+
+selectSyncState:
+SELECT value FROM hubSyncState WHERE key = ?;

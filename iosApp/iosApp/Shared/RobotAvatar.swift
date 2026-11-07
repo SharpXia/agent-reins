@@ -4,9 +4,9 @@ import composeApp
 
 // MARK: - AgentExpression（规格 avatar-spec-20261029 §2.1/§9）
 
-/// 表情枚举：case 顺序与 Kotlin `AgentExpression` 逐字一致（跨端契约，勿重排）；
-/// rawValue = Kotlin 枚举名（桥 `BridgeAgent.expression` 送来的就是它）。
-/// Swift 端不做任何 hash/派生——默认表情由 Kotlin 侧解析后经桥送达，此处只做 rawValue 映射。
+/// 表情枚举：rawValue 为大写持久化名（跨端契约值，勿重排/改名）。
+/// Swift 端不做任何 hash/派生——默认表情由数据层解析后送达，此处只做 rawValue 映射。
+/// Hub 面（P4）尚无 agent 头像数据源，本渲染器为保留资产，待 Hub 补 agent 定制后接入。
 enum AgentExpression: String, CaseIterable {
     case calm = "CALM"
     case happy = "HAPPY"

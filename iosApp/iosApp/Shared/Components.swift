@@ -287,39 +287,6 @@ struct ErrorBanner: View {
     }
 }
 
-/// 连接空态（ConnectionEmptyState 四态）。
-struct ConnectionEmptyState: View {
-    @Environment(\.inkColors) private var c
-    let conn: BridgeConn
-
-    var body: some View {
-        VStack(spacing: 4) {
-            switch conn.kind {
-            case "connecting":
-                ProgressView().tint(c.ink)
-                Text("连接中…").ink(.headingXs).foregroundColor(c.ink).padding(.top, 12)
-            case "pairing":
-                ProgressView().tint(c.ink)
-                Text("等待 owner 批准设备…").ink(.headingXs).foregroundColor(c.ink).padding(.top, 12)
-                if let requestId = conn.requestId {
-                    Text("requestId: \(requestId)").ink(.textSm).foregroundColor(c.textTertiary)
-                }
-            case "error":
-                Text("自动连接失败").ink(.headingXs).foregroundColor(c.ink)
-                Text(conn.message ?? "未知错误").ink(.textSm).foregroundColor(c.dangerText)
-                    .multilineTextAlignment(.center)
-                Text("回前台或到「设置 → 连接」重试").ink(.textSm).foregroundColor(c.textTertiary)
-            default:
-                Text("未连接网关").ink(.headingXs).foregroundColor(c.ink)
-                Text("到「设置 → 连接」扫码配对或填入地址与 API Key")
-                    .ink(.textMd).foregroundColor(c.textTertiary)
-                    .multilineTextAlignment(.center)
-            }
-        }
-        .padding(24)
-    }
-}
-
 /// 底部 Sheet 容器（SandSheet 等价：标题 + 关闭下拉）。
 struct InkSheet<Content: View>: View {
     @Environment(\.inkColors) private var c

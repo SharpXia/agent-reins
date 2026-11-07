@@ -1,9 +1,8 @@
 import AVFoundation
 import Foundation
 import UIKit
-import composeApp
 
-// MARK: - 格式化工具（Format.kt 移植）
+// MARK: - 格式化工具
 
 /// DateFormatter construction is relatively expensive and these helpers are called for
 /// every visible message row. Keep the formatters alive for the lifetime of the app so a
@@ -51,6 +50,32 @@ func formatMessageTime(_ epochMs: Int64) -> String {
     return ChatDateFormatters.crossDayTime.string(from: date)
 }
 
+// ISO8601 解析器（带小数秒/不带两把；构造昂贵，进程级复用——同 ChatDateFormatters 纪律）。
+private let isoFractional: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return f
+}()
+private let isoPlain: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime]
+    return f
+}()
+
+/// 消息时间（ISO8601/epoch 毫秒串 → 当天 HH:mm / 跨天 M-d HH:mm）。
+/// 服务端快照行 timestamp（RFC3339Nano，Go 序列化带纳秒小数+时区偏移）、事件路径信封 ts
+/// 同走此入口；解析失败或空返回 ""（行渲染侧据此省略，不虚构时间）。
+func formatMessageTimeISO(_ raw: String?) -> String {
+    guard let raw, !raw.isEmpty else { return "" }
+    var date = raw.contains(".")
+        ? isoFractional.date(from: raw)
+        : nil
+    if date == nil { date = isoPlain.date(from: raw) }
+    if let date { return formatMessageTime(Int64(date.timeIntervalSince1970 * 1000)) }
+    if let ms = Int64(raw) { return formatMessageTime(ms) }
+    return ""
+}
+
 /// 日分隔文案：今天 / 昨天 / M月d日（跨年补年份）。
 func dayHeaderLabel(_ atMs: Int64) -> String {
     let date = Date(timeIntervalSince1970: Double(atMs) / 1000)
@@ -64,50 +89,6 @@ func dayHeaderLabel(_ atMs: Int64) -> String {
         : ChatDateFormatters.day.string(from: date)
 }
 
-// MARK: - 会话 surface 判别（SessionClassifier 移植）
-
-enum SessionCategory {
-    case mainline, derived, system, channel, unknown
-}
-
-/// key `agent:<agentId>:<surface…>` 判别，与 Kotlin SessionClassifier 同语义。
-func classifySession(_ key: String) -> SessionCategory {
-    guard key.hasPrefix("agent:") else { return .unknown }
-    let surface = String(key.dropFirst("agent:".count))
-    let idx = surface.firstIndex(of: ":").map { surface.distance(from: surface.startIndex, to: $0) }
-    let s = idx.map { String(surface.suffix(from: surface.index(surface.startIndex, offsetBy: $0 + 1))) } ?? surface
-    if s.isEmpty { return .unknown }
-    if s == "main" || s.hasPrefix("ar-") { return .mainline }
-    if s.hasPrefix("subagent:") { return .derived }
-    if s.hasPrefix("cron:") || s.hasPrefix("boot:") || s.hasPrefix("dashboard:") { return .system }
-    if s.contains(":direct:") { return .channel }
-    return .unknown
-}
-
-/// CHANNEL 会话的渠道桶（surface 首段）。
-func channelBucket(of key: String) -> String? {
-    guard classifySession(key) == .channel else { return nil }
-    guard key.hasPrefix("agent:") else { return nil }
-    let surface = String(key.dropFirst("agent:".count))
-    guard let idx = surface.firstIndex(of: ":") else { return nil }
-    let bucket = String(surface[surface.index(after: idx)...]).prefix { $0 != ":" }
-    return bucket.isEmpty ? nil : String(bucket)
-}
-
-/// conversation id（ConversationRepository.convId 同格式）。
-func convId(_ agentId: String, channel: String? = nil) -> String {
-    channel == nil ? "conv:\(agentId)" : "conv:\(agentId):\(channel!)"
-}
-
-/// session key → agentId。
-func sessionKeyAgentId(_ key: String) -> String? {
-    guard key.hasPrefix("agent:") else { return nil }
-    let rest = key.dropFirst("agent:".count)
-    guard let idx = rest.firstIndex(of: ":") else { return nil }
-    let agent = String(rest[..<idx])
-    return agent.isEmpty ? nil : agent
-}
-
 // MARK: - JSON pretty print
 
 func prettyJson(_ raw: String?) -> String? {
@@ -119,64 +100,9 @@ func prettyJson(_ raw: String?) -> String? {
     return text
 }
 
-// MARK: - 桥接快照的 Swift 侧辅助
+// MARK: - 通知音 / 触感（Hub 面尚未接通知音；资源与试听面保留，待设置页重建时启用）
 
-extension BridgeConv {
-    static func empty() -> BridgeConv {
-        BridgeConv(sessionKey: "", entries: [], hasMoreHistory: false, historyLoaded: false,
-                   runActive: false, loadingOlder: false, queuedCount: 0, pendingOutbox: [],
-                   sendSignal: 0, readOnly: false)
-    }
-}
-
-extension BridgeLists {
-    static func empty() -> BridgeLists {
-        BridgeLists(conversations: [], sessions: [], agents: [])
-    }
-}
-
-extension BridgeTimeline {
-    static func empty() -> BridgeTimeline {
-        BridgeTimeline(agentId: nil, sections: [], sectionLoading: nil, compactMarks: [:])
-    }
-}
-
-extension BridgeMisc {
-    static func empty() -> BridgeMisc {
-        BridgeMisc(pendingApproval: nil, autoOpenKey: nil, draft: "", quotedText: nil,
-                   creatingSession: false, themeMode: "SYSTEM", soundEnabled: true,
-                   hapticsEnabled: true, notificationSound: "DOUBLE_TICK", searchHits: [], searching: false)
-    }
-
-    var notificationSoundName: AppSoundName? {
-        AppSoundName(rawValue: notificationSound)
-    }
-}
-
-extension BridgeConn {
-    static func empty() -> BridgeConn {
-        BridgeConn(kind: "disconnected", message: nil, requestId: nil, gatewayName: nil,
-                   connectedUrl: nil, busy: false, lastError: nil, hasPairedCredential: false,
-                   url: "", apiKey: "", alternateUrls: [], setupCode: "",
-                   approvalsEnabled: false, onboardingDone: false, showOnboarding: false,
-                   devAutoSelectKey: nil)
-    }
-}
-
-extension BridgeTimeline {
-    /// NSDictionary<String, ComposeAppLong> → [String: Int64]。
-    var marks: [String: Int64] {
-        var out: [String: Int64] = [:]
-        for (k, v) in compactMarks { out[k] = v.int64Value }
-        return out
-    }
-}
-
-extension BridgeApproval: Identifiable {}
-extension BridgeConversation: Identifiable {}
-extension BridgeSession: Identifiable {}
-
-/// 通知音枚举（与 Kotlin AppSound 名字对齐；"none" = 静音）。
+/// 通知音枚举（"none" = 静音；rawValue 为持久化名）。
 enum AppSoundName: String, CaseIterable {
     case BLIP, TICK, DOUBLE_TICK, CHIME_A, CHIME_B
 
@@ -200,7 +126,7 @@ enum AppSoundName: String, CaseIterable {
         }
     }
 
-    /// bundle 内资源名（sfx_<key>.wav，与 Kotlin SoundPlayer.ios.kt 映射一致）。
+    /// bundle 内资源名（sfx_<key>.wav）。
     var fileKey: String {
         switch self {
         case .BLIP: return "blip"
@@ -211,8 +137,6 @@ enum AppSoundName: String, CaseIterable {
         }
     }
 }
-
-// MARK: - 音效试听 / 触感（事件音由 Kotlin AppModel 侧负责，Swift 只做 UI 触发面）
 
 enum Feedback {
     static func hapticTap(enabled: Bool) {
@@ -227,7 +151,7 @@ enum Feedback {
 
     private static var players: [String: AVAudioPlayer] = [:]
 
-    /// 设置页试听（ambient 类别：混音、随静音键）。
+    /// 试听（ambient 类别：混音、随静音键）。
     static func play(sound: AppSoundName) {
         if players[sound.fileKey] == nil {
             guard let path = Bundle.main.path(forResource: "sfx_\(sound.fileKey)", ofType: "wav") else { return }

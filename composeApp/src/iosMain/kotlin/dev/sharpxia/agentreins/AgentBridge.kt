@@ -1,612 +1,418 @@
 package dev.sharpxia.agentreins
 
-import androidx.compose.runtime.snapshotFlow
-import dev.sharpxia.agentreins.model.ApprovalRequest
-import dev.sharpxia.agentreins.model.ChatEntry
-import dev.sharpxia.agentreins.model.GatewayStatus
-import dev.sharpxia.agentreins.model.Message
-import dev.sharpxia.agentreins.model.Session
-import dev.sharpxia.agentreins.model.ThinkingEntry
-import dev.sharpxia.agentreins.model.ToolCallEvent
-import dev.sharpxia.agentreins.model.sessionKeyAgentId
-import dev.sharpxia.agentreins.openclaw.Conversation
-import dev.sharpxia.agentreins.openclaw.ConversationKind
-import dev.sharpxia.agentreins.openclaw.Outbox
-import dev.sharpxia.agentreins.openclaw.SearchHit
-import dev.sharpxia.agentreins.openclaw.SessionCategory
-import dev.sharpxia.agentreins.openclaw.SessionClassifier
-import dev.sharpxia.agentreins.ui.AppSound
-import dev.sharpxia.agentreins.ui.FeedbackPrefs
-import dev.sharpxia.agentreins.ui.avatar.AgentExpression
-import dev.sharpxia.agentreins.ui.avatar.avatarExpressionOf
-import dev.sharpxia.agentreins.ui.theme.AgentTintName
-import dev.sharpxia.agentreins.ui.theme.ThemeMode
+import dev.sharpxia.agentreins.hub.DefaultHubClient
+import dev.sharpxia.agentreins.hub.HubAuthState
+import dev.sharpxia.agentreins.hub.HubException
+import dev.sharpxia.agentreins.hub.HubRuntime
+import dev.sharpxia.agentreins.hub.UiApproval
+import dev.sharpxia.agentreins.hub.UiConversation
+import dev.sharpxia.agentreins.hub.UiGateway
+import dev.sharpxia.agentreins.hub.UiMessage
+import dev.sharpxia.agentreins.hub.UiMessagesPage
+import dev.sharpxia.agentreins.hub.UiWorkActivity
+import dev.sharpxia.agentreins.hub.auth.DeviceInfo
+import dev.sharpxia.agentreins.hub.db.createHubDriver
+import dev.sharpxia.agentreins.hub.db.openHubDatabase
+import dev.sharpxia.agentreins.hub.projection.CommandsList
+import dev.sharpxia.agentreins.hub.projection.EventEnvelope
+import dev.sharpxia.agentreins.hubdb.HubDatabase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import platform.Foundation.NSProcessInfo
+import kotlinx.serialization.json.jsonObject
 
 /**
- * SwiftUI 壳 ↔ AppModel 桥（iOS 前端重构）。
+ * SwiftUI 壳 ↔ shared/hub 桥（Hub 化 P4 定稿：网关直连面已整体退役，本桥只剩 Hub 面）。
  *
- * AppModel 是 Compose snapshot state（mutableStateOf），Swift 侧无法直接订阅；
- * 本桥用 snapshotFlow 把状态切片成五路纯数据快照，经主线程回调推给 Swift。
- * composeApp（Compose UI 层）与 shared（数据层）一字不动——冻结约束下的唯一接线面。
+ * 职责：账号态订阅、登录/恢复/登出、投影库 Flow → Swift 回调、命令透传、设备管理。
+ * 所有回调在主线程派发（scope = Dispatchers.Main）。
  *
- * DTO 纪律（跨 Kotlin/Swift 边界）：
- * - 只用 String/Boolean/Int/Long/List/Map + 可空 String；数值一律非空，用哨兵
- *   （0=无时间、-1=无耗时/无 exitCode）——可空数值跨边界导出形态不稳，不赌。
- * - 多态（状态机/条目类型）折成 kind 字符串 + 平铺字段，Swift switch kind。
+ * DTO 纪律（跨 Kotlin/Swift 边界）：[UiConversation]/[UiMessage]/[DeviceInfo] 是 shared 的
+ * 只读模型，字段均为 String/Long/Int/Boolean/可空 String，Swift 直接消费，不另建中间 DTO。
  */
-
-// ---------- 快照 DTO ----------
-
-/** 连接态：disconnected/connecting/pairing/connected/error。 */
-data class BridgeConn(
-    val kind: String,
-    val message: String? = null,
-    val requestId: String? = null,
-    val gatewayName: String? = null,
-    val connectedUrl: String? = null,
-    val busy: Boolean = false,
-    val lastError: String? = null,
-    val hasPairedCredential: Boolean = false,
-    val url: String = "",
-    val apiKey: String = "",
-    val alternateUrls: List<String> = emptyList(),
-    val setupCode: String = "",
-    val approvalsEnabled: Boolean = false,
-    val onboardingDone: Boolean = false,
-    val showOnboarding: Boolean = false,
-    /** Dev 通道目标会话（SwiftUI 壳据此自动导航进会话页）。 */
-    val devAutoSelectKey: String? = null,
-)
-
-/** conversation 行（首页列表）；run 状态已并入（running/derivedTasks/taskKeys）。 */
-data class BridgeConversation(
-    val id: String,
-    val agentId: String,
-    val kind: String,
-    val channel: String? = null,
-    val sessionKeys: List<String> = emptyList(),
-    val preview: String? = null,
-    val lastActiveAtMs: Long = 0,
-    val unread: Int = 0,
-    val pinned: Boolean = false,
-    val archived: Boolean = false,
-    val hidden: Boolean = false,
-    val running: Boolean = false,
-    val derivedTasks: Int = 0,
-    val taskKeys: List<String> = emptyList(),
-)
-
-data class BridgeSession(
-    val id: String,
-    val title: String? = null,
-    val preview: String? = null,
-    val lastActiveAtMs: Long = 0,
-    val unread: Int = 0,
-    val pinned: Boolean = false,
-    val archived: Boolean = false,
-    val kind: String? = null,
-    val agentId: String? = null,
-    val hidden: Boolean = false,
-)
-
-data class BridgeAgent(
-    val agentId: String,
-    val name: String,
-    val tint: String,
-    /** 已解析的表情枚举名（恒非空：定制值或 agentId 散列派生值）。 */
-    val expression: String = "",
-    /** 黏土脸系数串（12 段两位小数逗号分隔）；"" = 正圆默认（face-sculpt §4）。 */
-    val face: String = "",
-    val sessionCount: Int = 0,
-    val unreadTotal: Int = 0,
-)
-
-/** 会话/对话列表域（首行 tab 与 agent 页的数据源）。 */
-data class BridgeLists(
-    val conversations: List<BridgeConversation> = emptyList(),
-    val sessions: List<BridgeSession> = emptyList(),
-    val agents: List<BridgeAgent> = emptyList(),
-)
-
-/** 对话流条目：kind = message/thinking/tool。 */
-data class BridgeEntry(
-    val kind: String,
-    val id: String,
-    val sessionId: String? = null,
-    val role: String = "",
-    val content: String = "",
-    val timestampMs: Long = 0,
-    val streaming: Boolean = false,
-    val entryId: String? = null,
-    val text: String = "",
-    val toolName: String = "",
-    val title: String? = null,
-    val argumentsJson: String? = null,
-    val resultJson: String? = null,
-    val exitCode: Int = -1,
-    val durationMs: Long = -1,
-    val state: String = "running",
-)
-
-/** 当前会话对话流域。 */
-data class BridgeConv(
-    val sessionKey: String,
-    val entries: List<BridgeEntry> = emptyList(),
-    val hasMoreHistory: Boolean = false,
-    val historyLoaded: Boolean = false,
-    val runActive: Boolean = false,
-    val loadingOlder: Boolean = false,
-    val queuedCount: Int = 0,
-    val pendingOutbox: List<BridgeOutboxCmd> = emptyList(),
-    val sendSignal: Int = 0,
-    val readOnly: Boolean = false,
-)
-
-data class BridgeOutboxCmd(
-    val idempotencyKey: String,
-    val text: String,
-    val createdAtMs: Long = 0,
-    val unconfirmed: Boolean = false,
-)
-
-/** 时间线分区（conversation 路由）。 */
-data class BridgeSection(
-    val key: String,
-    val label: String? = null,
-    val entries: List<BridgeEntry> = emptyList(),
-    val hasMoreHistory: Boolean = false,
-    val historyLoaded: Boolean = false,
-)
-
-data class BridgeTimeline(
-    val agentId: String? = null,
-    val sections: List<BridgeSection> = emptyList(),
-    val sectionLoading: String? = null,
-    val compactMarks: Map<String, Long> = emptyMap(),
-)
-
-data class BridgeApproval(
-    val id: String,
-    val summary: String,
-    val detailJson: String? = null,
-)
-
-data class BridgeSearchHit(
-    val sessionKey: String,
-    val snippet: String,
-    val timestampMs: Long = 0,
-)
-
-/** 杂项域：审批/导航锚/草稿/偏好/搜索。 */
-data class BridgeMisc(
-    val pendingApproval: BridgeApproval? = null,
-    val autoOpenKey: String? = null,
-    val draft: String = "",
-    val quotedText: String? = null,
-    val creatingSession: Boolean = false,
-    val themeMode: String = "SYSTEM",
-    val soundEnabled: Boolean = true,
-    val hapticsEnabled: Boolean = true,
-    val notificationSound: String = "DOUBLE_TICK",
-    val searchHits: List<BridgeSearchHit> = emptyList(),
-    val searching: Boolean = false,
-)
-
-// ---------- 桥本体 ----------
-
-class AgentBridge(internal val model: AppModel) {
-
-    init {
-        // 根因修复（模拟器 A/B 实证,详见 diagnostic/stall-trace 分支）：
-        // AppModel 的 mutableStateOf 写发生在 Dispatchers.Default 线程，而本壳没有
-        // ComposeUIViewController——CMP 壳由其内部自动启动全局快照通知泵，SwiftUI 壳
-        // 没人启动 → 桥的 snapshotFlow 只发首帧，后续状态更新对 Swift 侧间歇性/永久
-        // 不可见（「已连接但会话内容加载不出」的真凶）。此处手动接上通知泵。
-        androidx.compose.runtime.snapshots.Snapshot.registerGlobalWriteObserver {
-            androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
-        }
-    }
+class AgentBridge {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private var started = false
 
-    /** Swift 端启动观测；幂等（重复调用忽略）。 */
-    fun start(
-        onConn: (BridgeConn) -> Unit,
-        onLists: (BridgeLists) -> Unit,
-        onConv: (BridgeConv) -> Unit,
-        onTimeline: (BridgeTimeline) -> Unit,
-        onMisc: (BridgeMisc) -> Unit,
-        onEvent: (String, String) -> Unit,
-    ) {
-        if (started) return
-        started = true
+    private val hubRuntime = HubRuntime(scope)
+    private var hubClient: DefaultHubClient? = null
+    private var hubConvJob: Job? = null
+    private var hubMsgJob: Job? = null
+    private var hubApprovalJob: Job? = null
+    private var hubGatewayJob: Job? = null
+    private var hubWorkActivityJob: Job? = null
+    private var hubPhaseJob: Job? = null
+
+    /** wp-13：run 终态通知回调（Swift 注册；见 [hubWatchRunTerminal]）。 */
+    private var runTerminalSink: ((conversationId: String, runId: String, status: String) -> Unit)? = null
+
+    /** wp-13：审批请求通知回调（Swift 注册；见 [hubWatchApprovalRequested]）。 */
+    private var approvalRequestedSink: ((conversationId: String) -> Unit)? = null
+
+    /** 投影库句柄进程内唯一（登出清表后复用同一连接，重登从空库 bootstrap）。 */
+    private val hubDb: HubDatabase? by lazy { openHubDatabase(createHubDriver()) }
+
+    // ---------- 账号态 ----------
+
+    /**
+     * Hub 账号态订阅（主线程回调）：kind = idle/working/needsLogin/loggedIn；
+     * message = NeedsLogin.reason；user = LoggedIn.userDisplay；deviceId = LoggedIn.deviceId。
+     * 进入 loggedIn 时自动组装并启动 Hub 同步栈（幂等）。
+     */
+    fun hubObserve(onState: (kind: String, message: String?, user: String?, deviceId: String?) -> Unit) {
         scope.launch {
-            snapshotFlow {
-                val st = model.status
-                println("AgentReins[connsnap] status=${st::class.simpleName} busy=${model.busy} lastError=${model.lastError}")
-                BridgeConn(
-                    kind = when (st) {
-                        is GatewayStatus.Connected -> "connected"
-                        is GatewayStatus.Connecting -> "connecting"
-                        is GatewayStatus.PairingPending -> "pairing"
-                        is GatewayStatus.Error -> "error"
-                        GatewayStatus.Disconnected -> "disconnected"
-                    },
-                    message = (st as? GatewayStatus.Error)?.message,
-                    requestId = (st as? GatewayStatus.PairingPending)?.requestId,
-                    gatewayName = (st as? GatewayStatus.Connected)?.gatewayName,
-                    connectedUrl = model.connectedUrl,
-                    busy = model.busy,
-                    lastError = model.lastError,
-                    hasPairedCredential = model.hasPairedCredential,
-                    url = model.url,
-                    apiKey = model.apiKey,
-                    alternateUrls = model.alternateUrls,
-                    setupCode = model.setupCode,
-                    approvalsEnabled = model.approvalsEnabled,
-                    onboardingDone = model.onboardingDone,
-                    showOnboarding = model.showOnboarding,
-                    devAutoSelectKey = model.devAutoSelectKey,
-                )
-            }.collect { onConn(it) }
-        }
-        scope.launch {
-            snapshotFlow {
-                BridgeLists(
-                    conversations = model.conversations.map { it.toBridge(model) },
-                    sessions = model.sessions.map { it.toBridge() },
-                    agents = AgentRegistry.summarize(model.sessions, model.agentProfiles).map {
-                        BridgeAgent(
-                            agentId = it.profile.agentId,
-                            name = it.profile.name,
-                            tint = it.profile.tint.name,
-                            expression = avatarExpressionOf(it.profile.agentId, model.agentProfiles).name,
-                            face = it.profile.face,
-                            sessionCount = it.sessionCount,
-                            unreadTotal = it.unreadTotal,
-                        )
-                    },
-                )
-            }.collect { onLists(it) }
-        }
-        // Dev 预览注入（AGENTREINS_DEV_PREVIEW_MARKDOWN=1）：网关不可用时的渲染走查通道，
-        // 只改桥快照、不写 AppModel——验证 SwiftUI 侧 Markdown/shimmer/工具卡渲染与钉底。
-        val previewMarkdown = AutoPromptHolderPreview.value
-        scope.launch {
-            snapshotFlow {
-                val conv = model.conversation
-                var entries = conv?.entries?.map { it.toBridge() } ?: emptyList()
-                if (previewMarkdown && conv == null) {
-                    entries = previewEntries()
-                }
-                BridgeConv(
-                    sessionKey = model.selectedSession ?: (if (previewMarkdown) "preview" else ""),
-                    entries = entries,
-                    hasMoreHistory = conv?.hasMoreHistory ?: false,
-                    historyLoaded = previewMarkdown || (conv?.historyLoaded ?: false),
-                    runActive = conv?.activeRunId != null,
-                    loadingOlder = model.loadingOlder,
-                    queuedCount = model.queuedCount,
-                    pendingOutbox = model.pendingOutbox.map { cmd ->
-                        BridgeOutboxCmd(
-                            idempotencyKey = cmd.idempotencyKey,
-                            text = cmd.text,
-                            createdAtMs = cmd.createdAtMs,
-                            unconfirmed = cmd.lastError?.contains("结果未确认") == true,
-                        )
-                    },
-                    sendSignal = model.sendSignal,
-                )
-            }.collect { onConv(it) }
-        }
-        scope.launch {
-            snapshotFlow {
-                BridgeTimeline(
-                    agentId = model.convAgentId,
-                    sections = model.convSections.map { s ->
-                        BridgeSection(
-                            key = s.key,
-                            label = s.label,
-                            entries = s.state?.entries?.map { it.toBridge() } ?: emptyList(),
-                            hasMoreHistory = s.state?.hasMoreHistory ?: false,
-                            historyLoaded = s.state?.historyLoaded ?: false,
-                        )
-                    },
-                    sectionLoading = model.convSectionLoading,
-                    compactMarks = model.compactMarks,
-                )
-            }.collect { onTimeline(it) }
-        }
-        scope.launch {
-            snapshotFlow {
-                BridgeMisc(
-                    pendingApproval = model.pendingApproval?.toBridge(),
-                    autoOpenKey = model.autoOpenKey ?: (if (previewMarkdown) "preview" else null),
-                    draft = model.draft,
-                    quotedText = model.quotedText,
-                    creatingSession = model.creatingSession,
-                    themeMode = model.themeMode.name,
-                    soundEnabled = FeedbackPrefs.soundEnabled.value,
-                    hapticsEnabled = FeedbackPrefs.hapticsEnabled.value,
-                    notificationSound = FeedbackPrefs.notificationSound.value?.name ?: "none",
-                    searchHits = model.searchHits.map { it.toBridge() },
-                    searching = model.searching,
-                )
-            }.collect { onMisc(it) }
-        }
-        // createNewSession 完成直达（Compose 版 Nav 层消费同一事件流）
-        scope.launch {
-            model.navigationEvents.collect { key -> onEvent("openSession", key) }
-        }
-        // Dev 自动发消息（模拟器闭环验证）：连接成功 + 目标会话历史就绪后发一次
-        val autoPrompt = AutoPromptHolder.value
-        if (autoPrompt != null) {
-            val prompt: String = autoPrompt
-            scope.launch {
-                snapshotFlow { Triple(
-                    model.status is GatewayStatus.Connected,
-                    model.selectedSession,
-                    model.conversation?.historyLoaded == true,
-                ) }.collect { (connected, key, loaded) ->
-                    if (!autoPromptSent && connected && loaded && key != null) {
-                        autoPromptSent = true
-                        model.draft = prompt
-                        model.send()
+            // 投影/同步栈异常不得带崩宿主 App（0.5.1 教训：collect 异常经 uncaught handler SIGABRT）
+            runCatching {
+                hubRuntime.state.collect { st ->
+                    when (st) {
+                        HubAuthState.Idle -> onState("idle", null, null, null)
+                        HubAuthState.Working -> onState("working", null, null, null)
+                        is HubAuthState.NeedsLogin -> onState("needsLogin", st.reason, null, null)
+                        is HubAuthState.LoggedIn -> {
+                            ensureHubStarted()
+                            onState("loggedIn", null, st.userDisplay, st.deviceId)
+                        }
                     }
                 }
             }
         }
     }
 
-    private var autoPromptSent = false
+    private fun ensureHubStarted() {
+        if (hubClient == null) {
+            // wp-13：eventTap = 通知触发面（run 终态区分 completed/failed，投影 Flow 面无法还原事件类型）。
+            val client = DefaultHubClient(scope, hubRuntime, hubDb, eventTap = ::onBridgeEvent)
+            hubClient = client
+            client.start()
+        }
+    }
 
-    /** Dev 预览条目：Markdown 全要素 + 流式尾 + 工具卡三态 + 思考卡 + 待发气泡。 */
-    private fun previewEntries(): List<BridgeEntry> {
-        val base = listOf(
-        BridgeEntry(kind = "message", id = "pv-1", role = "user", content = "帮我总结一下 KMP 的优缺点，用 Markdown",
-            timestampMs = SystemTimeHolder.nowMs()),
-        BridgeEntry(kind = "thinking", id = "pv-t1", text = "用户想要 Markdown 格式的对比总结\n整理优势和劣势两大部分"),
-        BridgeEntry(kind = "tool", id = "pv-tool1", toolName = "exec", title = "收集资料",
-            state = "succeeded", durationMs = 482,
-            argumentsJson = "{\"cmd\": \"ls -la\"}", resultJson = "total 64\ndrwxr-xr-x  12 user  staff   384B"),
-        BridgeEntry(kind = "message", id = "pv-2", role = "assistant", content = """## KMP 优缺点总结
+    /** 启动恢复：Keychain 有 refreshToken 则静默刷新进 loggedIn，否则 needsLogin。 */
+    fun hubRestore(baseUrl: String) = hubRuntime.restore(baseUrl)
 
-Kotlin Multiplatform 让 **业务逻辑** 一份代码多端复用：
+    fun hubLogin(baseUrl: String, username: String, password: String, deviceName: String) =
+        hubRuntime.login(baseUrl, username, password, deviceName)
 
-| 维度 | 优点 | 代价 |
-|---|---|---|
-| 代码复用 | 数据层/协议层 100% 共享 | UI 仍需各端实现 |
-| 性能 | 编译为原生二进制 | 与原生仍有差距 |
-| 生态 | 可调用平台 API | 互操作样板代码 |
+    /**
+     * 登出闭环（方案 §6-P4 验收⑤）= 撤销当前设备（服务端 Token 即时失效）+ 清 Keychain 凭据
+     * + 停同步栈 + 清全部本地投影数据（七表）。重登后从空库 bootstrap。
+     */
+    fun hubLogout() {
+        hubConvJob?.cancel(); hubConvJob = null
+        hubMsgJob?.cancel(); hubMsgJob = null
+        hubApprovalJob?.cancel(); hubApprovalJob = null
+        hubGatewayJob?.cancel(); hubGatewayJob = null
+        hubWorkActivityJob?.cancel(); hubWorkActivityJob = null
+        hubPhaseJob?.cancel(); hubPhaseJob = null
+        val client = hubClient
+        hubClient = null
+        client?.stop()
+        client?.wipeLocalData()
+        hubRuntime.logout()
+    }
 
-细节见 `shared` 模块，注意 `expect/actual` 的使用成本。""",
-            timestampMs = SystemTimeHolder.nowMs()),
-        BridgeEntry(kind = "tool", id = "pv-tool2", toolName = "browser", title = "正在打开文档页",
-            state = "running", durationMs = -1),
-        BridgeEntry(kind = "message", id = "pv-3", role = "assistant", content = "正在补充流式输出的一段话，这条处于",
-            timestampMs = SystemTimeHolder.nowMs(), streaming = true),
-        )
-        // 长会话走查：30 轮问答、行高差异大（标题/列表/代码块/表格混排），把进页锚底
-        // 的估算落点误差放大到可观察。仅 AGENTREINS_DEV_PREVIEW_MARKDOWN=1 生效。
-        val rounds = (1..30).flatMap { i ->
-            val filler = (1..(2 + i % 5)).joinToString("\n\n") { p ->
-                "第 $i 轮说明第 $p 段：这一段用来放大 Markdown 结排后的行高差异，" +
-                    "内容长度随轮次变化，便于观察锚定落点是否稳定在真实底部。"
+    // ---------- 投影库数据面（Flow → Swift 回调） ----------
+
+    /** 会话列表订阅（投影库变更即回调；重复调用先取消旧订阅）。 */
+    fun hubWatchConversations(onList: (List<UiConversation>) -> Unit) {
+        hubConvJob?.cancel()
+        hubConvJob = scope.launch {
+            runCatching { hubClient?.observeConversations()?.collect { onList(it) } }
+        }
+    }
+
+    /** 指定会话消息订阅（打开会话页调用；重复调用切订阅）。 */
+    fun hubWatchMessages(conversationId: String, onList: (List<UiMessage>) -> Unit) {
+        hubMsgJob?.cancel()
+        hubMsgJob = scope.launch {
+            runCatching { hubClient?.observeMessages(conversationId)?.collect { onList(it) } }
+        }
+    }
+
+    /** 关闭会话页时取消消息订阅（避免后台继续推已离开会话的列表）。 */
+    fun hubStopWatchingMessages() {
+        hubMsgJob?.cancel(); hubMsgJob = null
+        // wp-15：工作过程订阅随会话页同生命周期（开/关成对；离开会话页不再推送其工具活动）
+        hubWorkActivityJob?.cancel(); hubWorkActivityJob = null
+    }
+
+    /**
+     * 会话工作过程订阅（wp-15：「工作过程」折叠披露条数据面；打开会话页调用，随
+     * [hubStopWatchingMessages] 成对取消）。快照 = hubToolEvents（tool.* 三态捕获行）+
+     * hubRunStatus（run.status 阶段帧）合流，任一表变更即推送。断线窗口丢失为已知面
+     * （06 §10.2），重连后保留已捕获部分。
+     */
+    fun hubWatchWorkActivity(conversationId: String, onSnapshot: (UiWorkActivity) -> Unit) {
+        hubWorkActivityJob?.cancel()
+        hubWorkActivityJob = scope.launch {
+            runCatching { hubClient?.observeWorkActivity(conversationId)?.collect { onSnapshot(it) } }
+        }
+    }
+
+    /**
+     * 待审批列表订阅（wp-9 审批卡 + 设置页计数入口共用一份 Flow；重复调用先取消旧订阅）。
+     * 仅 status=pending 行：approval.resolved 事件翻终态后行自动离场，卡片状态收敛即由本
+     * Flow 驱动。登录态建立（hubClient 就绪）后订阅才有数据——未登录时收集空流即结束。
+     */
+    fun hubWatchApprovals(onList: (List<UiApproval>) -> Unit) {
+        hubApprovalJob?.cancel()
+        hubApprovalJob = scope.launch {
+            runCatching { hubClient?.observePendingApprovals()?.collect { onList(it) } }
+        }
+    }
+
+    /**
+     * 网关列表订阅（wp-11 网关与 agent 维度展示 + #16 新建会话入口数据面；重复调用先取消旧订阅）。
+     * 数据源 = 投影库 hubGateways Flow：快照整体覆盖（wp-2 填充，agentsJson 含 AgentRef 结构化
+     * 清单）+ gateway.online/offline 事件翻转。Flow 是纯投影库面（不依赖登录态），未登录时为空
+     * 清单、bootstrap 后推送——与 [hubWatchConversations] 同模式，无完成后不再推送之虞。
+     */
+    fun hubWatchGateways(onList: (List<UiGateway>) -> Unit) {
+        hubGatewayJob?.cancel()
+        hubGatewayJob = scope.launch {
+            runCatching { hubClient?.observeGateways()?.collect { onList(it) } }
+        }
+    }
+
+    /**
+     * 连接相位订阅（wp-10 两端连接提示条数据面；Swift 登录态建立时机调用，重复调用换订阅）：
+     * onPhase 为 phase.name 字符串 ∈ catching/linked/reconnecting/rebuilding/superseded
+     * （SyncScheduler.phase，[SyncPhase] 纯观察面——不改变同步语义与恢复流程）。linked =
+     * 已连接且已追平，是提示条唯一消失相位。数据源 = hubClient.syncPhase 稳定流（HubClient
+     * 组装时注入 phaseSink，UI 订阅不随 scheduler start/stop 换源）；hubClient 未就绪时本订阅
+     * 空转（与 [hubWatchApprovals] 同语义），重挂时机由登录态回调承担。
+     */
+    fun hubWatchPhase(onPhase: (String) -> Unit) {
+        hubPhaseJob?.cancel()
+        hubPhaseJob = scope.launch {
+            // TF beta-0.5.4 真机缺陷修复：name 是 PascalCase 枚举名（"Catching"），Swift 侧按
+            // 小写契约比较（注释上行）——恒不匹配导致提示条永不消失、文字恒空、恒琥珀底。
+            runCatching { hubClient?.syncPhase?.collect { onPhase(it.name.lowercase()) } }
+        }
+    }
+
+    // ---------- wp-13：通知面（iOS 本地通知触发面） ----------
+
+    /**
+     * run 终态事件回调（wp-13 通知面；Swift 启动时注册一次，重复调用覆盖旧回调）：
+     * conversationId = 桥侧经 hubConvKeys 映射解析（与投影 resolveConversation 同一通道①；
+     * 未映射会话为空串，调用方不得编造归属）、runId = 信封 runId、status ∈ completed/failed。
+     * 回调在主线程（同步引擎运行于本桥 scope = Dispatchers.Main）。回复通知不走本通道：
+     * assistant final 以会话列表 Flow 的 unread 增量为源（「非当前打开」是 Swift UI 态，
+     * 静音判定与点按跳转也都需要 conversationId）；审批走 [hubWatchApprovalRequested]。
+     */
+    fun hubWatchRunTerminal(onEvent: (conversationId: String, runId: String, status: String) -> Unit) {
+        runTerminalSink = onEvent
+    }
+
+    /**
+     * 审批请求事件回调（wp-13 通知面；Swift 启动时注册一次，重复调用覆盖旧回调）：
+     * approval.requested 到达即回调，conversationId = hubConvKeys 解析（未映射 = 空串，调用方
+     * 降级为无归属提醒）。走事件旁路而非审批 Flow 差异的原因：Flow 首推打底后，登录 bootstrap
+     * 快照带回的积压 pending 行会被误判为「新审批」（快照不经过 applyEvent，事件旁路天然不带
+     * bootstrap 假阳性；断线补投的事件经 cursor/幂等去重后仍会触发——对客户端确属新事件）。
+     * 回调在主线程（同 [hubWatchRunTerminal]）。
+     */
+    fun hubWatchApprovalRequested(onEvent: (conversationId: String) -> Unit) {
+        approvalRequestedSink = onEvent
+    }
+
+    /**
+     * DefaultHubClient eventTap（wp-13）：投影应用后按信封类型分派通知触发面。取 run 终态
+     * completed/failed——run.aborted 是用户主动 Stop 的自致结果，不提醒——与
+     * approval.requested（回复通知仍走投影库 Flow 面：unread 增量与「非当前打开」判定都在
+     * Swift 会话列表态）。conversationId 经 hubConvKeys 直查（信封 gatewayId + sessionKey，
+     * run/approval 域必带 sessionKey；wp-4 起两跳连结行也在此解析出——通知面放开两跳归属）；
+     * 未映射 = 空串透传，由 Swift 侧显式降级。
+     * wp-4 修法二发起方门（两端协调器同口径 = RunOriginRegistry.isRunLocal 消费）：run 终态仅
+     * 「本端发起」（message.send 登记）提醒；他端发起 / compact 触发静默（未读增量仍由会话列表
+     * 承载）。registry 缺省（未 start）时事件不流动，此处不判空放行为不可达回退。
+     */
+    private fun onBridgeEvent(envelope: EventEnvelope) {
+        val sk = envelope.sessionKey ?: return
+        val conversationId = hubDb?.hubQueries
+            ?.selectConversationByKey(envelope.gatewayId, sk)
+            ?.executeAsOneOrNull()?.conversationId.orEmpty()
+        when (envelope.type) {
+            EventEnvelope.RUN_COMPLETED, EventEnvelope.RUN_FAILED -> {
+                val status = if (envelope.type == EventEnvelope.RUN_COMPLETED) "completed" else "failed"
+                val runId = envelope.runId
+                    ?: envelope.data.jsonObject["runId"]?.toString()?.trim('"')?.takeIf { it.isNotEmpty() }
+                    ?: return
+                val registry = hubClient?.runOriginRegistry
+                if (registry != null && !registry.isRunLocal(envelope.gatewayId, runId)) return
+                runTerminalSink?.invoke(conversationId, runId, status)
             }
-            listOf(
-                BridgeEntry(kind = "message", id = "pv-u$i", role = "user",
-                    content = "第 $i 轮：检查模块 $i 的构建配置并说明原因。",
-                    timestampMs = SystemTimeHolder.nowMs()),
-                BridgeEntry(kind = "message", id = "pv-a$i", role = "assistant",
-                    content = "### 检查结果（第 $i 轮）\n\n$filler\n\n" +
-                        "- 结论一：配置项 `kotlin.mpp.$i` 正常\n" +
-                        "- 结论二：依赖版本对齐\n\n" +
-                        "```kotlin\nprintln(\"round $i ok\")\n```",
-                    timestampMs = SystemTimeHolder.nowMs()),
-            )
+            EventEnvelope.APPROVAL_REQUESTED -> approvalRequestedSink?.invoke(conversationId)
+            else -> Unit // 其余事件不走通知面（回复 = 会话列表 Flow 的 unread 增量）
         }
-        return base.dropLast(1) + rounds + base.takeLast(1)
     }
 
-    // ---- 动作（AppModel 全量动作面 1:1 透传，Swift 侧不触碰 Kotlin 内部状态） ----
+    // ---------- 命令（幂等队列） ----------
 
-    fun connect() = model.connect()
-    fun disconnect() = model.disconnect()
-    fun setUrl(url: String) { model.url = url }
-    fun setApiKey(apiKey: String) { model.apiKey = apiKey }
-    fun setAlternateUrls(rawList: String) {
-        model.alternateUrls = rawList.split(",", "，").map { it.trim() }.filter { it.isNotBlank() }
+    /** 发送消息（幂等队列 + 乐观行；进度经 command.acked/message.created 事件翻转）。 */
+    fun hubSend(conversationId: String, text: String) {
+        scope.launch { runCatching { hubClient?.commands?.sendMessage(conversationId, text) } }
     }
-    fun setSetupCode(code: String) { model.setupCode = code }
-    fun onQrScan(payload: String?) = model.onQrScan(payload)
-    fun clearError() { model.lastError = null }
 
-    fun selectSession(key: String?) {
-        model.select(key?.let { k -> model.sessions.firstOrNull { it.id == k } })
-    }
-    fun openSessionByKey(key: String) = model.openSessionByKey(key)
-
-    fun setDraft(text: String) { model.draft = text }
-    fun sendDraft() = model.send()
-    fun resendText(text: String) = model.resendText(text)
-    fun stopRun() = model.stopRun()
-    fun stopByCommand() = model.stopByCommand()
-    fun quoteMessage(text: String) = model.quoteMessage(text)
-    fun clearQuote() = model.clearQuote()
-
-    /** fork 锚点判定与 Kotlin 版同语义：entryId 优先，缺锚点（user- 前缀合成 id）不可分支。 */
-    fun fork(entryId: String?, id: String) {
-        val anchor = entryId ?: id.takeIf { !it.startsWith("user-") }
-        if (anchor == null) {
-            model.lastError = "该消息不支持分支（缺 transcript 锚点）"
-            return
+    /**
+     * 动态斜杠命令目录查询（端点 #21，v1.1 additive 2026-11-07；**纯读直调，不走幂等队列**——
+     * 命令目录是查询面无副作用，写路径纪律不适用）。读机制与 [hubDevices] 同式（authStack +
+     * withBearer 直调 REST）；onResult 非 null = 成功（可能为空目录，truncated 等其余字段按需
+     * 消费）；null = 通道不可用（未登录/网络不可达/Hub FAILED）——调用方回落静态六命令目录、
+     * 下次触发重试，尽力而为增强面（不弹错误 UI，与 hubReportApnsToken 同纪律）。
+     */
+    fun hubCommands(conversationId: String, onResult: (CommandsList?) -> Unit) {
+        scope.launch {
+            onResult(runCatching {
+                val stack = hubRuntime.authStack ?: throw HubException.notLoggedIn()
+                stack.auth.withBearer { stack.api.commands(conversationId) }
+            }.getOrNull())
         }
-        model.forkFrom(Message(id = id, sessionId = "", role = Message.Role.USER, content = "", entryId = entryId))
     }
 
-    fun loadOlder(): Boolean = model.loadOlderMessages()
-    fun retryQueued() = model.retryQueuedNow()
-    fun deleteQueued(idempotencyKey: String) {
-        model.pendingOutbox.firstOrNull { it.idempotencyKey == idempotencyKey }?.let { model.deleteQueued(it) }
+    /**
+     * 后台/锁屏暂停同步栈（2026-11-07 UX 轮崩溃防护；iOS scenePhase 离开 active 时调用）：
+     * 停连接循环并优雅收尾 WSS——挂起竞态下 URLSession 错误回调落在半终结会话上会 abort
+     * （0.5.4 真机锁屏解锁 SIGABRT）。未登录/未启动为幂等空转。
+     */
+    fun hubSuspendSync() {
+        scope.launch { runCatching { hubClient?.suspendNetwork() } }
     }
 
-    fun setConvPinned(id: String, pinned: Boolean) {
-        model.conversations.firstOrNull { it.id == id }?.let { model.setConversationPinned(it, pinned) }
+    /** 回前台恢复同步栈（与 [hubSuspendSync] 成对；幂等）。 */
+    fun hubResumeSync() {
+        scope.launch { runCatching { hubClient?.resumeNetwork() } }
     }
-    fun setConvArchived(id: String, archived: Boolean) {
-        model.conversations.firstOrNull { it.id == id }?.let { model.setConversationArchived(it, archived) }
+
+    /**
+     * 本地删除单条消息（2026-11-07 UX 轮）：仅清投影库行（脏数据清理出口），无服务端命令；
+     * observeMessages Flow 即推删除后列表。服务端权威数据经快照/校准可能回流（语义=本地清理）。
+     */
+    fun hubDeleteLocalMessage(conversationId: String, messageId: String) {
+        scope.launch { runCatching { hubClient?.deleteLocalMessage(conversationId, messageId) } }
     }
-    fun setConvHidden(id: String, hidden: Boolean) {
-        model.conversations.firstOrNull { it.id == id }?.let { model.setConversationHidden(it, hidden) }
+
+    /**
+     * 取消当前活跃 run（Stop 按钮 → DefaultCommandClient.cancelRun，幂等队列 + REST #11 run.cancel）。
+     * 调用方须先从会话实时行取 activeRunId（wp-5 v4 投影）；缺失时不得调用——映射未学习场景
+     * （DefaultEventProjector.setRun 在 resolveConversation 失败时不落库）降级为 UI 提示态，
+     * 不假设 runId 恒有值。中止后的输出收敛由 Gateway 权威裁决（run.aborted 事件回流投影库）。
+     */
+    fun hubCancelRun(runId: String) {
+        scope.launch { runCatching { hubClient?.commands?.cancelRun(runId) } }
     }
-    fun setSessionArchived(key: String, archived: Boolean) {
-        model.sessions.firstOrNull { it.id == key }?.let { model.setSessionArchived(it, archived) }
+
+    /** 会话渲染完整后上报已读（readUpTo = 已渲染最大 seq）。 */
+    fun hubMarkRead(conversationId: String, readUpTo: Long) {
+        scope.launch { runCatching { hubClient?.markRead(conversationId, readUpTo) } }
     }
-    fun setSessionPinned(key: String, pinned: Boolean) {
-        model.sessions.firstOrNull { it.id == key }?.let { model.setSessionPinned(it, pinned) }
+
+    /**
+     * 历史翻页（wp-12）：向上翻取更早历史消息（REST #8 `?before=<seq>` 向上翻页），行按
+     * messageId upsert 合并进投影库——observeMessages Flow 即推送合并后 seq 升序全序列，
+     * 调用方无需二次拼装。onDone page null = 请求未成功（未登录/网络不可达/化身更替竞态丢弃，
+     * 见 DefaultHubClient.loadEarlierMessages）——调用方呈现可重试降级态，不静默；非 null 时
+     * hasMore 为服务端权威（「加载更早」按钮可见性唯一依据，翻到头即 false）。
+     */
+    fun hubLoadEarlier(conversationId: String, before: Long, onDone: (UiMessagesPage?) -> Unit) {
+        scope.launch {
+            onDone(runCatching { hubClient?.loadEarlierMessages(conversationId, before) }.getOrNull())
+        }
     }
-    fun setSessionHidden(key: String, hidden: Boolean) {
-        model.sessions.firstOrNull { it.id == key }?.let { model.setSessionHidden(it, hidden) }
+
+    /**
+     * 审批决定（wp-9）：decision ∈ approve/reject，经幂等队列 approval.decide 提交。
+     * onDone true = 已取得 PERSISTED 回执（生效以 approval.resolved 事件收敛）；false = 决策通道
+     * 不可用（Hub FAILED——如 B-4 预检未通过，或网络不可达未提交；approval.decide 不自动重放，
+     * 见 DefaultCommandClient.retryUnfinished）——调用方须显式呈现「决策通道不可用」降级态，不静默。
+     */
+    fun hubDecideApproval(approvalId: String, decision: String, onDone: (Boolean) -> Unit) {
+        scope.launch {
+            val ok = runCatching { hubClient?.decideApproval(approvalId, decision) == true }
+                .getOrDefault(false)
+            onDone(ok)
+        }
     }
-    fun markAllRead() = model.markAllRead()
 
-    fun conversationIdForAgent(agentId: String): String? = model.conversationIdForAgent(agentId)
-    fun createNewSession(agentId: String) = model.createNewSession(agentId)
-    fun setAgentName(agentId: String, name: String) = model.setAgentName(agentId, name)
-    fun setAgentTint(agentId: String, tint: String) {
-        val name = runCatching { AgentTintName.valueOf(tint) }.getOrNull() ?: return
-        model.setAgentTint(agentId, name)
+    // ---------- v1.1 新端点（#16–#19） ----------
+
+    /**
+     * 新开会话（openclaw 原生指令；wp-11 #16 入口唯一写路径）。#16 聚合语义（2026-11-04 拍板）：
+     * 无主线卡 agent 调用 → 新 session 兜底成卡（入口侧已保证只对无主线卡 agent 开放）；已有
+     * 主线卡 agent 调用 → 新 session 静默（后台任务会话）。结果经回调带回 receipt（null=失败，
+     * 调用方须显式呈现，不静默）；成功后 DefaultHubClient 内部即触发一次会话列表校准，新卡
+     * 秒级入列（兜底成卡的 R4 路径不走周期节拍等待）。
+     */
+    fun hubCreateConversation(gatewayId: String, agentId: String, label: String?, onDone: (String?) -> Unit) {
+        scope.launch {
+            val r = runCatching { hubClient?.createConversation(gatewayId, agentId, label) }
+            onDone(r.getOrNull()?.commandId)
+        }
     }
-    fun setAgentExpression(agentId: String, expression: String) {
-        val e = runCatching { AgentExpression.valueOf(expression) }.getOrNull() ?: return
-        model.setAgentExpression(agentId, e)
+
+    /** 会话重命名；成功回调 true。 */
+    fun hubRenameConversation(conversationId: String, label: String, onDone: (Boolean) -> Unit) {
+        scope.launch { onDone(runCatching { hubClient?.renameConversation(conversationId, label) }.isSuccess) }
     }
-    /** 黏土脸系数串透传（非法串由 AppModel.setAgentFace 静默忽略；"" = 回默认圆）。 */
-    fun setAgentFace(agentId: String, face: String) = model.setAgentFace(agentId, face)
 
-    fun openTimeline(agentId: String) = model.openConversationTimeline(agentId)
-    fun closeTimeline() = model.closeConversationTimeline()
-    fun loadSection(key: String): Boolean = model.loadSectionHistoryIfNeeded(key)
-    fun createSessionInConversation() = model.createSessionInConversation()
-    fun compactContext() = model.compactContext()
-    fun sendAgentStatus() = model.sendAgentStatusPrompt()
-    /** 从头开始（AppModel.startFresh）：当前 agent 开全新 surface 键。 */
-    fun startFresh() = model.startFresh()
-    fun consumeAutoOpen() = model.consumeAutoOpen()
-
-    fun respondApproval(approved: Boolean) = model.respondApproval(approved)
-    fun toggleApprovals(enabled: Boolean) = model.toggleApprovals(enabled)
-    fun applyTheme(mode: String) {
-        val m = runCatching { ThemeMode.valueOf(mode) }.getOrNull() ?: return
-        model.applyThemeMode(m)
+    /** 压缩上下文；成功回调 true。 */
+    fun hubCompactConversation(conversationId: String, onDone: (Boolean) -> Unit) {
+        scope.launch { onDone(runCatching { hubClient?.compactConversation(conversationId) }.isSuccess) }
     }
-    fun toggleSound(enabled: Boolean) = model.toggleSound(enabled)
-    fun toggleHaptics(enabled: Boolean) = model.toggleHaptics(enabled)
-    fun setNotificationSound(name: String) {
-        val sound = if (name == "none") null else AppSound.entries.firstOrNull { it.name == name }
-        model.setNotificationSound(sound)
+
+    /**
+     * wp-17：APNs 设备 token 上报（REST #20，204 幂等覆盖写；hex 串，实际 128 字符）。尽力而为
+     * 的一次性上报，不经回调——失败（未登录/网络不可达/撤销设备 403 HUB-AUTH-004）静默吞掉，
+     * 不得影响登录与同步主路径；APNs 换发 token 时系统会再次注册，届时重报收敛。
+     */
+    fun hubReportApnsToken(token: String) {
+        scope.launch { runCatching { hubClient?.reportApnsToken(token) } }
     }
-    fun searchServer(query: String) = model.searchServer(query)
-}
 
-/** Dev 预览开关（AGENTREINS_DEV_PREVIEW_MARKDOWN=1）。 */
-internal object AutoPromptHolderPreview {
-    val value: Boolean = NSProcessInfo.processInfo.environment["AGENTREINS_DEV_PREVIEW_MARKDOWN"] == "1"
-}
+    // ---------- 设备管理 ----------
 
-internal object SystemTimeHolder {
-    fun nowMs(): Long = kotlin.time.Clock.System.now().toEpochMilliseconds()
-}
+    /**
+     * 设备清单（设备管理页）。wp-11 设备管理错误态：onDone devices 非 null = 成功；null =
+     * 拉取失败（未登录 / 网络不可达 / Hub FAILED），error = 人读失败原因（契约错误为
+     * code+message）——调用方须显式呈现「错误 + 重试」降级态，不静默。此前失败不回调，
+     * 清单页永「加载中…」（与同页审批卡显式降级纪律不一致，本版收敛）。
+     */
+    fun hubDevices(onDone: (devices: List<DeviceInfo>?, error: String?) -> Unit) {
+        scope.launch {
+            val r = runCatching {
+                val stack = hubRuntime.authStack ?: throw HubException.notLoggedIn()
+                stack.auth.withBearer { stack.api.listDevices() }
+            }
+            val page = r.getOrNull()
+            if (page != null) {
+                onDone(page.devices, null)
+            } else {
+                onDone(null, describeError(r.exceptionOrNull()))
+            }
+        }
+    }
 
-// ---------- 映射 ----------
+    /**
+     * 撤销设备（可撤任意自有设备含当前；撤当前即远端登出，本地随后清凭据重登录）。
+     * wp-11 设备管理错误态：onDone ok true = DELETE 已成功（生效以服务端为准）；false =
+     * 撤销未送达（未登录 / 网络不可达 / Hub FAILED）——调用方须显式呈现失败提示 + 可重试，
+     * 不静默。此前 onDone 恒调、失败被 runCatching 吞掉。
+     */
+    fun hubRevokeDevice(deviceId: String, onDone: (ok: Boolean) -> Unit) {
+        scope.launch {
+            val ok = runCatching {
+                val stack = hubRuntime.authStack ?: throw HubException.notLoggedIn()
+                stack.auth.withBearer { stack.api.deleteDevice(deviceId) }
+            }.isSuccess
+            onDone(ok)
+        }
+    }
 
-private fun Session.toBridge() = BridgeSession(
-    id = id,
-    title = title,
-    preview = preview,
-    lastActiveAtMs = lastActiveAtMs ?: 0,
-    unread = unread,
-    pinned = pinned,
-    archived = archived,
-    kind = kind,
-    agentId = agentId ?: sessionKeyAgentId(id),
-    hidden = hidden,
-)
-
-/** run 状态派生与 conversationRunStatus/TaskDetailSheet 同语义，Swift 侧免复刻。 */
-private fun Conversation.toBridge(model: AppModel): BridgeConversation {
-    val agentKeys = model.sessions.asSequence()
-        .filter { (it.agentId ?: sessionKeyAgentId(it.id)) == agentId }
-        .mapTo(mutableSetOf()) { it.id }
-    val active = model.activeRunKeys.filterTo(mutableSetOf()) { it in agentKeys }
-    val derived = active.filter { SessionClassifier.classify(it) == SessionCategory.DERIVED }.sorted()
-    return BridgeConversation(
-        id = id,
-        agentId = agentId,
-        kind = if (kind == ConversationKind.CHANNEL) "channel" else "mainline",
-        channel = channel,
-        sessionKeys = sessionKeys,
-        preview = preview,
-        lastActiveAtMs = lastActiveAtMs ?: 0,
-        unread = unread,
-        pinned = pinned,
-        archived = archived,
-        hidden = hidden,
-        running = active.isNotEmpty(),
-        derivedTasks = derived.size,
-        taskKeys = derived,
-    )
-}
-
-private fun ApprovalRequest.toBridge() = BridgeApproval(
-    id = id,
-    summary = summary,
-    detailJson = detailJson,
-)
-
-private fun SearchHit.toBridge() = BridgeSearchHit(
-    sessionKey = sessionKey,
-    snippet = snippet,
-    timestampMs = timestampMs,
-)
-
-private fun ChatEntry.toBridge(): BridgeEntry = when (this) {
-    is Message -> BridgeEntry(
-        kind = "message",
-        id = id,
-        sessionId = sessionId,
-        role = when (role) {
-            Message.Role.USER -> "user"
-            Message.Role.ASSISTANT -> "assistant"
-            Message.Role.SYSTEM -> "system"
-        },
-        content = content,
-        timestampMs = timestampMs ?: 0,
-        streaming = streaming,
-        entryId = entryId,
-    )
-    is ThinkingEntry -> BridgeEntry(kind = "thinking", id = id, text = text)
-    is ToolCallEvent -> BridgeEntry(
-        kind = "tool",
-        id = id,
-        sessionId = sessionId,
-        toolName = toolName,
-        title = title,
-        argumentsJson = argumentsJson,
-        resultJson = resultJson,
-        exitCode = exitCode ?: -1,
-        durationMs = durationMs ?: -1,
-        state = when (state) {
-            ToolCallEvent.State.RUNNING -> "running"
-            ToolCallEvent.State.SUCCEEDED -> "succeeded"
-            ToolCallEvent.State.FAILED -> "failed"
-        },
-    )
-    else -> BridgeEntry(kind = "unknown", id = id)
+    /** 失败原因人读化（契约错误 code+message，其余取 message；与 desktop 同式）。 */
+    private fun describeError(e: Throwable?): String =
+        (e as? HubException)?.let { "${it.payload.code} ${it.payload.message}" }
+            ?: (e?.message ?: "未知错误")
 }

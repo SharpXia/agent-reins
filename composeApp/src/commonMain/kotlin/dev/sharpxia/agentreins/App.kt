@@ -1,28 +1,40 @@
 package dev.sharpxia.agentreins
 
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
-import dev.sharpxia.agentreins.ui.AppRoot
-import dev.sharpxia.agentreins.ui.theme.InkTheme
-import dev.sharpxia.agentreins.ui.theme.ThemeMode
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 
 /**
- * App 根（M3.1）：主题入口 + 导航壳。页面路由/底栏在 ui/AppRoot，
- * 数据层依旧 AppModel 单实例（prebuilt 由调用方 lambda 每次重组重新求值——
- * 必须 remember 固定单实例，否则 dev 入口每次重组新建 AppModel：重复 connect +
- * 状态源分裂）。
+ * Android/Desktop 壳的占位根（Hub 化 P4）。
+ *
+ * 网关直连时代的 Compose UI 层（AppModel + ui/）已随直连协议整体退役；iOS 为 Hub 主端
+ * （iosApp SwiftUI，经 [AgentBridge] 消费 shared/hub）。Android/Desktop 的 Hub 界面
+ * 待基于 shared/hub 另起 Compose 实现，不复用旧 AppModel——本占位只保证两端编译绿与可启动。
  */
 @Composable
-fun App(prebuilt: AppModel? = null) {
-    val prebuiltModel = remember { prebuilt }
-    val model = prebuiltModel ?: remember { AppModel() }
-    InkTheme(
-        darkTheme = when (model.themeMode) {
-            ThemeMode.SYSTEM -> androidx.compose.foundation.isSystemInDarkTheme()
-            ThemeMode.LIGHT -> false
-            ThemeMode.DARK -> true
-        },
-    ) {
-        AppRoot(model)
+fun App() {
+    MaterialTheme {
+        Surface(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier.fillMaxSize().padding(24.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text("AgentReins", style = MaterialTheme.typography.headlineMedium)
+                Text(
+                    "Hub 客户端：本平台界面待建（iOS 为当前主端）",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+        }
     }
 }

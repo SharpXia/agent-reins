@@ -1,5 +1,6 @@
 package dev.sharpxia.agentreins.desktopui
 
+import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -247,47 +248,49 @@ private fun HubShell(
                 }
             }
             Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                when (pane) {
-                    HubPane.Settings -> SettingsScreen(
-                        client = client,
-                        session = session,
-                        onLoggedOut = {},
-                        // wp-11：设置页「网关与 Agent」卡点击 → 网关独立页（iOS NavigationLink 同语义）
-                        onOpenGateways = { pane = HubPane.Gateways },
-                        pendingApprovals = pendingApprovals,
-                        conversations = conversations,
-                        decisions = decisions,
-                        notificationsEnabled = notificationsEnabled,
-                        onNotificationsEnabled = ::setNotificationsEnabled,
-                        mutedIds = mutedIds,
-                        onUnmute = { id -> setMuted(id, false) },
-                        // wp-14：关闭行为开关（缺省关窗最小化到托盘；windowPrefs = null 不挂卡）
-                        minimizeToTrayOnClose = minimizeToTrayOnClose,
-                        onMinimizeToTrayOnClose = ::setMinimizeToTrayOnClose.takeIf { windowPrefs != null },
-                    )
-                    // wp-11：网关与 Agent 独立页（observeGateways 零消费 → 结构化清单呈现）
-                    HubPane.Gateways -> GatewaysPanel(client)
-                    HubPane.Conversations -> {
-                        val selected = selectedId?.let { id -> conversations.firstOrNull { it.conversationId == id } }
-                        if (selected != null) {
-                            key(selected.conversationId) {
-                                ConversationScreen(
-                                    client = client,
-                                    conversationId = selected.conversationId,
-                                    label = selected.label,
-                                    conversations = conversations,
-                                    // wp-9：只挂归属本会话的 pending 审批；归属未学习（null）的审批不得
-                                    // 错挂进任意会话页，只在设置页待审批清单出现
-                                    approvals = pendingApprovals.filter { it.conversationId == selected.conversationId },
-                                    decisions = decisions,
-                                )
-                            }
-                        } else {
-                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                EmptyHint(
-                                    "选择左侧会话开始",
-                                    "会话与消息来自 Hub 投影（快照 + 事件流 + R4 校准），本端不发明状态",
-                                )
+                Crossfade(targetState = pane, label = "hub-pane") { activePane ->
+                    when (activePane) {
+                        HubPane.Settings -> SettingsScreen(
+                            client = client,
+                            session = session,
+                            onLoggedOut = {},
+                            // wp-11：设置页「网关与 Agent」卡点击 → 网关独立页（iOS NavigationLink 同语义）
+                            onOpenGateways = { pane = HubPane.Gateways },
+                            pendingApprovals = pendingApprovals,
+                            conversations = conversations,
+                            decisions = decisions,
+                            notificationsEnabled = notificationsEnabled,
+                            onNotificationsEnabled = ::setNotificationsEnabled,
+                            mutedIds = mutedIds,
+                            onUnmute = { id -> setMuted(id, false) },
+                            // wp-14：关闭行为开关（缺省关窗最小化到托盘；windowPrefs = null 不挂卡）
+                            minimizeToTrayOnClose = minimizeToTrayOnClose,
+                            onMinimizeToTrayOnClose = ::setMinimizeToTrayOnClose.takeIf { windowPrefs != null },
+                        )
+                        // wp-11：网关与 Agent 独立页（observeGateways 零消费 → 结构化清单呈现）
+                        HubPane.Gateways -> GatewaysPanel(client)
+                        HubPane.Conversations -> {
+                            val selected = selectedId?.let { id -> conversations.firstOrNull { it.conversationId == id } }
+                            if (selected != null) {
+                                key(selected.conversationId) {
+                                    ConversationScreen(
+                                        client = client,
+                                        conversationId = selected.conversationId,
+                                        label = selected.label,
+                                        conversations = conversations,
+                                        // wp-9：只挂归属本会话的 pending 审批；归属未学习（null）的审批不得
+                                        // 错挂进任意会话页，只在设置页待审批清单出现
+                                        approvals = pendingApprovals.filter { it.conversationId == selected.conversationId },
+                                        decisions = decisions,
+                                    )
+                                }
+                            } else {
+                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    EmptyHint(
+                                        "选择左侧会话开始",
+                                        "会话与消息来自 Hub 投影（快照 + 事件流 + R4 校准），本端不发明状态",
+                                    )
+                                }
                             }
                         }
                     }

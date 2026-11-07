@@ -45,6 +45,10 @@ class HubRuntime(
     @Volatile
     private var stack: HubAuthStack? = null
 
+    /** The normalized endpoint used to build [stack]. */
+    @Volatile
+    private var stackBaseUrl: String? = null
+
     /** 当前生效的 baseUrl（restore/login 时记录）。 */
     @Volatile
     var baseUrl: String? = null
@@ -114,18 +118,31 @@ class HubRuntime(
             } finally {
                 s?.auth?.clearCredentials()
                 stack = null
+                stackBaseUrl = null
                 _state.value = HubAuthState.NeedsLogin(reason = null)
             }
         }
     }
 
-    private fun buildStack(baseUrl: String): HubAuthStack {
-        stack?.let { return it }
+    private suspend fun buildStack(baseUrl: String): HubAuthStack {
         val normalized = normalizeBaseUrl(baseUrl)
+        stack?.let { existing ->
+            if (stackBaseUrl == normalized) return existing
+
+            // A different Hub must never inherit credentials or an HTTP client from the
+            // previous endpoint. This matters when a user edits the address and retries
+            // login, or restores a token after switching servers.
+            existing.auth.clearCredentials()
+            stack = null
+            stackBaseUrl = null
+        }
         return HubAuthStack(
             config = HubConfig(baseUrl = normalized, wsUrl = wsUrlOf(normalized)),
             credentialStore = credentialStore,
-        ).also { stack = it }
+        ).also {
+            stack = it
+            stackBaseUrl = normalized
+        }
     }
 
     private fun normalizeBaseUrl(raw: String): String {

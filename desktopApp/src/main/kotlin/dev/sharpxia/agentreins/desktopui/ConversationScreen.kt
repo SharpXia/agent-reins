@@ -1,5 +1,10 @@
 package dev.sharpxia.agentreins.desktopui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ContextMenuArea
 import androidx.compose.foundation.ContextMenuItem
@@ -328,7 +333,11 @@ internal fun ConversationScreen(
         }
 
         // wp-9：审批横条（置顶于时间线上方）——审批是 run 的前置门，出现即需注意，不进滚动区防淹没
-        if (approvals.isNotEmpty()) {
+        AnimatedVisibility(
+            visible = approvals.isNotEmpty(),
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically(),
+        ) {
             Column(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -342,7 +351,11 @@ internal fun ConversationScreen(
         // wp-15：工作过程披露条（审批横条同位、时间线上方，iOS workProcessSection parity）——
         // 只在有已捕获内容（工具行或阶段帧）时出现，零噪声；无活动会话不渲染、历史会话不虚构
         // （断线窗口丢失面不回填，06 §10.2）；run 终态阶段行由投影清行，UI 只渲染快照。
-        if (shouldRenderWorkBar(workActivity.tools, workActivity.phases)) {
+        AnimatedVisibility(
+            visible = shouldRenderWorkBar(workActivity.tools, workActivity.phases),
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically(),
+        ) {
             WorkProcessBar(
                 activity = workActivity,
                 runActive = isRunActive,
@@ -425,7 +438,11 @@ internal fun ConversationScreen(
 
         // wp-6：斜杠命令建议面板——draft 由 "/" 起手时悬浮于发送区上方（iOS wp-14 同位），
         // 选中即动作；无命中/进入参数书写段自动收起，其余输入零干扰。
-        if (slashSuggestions.isNotEmpty()) {
+        AnimatedVisibility(
+            visible = slashSuggestions.isNotEmpty(),
+            enter = fadeIn() + expandVertically(expandFrom = Alignment.Bottom),
+            exit = fadeOut() + shrinkVertically(shrinkTowards = Alignment.Bottom),
+        ) {
             SlashCommandPanel(
                 suggestions = slashSuggestions,
                 onSelect = { selectSlashCommand(it) },

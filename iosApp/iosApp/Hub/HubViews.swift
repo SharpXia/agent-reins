@@ -356,7 +356,12 @@ struct HubChatView: View {
     @State private var pendingDeleteMessage: UiMessage?
     /// #3'（2026-11-07 二轮）：回到底部按钮可见性——最后一条不在视口（超出贴底容差）即显示，
     /// 逐帧更新（含内容增长驱动的几何变化，不等用户手势）。
+    /// #3'（2026-11-07 三轮改版）：回到底部按钮可见性——「末行底边离开视口」即显示。
+    /// 判定 = 距底距离 > max(贴底容差, 末行实测高度)：末行还在屏上（看见最新一条）→ 隐藏，
+    /// 末行底边滚出 → 显示；带 24pt 迟滞防阈值抖动。逐帧几何驱动（b4 口径，无滚动干扰）。
     @State private var showJumpToBottom = false
+    /// 最后一行实测高度（行内 onGeometryChange 上报，仅末行写入；长 markdown 回复可达千 pt）。
+    @State private var lastRowHeight: CGFloat = 0
     @Environment(\.inkColors) private var ink
     let conv: UiConversation
 
@@ -483,13 +488,12 @@ struct HubChatView: View {
                     }
                     ForEach(hub.messages, id: \.messageId) { m in
                         HubMessageRow(m: m, onDelete: { pendingDeleteMessage = m }).id(m.messageId)
-                            // #3'（2026-11-07 三轮，判定修正）：按钮可见性由最后一行可见性驱动
-                            //（行内容露出 25% 即「看到最新一条」→ 隐藏），替代距离容差——
-                            // 原容差判定会误留按钮（最新消息已见但距底仍超容差）。
-                            .modifier(LastRowVisibilityDriver(
-                                isLast: m.messageId == hub.messages.last?.messageId,
-                                onChange: { visible in showJumpToBottom = !visible },
-                            ))
+                            // #3'（2026-11-07 三轮改版）：末行高度上报（全部行挂观察、仅末行写入——
+                            // 不做条件包装，避免滚动中行结构身份翻转干扰 LazyVStack 测量；
+                            // b5 的 onScrollVisibilityChange 方案即因此破坏滚动且不触发，已撤）。
+                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                                if m.messageId == hub.messages.last?.messageId { lastRowHeight = h }
+                            }
                     }
                     // #6（2026-11-07 UX 轮）：底部贴距收窄——原 vertical 10 + 高度 4 垫行合计
                     // 视觉空隙 ~24pt 偏大；改 top 10 / bottom 0 + 垫行 2，尾行距输入区分隔线
@@ -505,11 +509,20 @@ struct HubChatView: View {
                             insetBottom: geo.contentInsets.bottom)
             } action: { _, new in
                 probeBox.latest = new
+                // #3'（2026-11-07 三轮改版）：按钮可见性——距底 > max(容差, 末行高度) 显示、
+                // ≤ 该值（迟滞 24pt）隐藏（末行还在屏上 = 看得见最新一条）。逐帧几何驱动。
+                let distance = new.maxOffset - new.offsetY
+                let hideThreshold = max(Self.bottomSlack, lastRowHeight + 8)
+                if distance > hideThreshold + 24 {
+                    if !showJumpToBottom { showJumpToBottom = true }
+                } else if distance <= hideThreshold {
+                    if showJumpToBottom { showJumpToBottom = false }
+                }
                 // 钉底在途：逐帧 scrollTo 收敛（键盘 resize / 回底按钮共用），落底（容差内）即清。
                 if bottomJumpActive {
                     proxy.scrollTo("bottom", anchor: .bottom)
                     setAtBottom(probe: new)
-                    if (new.maxOffset - new.offsetY) <= Self.bottomSlack { bottomJumpActive = false }
+                    if distance <= Self.bottomSlack { bottomJumpActive = false }
                     return
                 }
                 // 流式 append 与程序化跟随滚动（animating）不改锚定态：内容增长会把
@@ -857,22 +870,6 @@ private struct ScrollProbe: Equatable {
 /// 仅在手势结束补判时读取。
 private final class ScrollProbeBox {
     var latest: ScrollProbe?
-}
-
-/// #3'（2026-11-07 三轮）：最后一行可见性 → 回底按钮可见性的驱动器。挂在末行（非末行空操作）；
-/// 行内容露出 25% 即视为「看到最新一条」，按钮隐藏——替代原距离容差判定（会误留按钮）。
-/// iOS 18 onScrollVisibilityChange（部署目标 18），LazyVStack 行物化/布局变化均触发。
-private struct LastRowVisibilityDriver: ViewModifier {
-    let isLast: Bool
-    let onChange: (Bool) -> Void
-
-    func body(content: Content) -> some View {
-        if isLast {
-            content.onScrollVisibilityChange(threshold: 0.25) { visible in onChange(visible) }
-        } else {
-            content
-        }
-    }
 }
 
 private struct HubMessageRow: View {

@@ -1,6 +1,7 @@
 package dev.sharpxia.agentreins
 
 import dev.sharpxia.agentreins.hub.DefaultHubClient
+import dev.sharpxia.agentreins.hub.hubRootScopeGuard
 import dev.sharpxia.agentreins.hub.HubAuthState
 import dev.sharpxia.agentreins.hub.HubException
 import dev.sharpxia.agentreins.hub.HubRuntime
@@ -35,7 +36,8 @@ import kotlinx.serialization.json.jsonObject
  */
 class AgentBridge {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    // +hubRootScopeGuard（挂机崩溃修复轮）：最后防线——漏网协程异常降级为记录，防 abort
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main + hubRootScopeGuard)
 
     private val hubRuntime = HubRuntime(scope)
     private var hubClient: DefaultHubClient? = null

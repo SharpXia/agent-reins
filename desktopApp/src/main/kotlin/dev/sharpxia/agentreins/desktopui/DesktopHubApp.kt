@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import dev.sharpxia.agentreins.hub.DefaultHubClient
+import dev.sharpxia.agentreins.hub.hubRootScopeGuard
 import dev.sharpxia.agentreins.hub.HubAuthState
 import dev.sharpxia.agentreins.hub.HubRuntime
 import dev.sharpxia.agentreins.hub.auth.platformCredentialStore
@@ -57,7 +58,8 @@ import kotlinx.coroutines.cancel
 @Composable
 internal fun DesktopHubApp(windowPrefs: DesktopWindowPreferences? = null) {
     // 数据面 scope：与窗口同生命周期（合成器销毁即取消）；全在 Dispatchers.Default，不占 UI 线程
-    val scope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Default) }
+    // +hubRootScopeGuard（挂机崩溃修复轮）：最后防线——漏网协程异常降级为记录，防进程终止
+    val scope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Default + hubRootScopeGuard) }
     DisposableEffect(Unit) { onDispose { scope.cancel() } }
     // wp-18：库与客户端同构展开（等价 companion create），保留库引用 + eventTap——与 iOS
     // AgentBridge（DefaultHubClient(scope, hubRuntime, hubDb, eventTap = ::onBridgeEvent)）

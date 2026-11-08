@@ -407,27 +407,49 @@ struct HubChatView: View {
     /// wp-8②：活跃 run 态——grokbot 式 Stop 常驻 composer 的驱动源；列表未及推送时按无 run 处理（安全降级）。
     private var isRunActive: Bool { liveConv?.hasActiveRun == true }
 
-    /// #22 修复轮（2026-11-08，用户拍板「卡片直接替换回复文本」）：模型交互卡挂到**最新一次
-    /// 裸 `/model` 交换的回复行**上——判定无状态、可从消息列表随时重推导（重进会话/重登后
-    /// 卡面保持）：找最后一条正文恰为 `/model` 的用户行，其后第一条 assistant final 行即回复
-    /// （两者之间不得夹任何其他用户行/assistant 行——回复流式未落定期间不出卡），该行就地
-    /// 渲染模型目录卡**替代原回复文本**。点按钮发 `/model <id>` 后卡面保留（历史的一部分，
-    /// 不再是「文字后挂临时卡操作完移除」）；再次裸发 `/model` 时卡面迁移到新交换，旧回复
-    /// 恢复文本渲染（同时只活一张卡）。
-    private var modelsCardMessageId: String? {
+    /// 交互卡数据面（2026-11-08 修复轮泛化）：`/model` → 模型目录卡（REST #22）；其余带
+    /// 静态选项闭集的命令（Gateway catalog args 有界视图，如 /think /usage /exec）→ 通用
+    /// 选项卡。点选项发送 `/命令 <值>`（值原样回填，ADR-14）。
+    fileprivate enum InteractiveCardSpec {
+        case models
+        case options(command: SlashCommand)
+    }
+
+    /// 交互卡挂载判定（泛化自 modelsCardMessageId，规则不变）：最新一次裸交互命令交换的
+    /// 回复行——找最后一条正文恰为 `/<交互命令名>` 的用户行，其后第一条 assistant final 行
+    /// 即回复（两者间不得夹任何其他用户行/assistant 行——回复流式未落定期间不出卡），该行
+    /// 就地渲染交互卡**替代原回复文本**。点选项后卡面保留（历史的一部分）；再次裸发同名
+    /// 命令时卡面迁移到新交换，旧回复恢复文本渲染（同时只活一张卡）。
+    private var interactiveCard: (messageId: String, spec: InteractiveCardSpec)? {
         let msgs = hub.messages
         guard let lastBareIdx = msgs.lastIndex(where: {
-            $0.role == "user" && $0.content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "/model"
+            guard $0.role == "user" else { return false }
+            let t = $0.content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard t.hasPrefix("/") else { return false }
+            return Self.interactiveSpec(forBareName: String(t.dropFirst()), catalog: slashCommands) != nil
         }) else { return nil }
+        let bare = msgs[lastBareIdx].content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard let spec = Self.interactiveSpec(forBareName: String(bare.dropFirst()), catalog: slashCommands) else {
+            return nil
+        }
         for idx in (lastBareIdx + 1)..<msgs.count {
             let m = msgs[idx]
             if m.role == "user" { return nil } // 命令与回复间被其他用户行打断 = 交换不完整
             if m.role == "assistant" {
-                guard m.state == "final" else { return nil } // 回复流式/未落定，不出卡
-                return m.messageId
+                guard m.state == "final", !m.content.isEmpty else { return nil } // 回复流式/未落定，不出卡
+                return (m.messageId, spec)
             }
         }
         return nil
+    }
+
+    /// 裸命令名 → 交互卡种类：model 固定走 REST #22 模型卡；其余查合并目录首个带 choices
+    /// 的参数（Gateway catalog args 有界视图）。无命中 = 非交互命令（普通文本渲染）。
+    private static func interactiveSpec(forBareName name: String, catalog: [SlashCommand]) -> InteractiveCardSpec? {
+        if name == "model" { return .models }
+        guard let cmd = catalog.first(where: { $0.name.dropFirst().lowercased() == name }),
+              let choices = cmd.choices, !choices.isEmpty else { return nil }
+        return .options(command: cmd)
     }
 
     /// wp-8②：Stop 可执行 = 活跃 run 且 activeRunId 已习得（wp-5 v4 投影）。映射未学习场景
@@ -449,17 +471,18 @@ struct HubChatView: View {
         SlashCommandCatalog.merged(dynamic: hub.commandsCache[conv.conversationId]?.commands ?? [])
     }
 
-    /// wp-14：斜杠命令选中。无参命令即选即发——与发送键同一通道（hub.send → message.send 普通
-    /// 文本，Gateway 原生斜杠语义，Hub/桥/服务端命令面零改动，normalize/index.ts 的 message.send
-    /// 分支把 message 原样透传 chat.send）；带参命令预填命令文本（含尾随空格）续写参数，最终
-    /// 发送仍走同一普通文本通道。
+    /// wp-14 + 2026-11-08 修复轮（用户拍板）：斜杠命令**点行 = 直接发送**——无论是否带参，
+    /// 与发送键同一通道（hub.send → message.send 普通文本，Gateway 原生斜杠语义）；带参命令
+    /// 裸发由 Gateway 回用法提示，需要写参数时走行尾 ✎ 预填路径（prefillSlashCommand）。
     private func selectSlashCommand(_ cmd: SlashCommand) {
-        if cmd.takesArgument {
-            draft = cmd.name + " "
-        } else {
-            hub.send(cmd.name)
-            draft = ""
-        }
+        hub.send(cmd.name)
+        draft = ""
+    }
+
+    /// 2026-11-08 修复轮：斜杠命令行尾 ✎ = 预填命令文本（含尾随空格）进输入框续写参数，
+    /// 等待用户发送（不直接发送）。
+    private func prefillSlashCommand(_ cmd: SlashCommand) {
+        draft = cmd.name + " "
     }
 
     /// wp-9：会话页内嵌审批卡的数据源——只挂归属本会话（conversationId 命中）的 pending 审批；
@@ -551,7 +574,7 @@ struct HubChatView: View {
                     ForEach(hub.messages, id: \.messageId) { m in
                         HubMessageRow(
                             m: m,
-                            showsModelsCard: m.messageId == modelsCardMessageId,
+                            interactiveSpec: interactiveCard?.messageId == m.messageId ? interactiveCard?.spec : nil,
                             onDelete: { pendingDeleteMessage = m }
                         ).id(m.messageId)
                             // b8：末行视口位置探针（用户口径「last visible 是最底下的 item」——
@@ -647,11 +670,17 @@ struct HubChatView: View {
                 guard atBottom || ownSend else { return }
                 proxy.scrollTo("bottom", anchor: .bottom)
             }
-            .onChange(of: modelsCardMessageId) { _, newId in
-                // #22 修复轮：交互卡挂到回复行（内容替换渲染，行高变化）出现时用户在底部即
-                // 贴底，防卡被输入区压住不可见；上翻阅读中不打扰。
+            .onChange(of: interactiveCard?.messageId) { _, newId in
+                // 交互卡挂到回复行（内容替换渲染，行高变化）出现时用户在底部即贴底；上翻
+                // 阅读中不打扰。
                 guard newId != nil, atBottom else { return }
                 proxy.scrollTo("bottom", anchor: .bottom)
+            }
+            .onChange(of: hub.messages.last?.content ?? "") { _, _ in
+                // choices 卡数据面鸡生蛋修复：用户可能不经 "/" 草稿直接发出交互命令——
+                // 每条新消息落定幂等触发一次目录拉取（TTL/在途去重内空转零成本），目录
+                // 到位（Flow 推送）后 interactiveCard 判定即出卡。
+                hub.ensureCommands(conversationId: conv.conversationId)
             }
             .onAppear {
                 // b8 进页锚定：置钉底在途逐帧重放收敛（单次 scrollTo 恒落 LazyVStack 估算
@@ -733,8 +762,12 @@ struct HubChatView: View {
             // wp-14：斜杠命令建议面板——draft 由 "/" 起手时悬浮于 composer 上方，选中即动作；
             // 无命中/进入参数书写段自动收起，其余输入零干扰。
             if !slashSuggestions.isEmpty {
-                SlashCommandPanel(suggestions: slashSuggestions, onSelect: selectSlashCommand)
-                    .padding(.horizontal, 12).padding(.top, 6)
+                SlashCommandPanel(
+                    suggestions: slashSuggestions,
+                    onSelect: selectSlashCommand,
+                    onPrefill: prefillSlashCommand,
+                )
+                .padding(.horizontal, 12).padding(.top, 6)
             }
             Divider()
             // #2'（2026-11-07 二轮）：原「运行中发送将排队」composer 提示移除——排队语义
@@ -891,6 +924,11 @@ private struct SlashCommand: Identifiable, Equatable {
     let summary: String
     /// true = 需接参数：选中预填输入框续写，不直接发送。
     let takesArgument: Bool
+    /// #22 修复轮（2026-11-08）：首参静态选项闭集（Gateway catalog args 有界视图，交互卡
+    /// 数据面）；nil = 无选项数据（面板仅普通行为）。model 命令不走此面（动态目录走 REST #22）。
+    let choices: [CommandChoice]?
+    /// 选项所属参数名（交互卡副标题展示）。
+    let argName: String?
 
     var id: String { name }
 }
@@ -902,12 +940,12 @@ private struct SlashCommand: Identifiable, Equatable {
 /// HubStore.fetchCommandsIfNeeded 拉取）——静态六降级为「失败回落/保底」目录，仍可增行扩展。
 private enum SlashCommandCatalog {
     static let all: [SlashCommand] = [
-        SlashCommand(name: "/new", summary: "开启全新会话上下文", takesArgument: false),
-        SlashCommand(name: "/compact", summary: "压缩上下文", takesArgument: false),
-        SlashCommand(name: "/stop", summary: "停止当前运行", takesArgument: false),
-        SlashCommand(name: "/status", summary: "查看会话状态", takesArgument: false),
-        SlashCommand(name: "/steer", summary: "运行中插入引导指令（可接文本）", takesArgument: true),
-        SlashCommand(name: "/followup", summary: "追加队列消息，本轮结束后执行（可接文本）", takesArgument: true),
+        SlashCommand(name: "/new", summary: "开启全新会话上下文", takesArgument: false, choices: nil, argName: nil),
+        SlashCommand(name: "/compact", summary: "压缩上下文", takesArgument: false, choices: nil, argName: nil),
+        SlashCommand(name: "/stop", summary: "停止当前运行", takesArgument: false, choices: nil, argName: nil),
+        SlashCommand(name: "/status", summary: "查看会话状态", takesArgument: false, choices: nil, argName: nil),
+        SlashCommand(name: "/steer", summary: "运行中插入引导指令（可接文本）", takesArgument: true, choices: nil, argName: nil),
+        SlashCommand(name: "/followup", summary: "追加队列消息，本轮结束后执行（可接文本）", takesArgument: true, choices: nil, argName: nil),
     ]
 
     /// 触发与筛选：draft 以 "/" 起手且尚未出现空白（用户仍在选命令、未写参数）时，按整段
@@ -935,12 +973,17 @@ private enum SlashCommandCatalog {
         for item in dynamic {
             let key = normalizedKey(item.name)
             guard !key.isEmpty, seen.insert(key).inserted else { continue }
+            // v1.1 additive 2026-11-08 修复轮：首参选项闭集透传（交互卡数据面）——取第一个
+            // 带 choices 的参数（args 有界视图白名单 name/required/choices）。
+            let interactiveArg = item.args?.first { !($0.choices ?? []).isEmpty }
             merged.append(SlashCommand(
                 name: item.textAliases?.first
                     .flatMap { $0.isEmpty ? nil : ($0.hasPrefix("/") ? $0 : "/" + $0) }
                     ?? "/" + item.name,
                 summary: item.description_,
-                takesArgument: item.acceptsArgs))
+                takesArgument: item.acceptsArgs,
+                choices: interactiveArg?.choices,
+                argName: interactiveArg?.name))
         }
         for cmd in all where seen.insert(normalizedKey(cmd.name)).inserted {
             merged.append(cmd)
@@ -957,7 +1000,10 @@ private enum SlashCommandCatalog {
 /// ScrollView 承载溢出（目录超出可视行数时内滚）；纯本地视图零网络，不劫持键盘焦点。
 private struct SlashCommandPanel: View {
     let suggestions: [SlashCommand]
+    /// 点行 = 直接发送（2026-11-08 用户拍板）。
     let onSelect: (SlashCommand) -> Void
+    /// 行尾 ✎ = 预填命令文本进输入框（带尾随空格）续写参数，等待用户发送。
+    let onPrefill: (SlashCommand) -> Void
     @Environment(\.inkColors) private var ink
 
     /// 面板可视高度上限（≈4 行），其余行内滚。
@@ -967,24 +1013,39 @@ private struct SlashCommandPanel: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(suggestions.enumerated()), id: \.element.id) { index, cmd in
-                    Button {
-                        onSelect(cmd)
-                    } label: {
-                        HStack(spacing: 10) {
-                            Text(cmd.name)
-                                .font(.callout.monospaced().weight(.semibold))
-                                .foregroundStyle(Color.accentColor)
-                            Text(cmd.summary)
+                    HStack(spacing: 0) {
+                        Button {
+                            onSelect(cmd)
+                        } label: {
+                            HStack(spacing: 10) {
+                                Text(cmd.name)
+                                    .font(.callout.monospaced().weight(.semibold))
+                                    .foregroundStyle(Color.accentColor)
+                                Text(cmd.summary)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 12).padding(.vertical, 8)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("\(cmd.name)：\(cmd.summary)（点按直接发送）")
+                        // 2026-11-08 修复轮：行尾 ✎ = 预填续写参数（原「带参命令点行预填」
+                        // 行为移到此处，点行语义让位给直接发送）。
+                        Button {
+                            onPrefill(cmd)
+                        } label: {
+                            Image(systemName: "square.and.pencil")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                            Spacer(minLength: 0)
+                                .padding(.horizontal, 10).padding(.vertical, 8)
+                                .contentShape(Rectangle())
                         }
-                        .padding(.horizontal, 12).padding(.vertical, 8)
-                        .contentShape(Rectangle())
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("把 \(cmd.name) 填入输入框续写参数")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("\(cmd.name)：\(cmd.summary)")
                     if index < suggestions.count - 1 {
                         Divider().padding(.leading, 12)
                     }
@@ -1096,6 +1157,68 @@ private struct ModelsInteractiveCard: View {
     }
 }
 
+/// 通用选项卡（2026-11-08 修复轮，斜杠交互卡泛化）：挂最新一次裸命令交换的回复行，
+/// 替代原回复文本——按钮流展示 Gateway catalog 静态选项闭集（args 有界视图），点按钮
+/// 发送 `/命令 <值>`（值原样回填）。与 ModelsInteractiveCard 同纪律：纯本地视图零命令
+/// 副作用，数据 = 命令目录缓存（REST #21 args 面板的同源数据），选择走 hub.send 通道。
+private struct CommandOptionsCard: View {
+    @State private var hub = HubStore.shared
+    let command: SlashCommand
+    let onSelectValue: (String) -> Void
+    @Environment(\.inkColors) private var ink
+
+    var body: some View {
+        let choices = command.choices ?? []
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "slider.horizontal.3").font(.caption2)
+                Text(command.name).font(.caption.weight(.semibold))
+                if let arg = command.argName, !arg.isEmpty {
+                    Text("/\(arg)").font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Text("点击发送 /\(command.name.dropFirst()) <选项>")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            .foregroundStyle(.secondary)
+            if choices.isEmpty {
+                Text("暂无可用选项").font(.footnote).foregroundStyle(.secondary)
+            } else {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 128), spacing: 6)], spacing: 6) {
+                    ForEach(choices, id: \.value) { choice in
+                        Button {
+                            onSelectValue(choice.value)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(choice.label)
+                                    .font(.footnote.weight(.medium))
+                                    .lineLimit(1)
+                                Text(choice.value)
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 10).padding(.vertical, 7)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(ink.surfaceTertiary))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(ink.borderTertiary, lineWidth: 0.5))
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("\(command.name) 设为 \(choice.label)")
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12).fill(ink.elevated))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(ink.borderTertiary, lineWidth: 1))
+    }
+}
+
 /// wp-7①：滚动几何探针（onScrollGeometryChange 变换产物），供锚定态判定。
 /// b8：末行视口位置（named space，用户口径的「最底下的 item」底边）——0.4.6 纪律的
 /// 滚动路径非观测盒，逐帧更新不触发 body 重渲。
@@ -1122,11 +1245,12 @@ private final class ScrollProbeBox {
     var latest: ScrollProbe?
 }
 
-private struct HubMessageRow: View {
+/// 交互卡种类透传（HubChatView.interactiveCard 判定产物；行内据此渲染对应卡替代回复文本）。
+ fileprivate struct HubMessageRow: View {
     let m: UiMessage
-    /// #22 修复轮（2026-11-08）：true = 本行是最新一次裸 `/model` 交换的回复行——就地渲染
-    /// 模型目录卡**替代原回复文本**（modelsCardMessageId 判定，见 HubChatView）。
-    var showsModelsCard: Bool = false
+    /// 非 nil = 本行是最新一次裸交互命令交换的回复行——就地渲染对应交互卡**替代原回复
+    /// 文本**（models → REST #22 模型卡；options → 通用选项卡）。
+    var interactiveSpec: HubChatView.InteractiveCardSpec? = nil
     /// #3（2026-11-07 UX 轮）：删除入口回调——二次确认弹层挂在会话页（pendingDeleteMessage），
     /// 行内只负责发起，不自带弹层（LazyVStack 行级弹层生命周期不可靠）。
     let onDelete: () -> Void
@@ -1150,11 +1274,18 @@ private struct HubMessageRow: View {
                 if m.role == "user" { Spacer(minLength: 40) }
                 VStack(alignment: m.role == "user" ? .trailing : .leading, spacing: 3) {
                     Group {
-                        if m.role == "assistant" && showsModelsCard && m.state == "final" && !m.content.isEmpty {
-                            // #22 修复轮：交互卡替换回复文本（挂最新一次裸 /model 交换的回复行，
-                            // 点按钮发 `/model <id>` 后卡面保留，不再是临时追加元素）。
-                            ModelsInteractiveCard(conversationId: hub.selected?.conversationId ?? "") { item in
-                                hub.send("/model \(item.id)")
+                        if m.role == "assistant" && interactiveSpec != nil && m.state == "final" && !m.content.isEmpty {
+                            // 交互卡替换回复文本（挂最新一次裸交互命令交换的回复行，点选项发
+                            // `/命令 <值>` 后卡面保留，不再是临时追加元素）。
+                            switch interactiveSpec! {
+                            case .models:
+                                ModelsInteractiveCard(conversationId: hub.selected?.conversationId ?? "") { item in
+                                    hub.send("/model \(item.id)")
+                                }
+                            case let .options(command):
+                                CommandOptionsCard(command: command) { value in
+                                    hub.send("\(command.name) \(value)")
+                                }
                             }
                         } else if m.content.isEmpty && m.state == "streaming" {
                             // #2'（2026-11-07 二轮，x总改版）：工作过程条撤显示——进行中信号收敛到
@@ -1190,7 +1321,7 @@ private struct HubMessageRow: View {
                     .padding(.horizontal, 12).padding(.vertical, 8)
                     .background(
                         Group {
-                            if m.role == "assistant" && showsModelsCard && m.state == "final" && !m.content.isEmpty {
+                            if m.role == "assistant" && interactiveSpec != nil && m.state == "final" && !m.content.isEmpty {
                                 // 交互卡行：卡自带底色边框，不再套消息气泡底
                                 Color.clear
                             } else {

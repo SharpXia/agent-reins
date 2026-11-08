@@ -398,16 +398,18 @@ internal fun ConversationScreen(
         scope.launch { client.commands?.sendMessage(conversationId, text) }
     }
 
-    // wp-6：斜杠命令选中（iOS selectSlashCommand 同语义）。无参命令即选即发——与发送键同一
-    // 通道（commands.sendMessage 普通文本，Gateway 原生斜杠语义，Hub/桥/服务端命令面零改动）；
-    // 带参命令预填命令文本（含尾随空格、光标落行尾）续写参数，最终发送仍走同一普通文本通道。
+    // wp-6 + 2026-11-08 修复轮（用户拍板）：斜杠命令**点行 = 直接发送**——无论是否带参，
+    // 与发送键同一通道（commands.sendMessage 普通文本，Gateway 原生斜杠语义）；带参命令
+    // 裸发由 Gateway 回用法提示，需要写参数时走行尾 ✎ 预填路径（prefillSlashCommand）。
     fun selectSlashCommand(cmd: SlashCommand) {
-        if (cmd.takesArgument) {
-            input = TextFieldValue(cmd.name + " ", TextRange(cmd.name.length + 1))
-        } else {
-            input = TextFieldValue("")
-            scope.launch { client.commands?.sendMessage(conversationId, cmd.name) }
-        }
+        input = TextFieldValue("")
+        scope.launch { client.commands?.sendMessage(conversationId, cmd.name) }
+    }
+
+    // 2026-11-08 修复轮：行尾 ✎ = 预填命令文本（含尾随空格、光标落行尾）进输入框续写参数，
+    // 等待用户发送（不直接发送）。
+    fun prefillSlashCommand(cmd: SlashCommand) {
+        input = TextFieldValue(cmd.name + " ", TextRange(cmd.name.length + 1))
     }
 
     // 2026-11-07 动态目录轮：动态斜杠命令目录（REST 端点 #21）会话态 + 草稿触发拉取（下方
@@ -453,36 +455,60 @@ internal fun ConversationScreen(
         catalog = mergedSlashCommands(dynamicCommands?.commands ?: emptyList()),
     )
 
-    // #22 修复轮（2026-11-08，用户拍板「卡片直接替换回复文本」）：模型交互卡挂到**最新一次
-    // 裸 `/model` 交换的回复行**上——判定无状态、可从消息列表随时重推导：找最后一条正文恰为
-    // `/model` 的用户行，其后第一条 assistant final 行即回复（两者之间不得夹任何其他用户行/
-    // assistant 行——回复流式未落定期间不出卡），该行就地渲染模型目录卡**替代原回复文本**。
-    // 点按钮发 `/model <id>` 后卡面保留（历史的一部分，不再「文字后挂临时卡操作完移除」）；
-    // 再次裸发 `/model` 时卡面迁移到新交换，旧回复恢复文本渲染（同时只活一张卡）。
-    val modelsCardMessageId: String? = run {
+    // 交互卡数据面（2026-11-08 修复轮泛化）：`/model` → 模型目录卡（REST #22）；其余带静态
+    // 选项闭集的命令（Gateway catalog args 有界视图，如 /think /usage /exec）→ 通用选项卡。
+    // 挂载判定（无状态可重推导）：最新一次裸交互命令交换的回复行——找最后一条正文恰为
+    // `/<交互命令名>` 的用户行，其后第一条 assistant final 行即回复（两者间不得夹任何其他
+    // 用户行/assistant 行——回复流式未落定期间不出卡），该行就地渲染交互卡替代原回复文本；
+    // 点选项后卡面保留，再次裸发同名命令时卡面迁移（同时只活一张卡）。
+    val mergedCatalog = mergedSlashCommands(dynamicCommands?.commands ?: emptyList())
+    fun interactiveCommandFor(bareName: String): SlashCommand? {
+        if (bareName == "model") return SlashCommand(
+            name = "/model",
+            summary = "切换会话模型（REST #22 动态目录）",
+            takesArgument = true,
+        )
+        return mergedCatalog.firstOrNull {
+            it.name.removePrefix("/").lowercase() == bareName && !it.choices.isNullOrEmpty()
+        }
+    }
+    val interactiveCard: Pair<String, SlashCommand>? = run {
         val lastBareIdx = messages.indexOfLast {
-            it.role == "user" && it.content.trim().lowercase() == "/model"
+            it.role == "user" && run {
+                val t = it.content.trim().lowercase()
+                t.startsWith("/") && interactiveCommandFor(t.removePrefix("/")) != null
+            }
         }
         if (lastBareIdx < 0) {
             null
         } else {
+            val bare = messages[lastBareIdx].content.trim().lowercase().removePrefix("/")
+            val cmd = interactiveCommandFor(bare) ?: return@run null
             var result: String? = null
             for (idx in (lastBareIdx + 1) until messages.size) {
                 val m = messages[idx]
                 if (m.role == "user") break // 命令与回复间被其他用户行打断 = 交换不完整
                 if (m.role == "assistant") {
-                    result = if (m.state == "final") m.messageId else null
+                    result = if (m.state == "final" && m.content.isNotBlank()) m.messageId else null
                     break // 回复流式未落定 → 不出卡
                 }
             }
-            result
+            result?.let { it to cmd }
         }
     }
-    LaunchedEffect(modelsCardMessageId) {
-        if (modelsCardMessageId == null) return@LaunchedEffect
-        if (ModelsCache.valid(conversationId) != null) return@LaunchedEffect
-        val fetched = fetchModels(client, conversationId)
-        if (fetched != null) ModelsCache.put(conversationId, fetched)
+    LaunchedEffect(interactiveCard?.first) {
+        if (interactiveCard == null) return@LaunchedEffect
+        // 模型目录在位（model 卡数据面；choices 卡目录由下方候选信号触发）
+        if (ModelsCache.valid(conversationId) == null) {
+            fetchModels(client, conversationId)?.let { ModelsCache.put(conversationId, it) }
+        }
+    }
+    // choices 卡数据面鸡生蛋修复：用户可能不经 "/" 草稿直接发出交互命令——每条新消息
+    // 落定幂等触发一次目录拉取（TTL 缓存命中即空转），目录到位后 interactiveCard 判定出卡。
+    LaunchedEffect(messages.lastOrNull()?.content) {
+        if (SlashCommandsCache.valid(conversationId) == null) {
+            fetchSlashCommands(client, conversationId)?.let { SlashCommandsCache.put(conversationId, it) }
+        }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -590,6 +616,7 @@ internal fun ConversationScreen(
                     }
                 }
                 items(messages, key = { it.messageId }) { m ->
+                    val anchorCmd = if (interactiveCard?.first == m.messageId) interactiveCard?.second else null
                     MessageRow(
                         m,
                         client,
@@ -597,10 +624,14 @@ internal fun ConversationScreen(
                         scope,
                         thinkingNow = workActivity.phases.lastOrNull()?.phase == "thinking",
                         agentLabel = label.ifBlank { "Agent" },
-                        showsModelsCard = m.messageId == modelsCardMessageId,
+                        interactiveCommand = anchorCmd,
                         onModelSelect = { item ->
                             input = TextFieldValue("")
                             scope.launch { client.commands?.sendMessage(conversationId, "/model ${item.id}") }
+                        },
+                        onOptionSelect = { cmd, value ->
+                            input = TextFieldValue("")
+                            scope.launch { client.commands?.sendMessage(conversationId, "${cmd.name} $value") }
                         },
                     )
                 }
@@ -633,6 +664,7 @@ internal fun ConversationScreen(
             SlashCommandPanel(
                 suggestions = slashSuggestions,
                 onSelect = { selectSlashCommand(it) },
+                onPrefill = { prefillSlashCommand(it) },
                 modifier = Modifier.padding(horizontal = 14.dp),
             )
         }
@@ -729,9 +761,10 @@ private fun MessageRow(
     /** 2026-11-07 二轮：thinking 帧在途 + agent 显示名（占位行动画文案用，见流式空行分支）。 */
     thinkingNow: Boolean,
     agentLabel: String,
-    /** #22 修复轮：true = 本行是最新一次裸 `/model` 交换的回复行——就地渲染模型卡替代文本。 */
-    showsModelsCard: Boolean,
+    /** 交互卡泛化（2026-11-08）：非 null = 本行是最新一次裸交互命令交换的回复行（model/带选项命令）。 */
+    interactiveCommand: SlashCommand?,
     onModelSelect: (ModelOptionItem) -> Unit,
+    onOptionSelect: (SlashCommand, String) -> Unit,
 ) {
     when {
         m.role.isEmpty() -> CompactionSeparator()
@@ -762,7 +795,7 @@ private fun MessageRow(
             ) {
                 when {
                     m.role == "user" -> UserMessageRow(m)
-                    else -> AssistantMessageRow(m, conversationId, thinkingNow, agentLabel, showsModelsCard, onModelSelect)
+                    else -> AssistantMessageRow(m, conversationId, thinkingNow, agentLabel, interactiveCommand, onModelSelect, onOptionSelect)
                 }
             }
         }
@@ -815,17 +848,21 @@ private fun AssistantMessageRow(
     conversationId: String,
     thinkingNow: Boolean,
     agentLabel: String,
-    showsModelsCard: Boolean,
+    interactiveCommand: SlashCommand?,
     onModelSelect: (ModelOptionItem) -> Unit,
+    onOptionSelect: (SlashCommand, String) -> Unit,
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.Start,
     ) {
-        if (showsModelsCard && m.state == "final" && m.content.isNotBlank()) {
-            // #22 修复轮：交互卡替换回复文本（挂最新一次裸 /model 交换的回复行，点按钮发
-            // `/model <id>` 后卡面保留，不再是临时追加元素）；时间行照常。
-            ModelsInteractiveCard(conversationId = conversationId, onSelect = onModelSelect)
+        if (interactiveCommand != null && m.state == "final" && m.content.isNotBlank()) {
+            // 交互卡替换回复文本（挂最新一次裸交互命令交换的回复行；点选项后卡面保留）。
+            if (interactiveCommand.name == "/model") {
+                ModelsInteractiveCard(conversationId = conversationId, onSelect = onModelSelect)
+            } else {
+                CommandOptionsCard(command = interactiveCommand, onSelectValue = { onOptionSelect(interactiveCommand, it) })
+            }
         } else
         Surface(
             color = MaterialTheme.colorScheme.surfaceVariant,
@@ -894,6 +931,8 @@ private const val SLASH_PANEL_MAX_HEIGHT_DP = 148
 private fun SlashCommandPanel(
     suggestions: List<SlashCommand>,
     onSelect: (SlashCommand) -> Unit,
+    /** 2026-11-08 修复轮：行尾 ✎ = 预填命令文本进输入框（带尾随空格）续写参数。 */
+    onPrefill: (SlashCommand) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Surface(
@@ -908,27 +947,35 @@ private fun SlashCommandPanel(
                 .verticalScroll(rememberScrollState()),
         ) {
             suggestions.forEachIndexed { index, cmd ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onSelect(cmd) }
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = cmd.name,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                    Text(
-                        text = cmd.summary,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { onSelect(cmd) }
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = cmd.name,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        Text(
+                            text = cmd.summary,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    // 2026-11-08 修复轮：行尾 ✎ = 预填续写参数（原「带参命令点行预填」行为
+                    // 移到此处，点行语义让位给直接发送）
+                    TextButton(onClick = { onPrefill(cmd) }) {
+                        Text("✎", fontSize = 12.sp, color = Color(0xFF999999))
+                    }
                 }
                 if (index < suggestions.lastIndex) {
                     HorizontalDivider(modifier = Modifier.padding(start = 12.dp))
@@ -1000,6 +1047,69 @@ private fun ModelsInteractiveCard(
                     CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.width(6.dp))
                     Text("正在获取模型目录…", fontSize = 12.sp, color = Color(0xFF999999))
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 通用选项卡（2026-11-08 修复轮，斜杠交互卡泛化；iOS CommandOptionsCard 桌面同构）：挂
+ * 最新一次裸命令交换的回复行，替代原回复文本——按钮流展示 Gateway catalog 静态选项闭集
+ * （REST #21 args 有界视图），点按钮发送 `/命令 <值>`（值原样回填）。数据 = 命令目录缓存
+ * （与斜杠面板同源），选择走 sendMessage 既有通道。
+ */
+@Composable
+private fun CommandOptionsCard(
+    command: SlashCommand,
+    onSelectValue: (String) -> Unit,
+) {
+    val choices = command.choices ?: emptyList()
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(command.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                command.argName?.let { arg ->
+                    Spacer(Modifier.width(6.dp))
+                    Text("/$arg", fontSize = 11.sp, color = Color(0xFF999999))
+                }
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "点击发送 /" + command.name.removePrefix("/") + " <选项>",
+                    fontSize = 11.sp,
+                    color = Color(0xFF999999),
+                    maxLines = 1,
+                )
+            }
+            if (choices.isEmpty()) {
+                Text("暂无可用选项", fontSize = 12.sp, color = Color(0xFF999999))
+            } else {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    choices.forEach { choice ->
+                        TextButton(
+                            onClick = { onSelectValue(choice.value) },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        ) {
+                            Column(horizontalAlignment = Alignment.Start) {
+                                Text(choice.label, fontSize = 12.sp, maxLines = 1)
+                                Text(
+                                    choice.value,
+                                    fontSize = 10.sp,
+                                    color = Color(0xFF999999),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }

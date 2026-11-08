@@ -237,7 +237,29 @@ data class CommandListItem(
     val acceptsArgs: Boolean,
     /** 仅 skill 来源带（展示名）；native/plugin 缺省 null。 */
     val skillDisplayName: String? = null,
+    /**
+     * 可选（v1.1 additive，2026-11-08 修复轮，斜杠交互卡数据面）：参数定义有界视图——
+     * 白名单仅 name/required/choices；choices 为 Gateway 静态选项闭集（动态选项由 Gateway
+     * 构建 catalog 时已解析为具体值），客户端交互卡点选项发送 `/命令 <值>`（值原样回填，
+     * ADR-14）。无参命令/旧桥（includeArgs 仍 false）缺省 null。
+     */
+    val args: List<CommandArg>? = null,
 )
+
+/** 命令参数有界视图（与桥帧 $defs/CommandListItem.args.items 同形）。 */
+@Serializable
+data class CommandArg(
+    /** 参数名。 */
+    val name: String,
+    /** true = 必填参数（裸发命令按 Gateway 用法提示回应）。 */
+    val required: Boolean? = null,
+    /** 可选：静态选项闭集（≤50，交互卡数据面）。 */
+    val choices: List<CommandChoice>? = null,
+)
+
+/** 选项条目：value 为发送文本取值（原样回填），label 为展示名。 */
+@Serializable
+data class CommandChoice(val value: String, val label: String)
 
 /** 端点 #21 响应体（v1.1 additive）：truncated=true 表示列表被截断（Gateway 500 上限无分页或桥帧预算 256KiB）。 */
 @Serializable

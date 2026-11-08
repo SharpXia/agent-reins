@@ -22,6 +22,10 @@ internal data class SlashCommand(
     val summary: String,
     /** true = 需接参数：选中预填输入框续写，不直接发送。 */
     val takesArgument: Boolean,
+    /** #22 修复轮（2026-11-08）：首参静态选项闭集（Gateway catalog args 有界视图，交互卡数据面）。 */
+    val choices: List<dev.sharpxia.agentreins.hub.projection.CommandChoice>? = null,
+    /** 选项所属参数名（交互卡副标题展示）。 */
+    val argName: String? = null,
 )
 
 /**
@@ -80,10 +84,15 @@ internal fun mergedSlashCommands(dynamic: List<CommandListItem>): List<SlashComm
         val display = item.textAliases?.firstOrNull()?.takeIf { it.isNotEmpty() }
             ?.let { if (it.startsWith("/")) it else "/$it" }
             ?: ("/" + item.name)
+        // v1.1 additive 2026-11-08 修复轮：首参选项闭集透传（交互卡数据面）——取第一个带
+        // choices 的参数（args 有界视图白名单 name/required/choices）。
+        val interactiveArg = item.args?.firstOrNull { !it.choices.isNullOrEmpty() }
         merged[slashCommandKey(item.name)] = SlashCommand(
             name = display,
             summary = item.description,
             takesArgument = item.acceptsArgs,
+            choices = interactiveArg?.choices,
+            argName = interactiveArg?.name,
         )
     }
     SlashCommandCatalog.all.forEach { cmd -> merged.putIfAbsent(slashCommandKey(cmd.name), cmd) }

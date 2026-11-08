@@ -199,12 +199,26 @@ final class HubStore {
             commandsSlashSession[conversationId] = false
             return
         }
-        let newSlashSession = commandsSlashSession[conversationId] != true
         commandsSlashSession[conversationId] = true
+        fetchCommands(conversationId: conversationId, ignoreFailed: false)
+    }
+
+    /// 2026-11-08 修复轮：无条件触发拉取（交互卡挂载时调用——用户可能不经 "/" 草稿直接
+    /// 发出交互命令，choices 数据面需要目录在位；缓存新鲜即在途去重照常生效）。不触碰
+    /// 「/ 输入段」标记（ensure 不是 slash 会话，不改变失败重试节奏）。
+    func ensureCommands(conversationId: String) {
+        guard isLoggedIn else { return }
+        fetchCommands(conversationId: conversationId, ignoreFailed: true)
+    }
+
+    /// 拉取核心（TTL + 在途去重 + 失败标记，与原 fetchCommandsIfNeeded 同逻辑）；仅
+    /// slashDraft 语义拆出供两条触发面共用。ignoreFailed=true（ensure 面）跳过失败标记
+    /// 门（交互卡在场时值得一次重试机会），false（草稿面）维持原「同段不逐键重试」纪律。
+    private func fetchCommands(conversationId: String, ignoreFailed: Bool) {
         if let fetchedAt = commandsFetchedAt[conversationId],
            Date().timeIntervalSince(fetchedAt) < Self.commandsCacheTTL { return }
         guard !commandsInFlight.contains(conversationId) else { return }
-        if commandsFailed.contains(conversationId), !newSlashSession { return }
+        if commandsFailed.contains(conversationId), !ignoreFailed { return }
         commandsInFlight.insert(conversationId)
         bridge.hubCommands(conversationId: conversationId) { [weak self] list in
             guard let self else { return }

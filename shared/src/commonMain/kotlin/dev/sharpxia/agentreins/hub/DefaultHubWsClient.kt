@@ -11,7 +11,9 @@ import io.ktor.http.takeFrom
 import io.ktor.websocket.CloseReason
 import io.ktor.websocket.Frame
 import io.ktor.websocket.close
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -117,6 +119,14 @@ class DefaultHubWsClient(
                         else -> Unit // Binary/Ping/Pong/Close：close 原因统一在 closeReason 兜底读取
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e // 主动取消（close/reconnect）：正常控制流透传
+            } catch (_: Exception) {
+                // 挂机崩溃修复（2026-11-08，0.5.4 真机 9 连 SIGABRT 同族）：网络错误终结
+                //（didCompleteWithError → DarwinHttpRequestException 传导 incoming）会让
+                // 迭代以异常退出——0.5.5 修的 close 侧竞态不覆盖这条路径：前台闲置网络掉线
+                // 时异常逃出接收协程 → 无处理器 → Kotlin/Native abort。错误终结统一按
+                // 「连接已断」收尾（_closed 置位驱动上层重连），异常不再外逃。
             } finally {
                 // closeReason 在 incoming 关闭后才可读
                 runCatching { s.closeReason.await() }.getOrNull()?.let {

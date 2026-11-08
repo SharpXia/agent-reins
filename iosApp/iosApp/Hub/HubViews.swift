@@ -415,12 +415,21 @@ struct HubChatView: View {
         case options(command: SlashCommand)
     }
 
+    /// 交互卡命中（2026-11-08 UX 轮扩展）：回复行 + 执行态。executedCommand 非 nil =
+    /// 该交换已执行（回复行之后出现同命令带参用户行，如 `/model <id>`——点选项即发，
+    /// ADR-14），卡面呈结果态（已发送命令 + 指向下方回复），不再渲染按钮。
+    fileprivate struct InteractiveCardHit {
+        let messageId: String
+        let spec: InteractiveCardSpec
+        let executedCommand: String?
+    }
+
     /// 交互卡挂载判定（泛化自 modelsCardMessageId，规则不变）：最新一次裸交互命令交换的
     /// 回复行——找最后一条正文恰为 `/<交互命令名>` 的用户行，其后第一条 assistant final 行
     /// 即回复（两者间不得夹任何其他用户行/assistant 行——回复流式未落定期间不出卡），该行
-    /// 就地渲染交互卡**替代原回复文本**。点选项后卡面保留（历史的一部分）；再次裸发同名
-    /// 命令时卡面迁移到新交换，旧回复恢复文本渲染（同时只活一张卡）。
-    private var interactiveCard: (messageId: String, spec: InteractiveCardSpec)? {
+    /// 就地渲染交互卡**替代原回复文本**。点选项后交换被带参用户行「执行」，卡面收敛为结果态；
+    /// 再次裸发同名命令时卡面迁移到新交换，旧回复恢复文本渲染（同时只活一张卡）。
+    private var interactiveCard: InteractiveCardHit? {
         let msgs = hub.messages
         guard let lastBareIdx = msgs.lastIndex(where: {
             guard $0.role == "user" else { return false }
@@ -437,7 +446,15 @@ struct HubChatView: View {
             if m.role == "user" { return nil } // 命令与回复间被其他用户行打断 = 交换不完整
             if m.role == "assistant" {
                 guard m.state == "final", !m.content.isEmpty else { return nil } // 回复流式/未落定，不出卡
-                return (m.messageId, spec)
+                // 执行判定（2026-11-08 UX 轮）：回复行之后同命令带参用户行 = 已从卡面执行
+                //（含手打同形命令——交换语义等价）。取原文（保留大小写）作结果态展示。
+                let bareName = bare.dropFirst() // 小写命令名（不含斜杠）
+                let executed = msgs[(idx + 1)...].first(where: {
+                    guard $0.role == "user" else { return false }
+                    return $0.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                        .lowercased().hasPrefix("/" + bareName + " ")
+                }).map { $0.content.trimmingCharacters(in: .whitespacesAndNewlines) }
+                return InteractiveCardHit(messageId: m.messageId, spec: spec, executedCommand: executed)
             }
         }
         return nil
@@ -480,6 +497,20 @@ struct HubChatView: View {
     /// （activeRunId 为 null——DefaultEventProjector.setRun 在 resolveConversation 失败时直接
     /// return，不落库）置灰为「结束中」提示态，不假设 runId 恒有值、不误触。
     private var canCancelRun: Bool { !(liveConv?.activeRunId ?? "").isEmpty }
+
+    /// #3（2026-11-08 UX 轮，用户改版）：标题栏进行中态——thinking 帧在途呈「思考中」，
+    /// 其余活跃 run 呈「处理中」。数据链：workActivity 阶段帧（hub.isThinkingNow，wp-15
+    /// 数据面）+ 会话实时行 hasActiveRun（wp-8②）。时间线空正文流式占位行随之撤显示
+    ///（HubMessageRow 早退分支），进行中信号收敛到标题一处。
+    private var agentBusy: Bool {
+        hub.isThinkingNow || isRunActive
+    }
+
+    /// #4（2026-11-08 UX 轮，用户改版）：草稿有内容 = 发送键优先——run 活跃也可直接发
+    /// 新消息（不打断进行中 run，Gateway 排队语义，消息按 run 态落 queued 徽标）。
+    private var draftHasContent: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     /// wp-14：斜杠命令建议——draft 起手 "/" 且未进入参数书写段时给出目录前缀命中；普通消息、
     /// URL、多行草稿等其余输入零干扰不触发（筛选细则见 SlashCommandCatalog.suggestions）。
@@ -598,7 +629,7 @@ struct HubChatView: View {
                     ForEach(hub.messages, id: \.messageId) { m in
                         HubMessageRow(
                             m: m,
-                            interactiveSpec: interactiveCard?.messageId == m.messageId ? interactiveCard?.spec : nil,
+                            cardHit: interactiveCard?.messageId == m.messageId ? interactiveCard : nil,
                             onDelete: { pendingDeleteMessage = m }
                         ).id(m.messageId)
                             // b8：末行视口位置探针（用户口径「last visible 是最底下的 item」——
@@ -808,9 +839,11 @@ struct HubChatView: View {
                     .onChange(of: draft) { _, new in
                         hub.fetchCommandsIfNeeded(conversationId: conv.conversationId, draft: new)
                     }
-                if isRunActive && canCancelRun {
-                    // wp-8②：Stop 按钮（grokbot 式常驻）——活跃 run 期间替代发送键；中止后部分
-                    // 输出保留由 Gateway 权威收敛（run.aborted 回流投影库，UI 只翻转回发送键）。
+                if isRunActive && canCancelRun && !draftHasContent {
+                    // wp-8② + #4（2026-11-08 UX 轮改版）：Stop 按钮仅在「活跃 run 且草稿为空」
+                    // 时占键位——草稿有内容时发送键优先（发送新消息不打断进行中 run，排队语义
+                    // 见消息 queued 徽标）；中止后部分输出保留由 Gateway 权威收敛（run.aborted
+                    // 回流投影库，UI 只翻转回发送键）。终止随时可经斜杠 /stop（静态目录在列）。
                     Button {
                         hub.stopRun()
                     } label: {
@@ -831,7 +864,7 @@ struct HubChatView: View {
                     } label: {
                         Image(systemName: "arrow.up.circle.fill").font(.title2)
                     }
-                    .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .disabled(!draftHasContent)
                     if isRunActive && !canCancelRun {
                         Text("结束中")
                             .font(.caption2)
@@ -841,13 +874,32 @@ struct HubChatView: View {
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
         }
-        .navigationTitle(title(conv))
         .navigationBarTitleDisplayMode(.inline)
         // #2（2026-11-07 UX 轮）：会话详情页隐藏底部 Tab 栏——IM 详情页惯例（聊天内容+输入区
         // 独占全屏），pop 回列表自动恢复；详情仍走 NavigationStack 推栈，导航纪律不变
         //（不必单开 WindowGroup/Scene：多 Scene 会引入窗口生命周期与状态同步复杂度，收益不抵）。
         .toolbar(.hidden, for: .tabBar)
         .toolbar {
+            // #3（2026-11-08 UX 轮，用户改版）：进行中信号移至标题——标题旁小字 + 动画
+            // 省略号（思考中/处理中，见 agentBusy）。principal 自定义标题项替代
+            // navigationTitle（inline 模式下居中渲染，动画不劫持返回手势）。
+            ToolbarItem(placement: .principal) {
+                HStack(spacing: 5) {
+                    Text(title(conv))
+                        .fontWeight(.semibold)
+                        .lineLimit(1)
+                    if agentBusy {
+                        Text(hub.isThinkingNow ? "思考中" : "处理中")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        AnimatedEllipsis()
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(agentBusy
+                    ? "\(title(conv))，\(hub.isThinkingNow ? "正在思考" : "正在处理")"
+                    : title(conv))
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     // wp-13：按会话静音开关（本地偏好，UserDefaults 持久化；静音会话的
@@ -1085,14 +1137,19 @@ private struct SlashCommandPanel: View {
 }
 
 /// #22（2026-11-08）：斜杠交互卡——模型目录卡（端点 #22 数据面）。/model 无参命令回复
-/// 落定后出现于时间线尾部（modelsCardActive 判定），按供应商分节展示模型按钮，点按钮
+/// 落定后出现于时间线尾部（interactiveCard 判定），分页网格展示模型按钮，点按钮
 /// 发送 `/model <id>`（Gateway 原生模型标识原样回填，客户端不拼装不改写——ADR-14）。
 /// 数据 = HubStore.modelsCache（fetchModelsIfNeeded TTL 缓存 + 在途去重，与命令目录同
 /// 纪律）；拉取中呈进度态，空目录/截断如实标注；不可用模型按钮置灰（available=false，
-/// 不编造原因）。卡片纯本地视图零命令副作用，选择动作走 hub.send 既有通道。
+/// 不编造原因）；当前模型（current=true）描边高亮。
+/// #2（2026-11-08 UX 轮）：executedCommand 非 nil = 交换已执行——卡收敛为结果态
+/// （已发送命令 + 指向下方回复），不再渲染按钮（防误触继续切换）；目录改分页网格限高。
+/// 卡片纯本地视图零命令副作用，选择动作走 hub.send 既有通道。
 private struct ModelsInteractiveCard: View {
     @State private var hub = HubStore.shared
     let conversationId: String
+    /// 非 nil = 该交换已执行（用户已点选/手发同命令带参消息）——结果态。
+    let executedCommand: String?
     let onSelect: (ModelOptionItem) -> Void
     @Environment(\.inkColors) private var ink
 
@@ -1100,25 +1157,45 @@ private struct ModelsInteractiveCard: View {
         let list = hub.modelsCache[conversationId]
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Image(systemName: "cpu").font(.caption2)
-                Text("切换模型").font(.caption.weight(.semibold))
-                Text("点击发送 /model <模型>")
+                Image(systemName: executedCommand == nil ? "cpu" : "checkmark.circle.fill")
                     .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-                if list?.truncated == true {
-                    Text("已截断").font(.caption2).foregroundStyle(.tertiary)
+                    .foregroundStyle(executedCommand == nil ? Color.secondary : Color.green)
+                if let executed = executedCommand {
+                    Text("已执行").font(.caption.weight(.semibold))
+                    Text(executed)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text("结果见下方回复")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                } else {
+                    Text("切换模型").font(.caption.weight(.semibold))
+                    Text("点击发送 /model <模型>")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    if list?.truncated == true {
+                        Text("已截断").font(.caption2).foregroundStyle(.tertiary)
+                    }
                 }
             }
             .foregroundStyle(.secondary)
-            if let list {
+            if executedCommand != nil {
+                // 结果态：无按钮区（防误触继续切换）；切换结果 = 下方 assistant 回复行。
+                EmptyView()
+            } else if let list {
                 if list.models.isEmpty {
                     Text("暂无可用模型")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 } else {
-                    providerSections(list.models)
+                    PagedChoiceGrid(items: list.models, id: \.id) { item in
+                        modelButton(item)
+                    }
                 }
             } else {
                 HStack(spacing: 8) {
@@ -1133,38 +1210,117 @@ private struct ModelsInteractiveCard: View {
         .task { hub.fetchModelsIfNeeded(conversationId: conversationId) }
     }
 
-    /// 供应商分节按钮流（保持目录首现顺序；available=false 置灰）。
-    private func providerSections(_ models: [ModelOptionItem]) -> some View {
-        let grouped = Dictionary(grouping: models, by: { $0.provider })
-        let order = models.map(\.provider).reduce(into: [String]()) { acc, p in
-            if !acc.contains(p) { acc.append(p) }
-        }
-        return VStack(alignment: .leading, spacing: 8) {
-            ForEach(order, id: \.self) { provider in
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(provider)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 132), spacing: 6)], spacing: 6) {
-                        ForEach(grouped[provider] ?? [], id: \.id) { item in
-                            modelButton(item)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
+    /// 模型按钮（#2 改版）：name + 「provider · id」副行（平铺分页后保留供应商语境）；
+    /// available=false 置灰；current=true 描边高亮（切换后重发 /models 即见当前落点）。
     private func modelButton(_ item: ModelOptionItem) -> some View {
         let available = item.available?.boolValue ?? true
+        let isCurrent = item.current?.boolValue == true
+        let subtitle = item.provider.isEmpty ? item.id : "\(item.provider) · \(item.id)"
         return Button {
             onSelect(item)
         } label: {
             VStack(alignment: .leading, spacing: 1) {
-                Text(item.name)
+                HStack(spacing: 3) {
+                    Text(item.name)
+                        .font(.footnote.weight(isCurrent ? .semibold : .medium))
+                        .lineLimit(1)
+                    if isCurrent {
+                        Image(systemName: "checkmark")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                }
+                Text(subtitle)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 8).fill(ink.surfaceTertiary))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(isCurrent ? Color.accentColor : ink.borderTertiary,
+                                                             lineWidth: isCurrent ? 1.2 : 0.5))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!available)
+        .opacity(available ? 1 : 0.45)
+        .accessibilityLabel("切换模型到 \(item.name)\(isCurrent ? "（当前）" : "")\(available ? "" : "（不可用）")")
+    }
+}
+
+/// 通用选项卡（2026-11-08 修复轮，斜杠交互卡泛化）：挂最新一次裸命令交换的回复行，
+/// 替代原回复文本——分页按钮网格展示 Gateway catalog 静态选项闭集（args 有界视图），
+/// 点按钮发送 `/命令 <值>`（值原样回填）。
+/// #2（2026-11-08 UX 轮）：executedCommand 非 nil = 交换已执行——卡收敛为结果态
+///（已发送命令 + 指向下方回复），不再渲染按钮（防误触重复设置）。与 ModelsInteractiveCard
+/// 同纪律：纯本地视图零命令副作用，数据 = 命令目录缓存（REST #21 args 面板同源），
+/// 选择走 hub.send 通道。
+private struct CommandOptionsCard: View {
+    @State private var hub = HubStore.shared
+    let command: SlashCommand
+    /// 非 nil = 该交换已执行——结果态。
+    let executedCommand: String?
+    let onSelectValue: (String) -> Void
+    @Environment(\.inkColors) private var ink
+
+    var body: some View {
+        let choices = command.choices ?? []
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: executedCommand == nil ? "slider.horizontal.3" : "checkmark.circle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(executedCommand == nil ? Color.secondary : Color.green)
+                if let executed = executedCommand {
+                    Text("已执行").font(.caption.weight(.semibold))
+                    Text(executed)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text("结果见下方回复")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                } else {
+                    Text(command.name).font(.caption.weight(.semibold))
+                    if let arg = command.argName, !arg.isEmpty {
+                        Text("/\(arg)").font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    Text("点击发送 /\(command.name.dropFirst()) <选项>")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+            }
+            .foregroundStyle(.secondary)
+            if executedCommand != nil {
+                // 结果态：无按钮区（防误触重复设置）；执行结果 = 下方 assistant 回复行。
+                EmptyView()
+            } else if choices.isEmpty {
+                Text("暂无可用选项").font(.footnote).foregroundStyle(.secondary)
+            } else {
+                PagedChoiceGrid(items: choices, id: \.value) { choice in
+                    choiceButton(choice)
+                }
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12).fill(ink.elevated))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(ink.borderTertiary, lineWidth: 1))
+    }
+
+    private func choiceButton(_ choice: CommandChoice) -> some View {
+        Button {
+            onSelectValue(choice.value)
+        } label: {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(choice.label)
                     .font(.footnote.weight(.medium))
                     .lineLimit(1)
-                Text(item.id)
+                Text(choice.value)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
@@ -1177,71 +1333,7 @@ private struct ModelsInteractiveCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(!available)
-        .opacity(available ? 1 : 0.45)
-        .accessibilityLabel("切换模型到 \(item.name)\(available ? "" : "（不可用）")")
-    }
-}
-
-/// 通用选项卡（2026-11-08 修复轮，斜杠交互卡泛化）：挂最新一次裸命令交换的回复行，
-/// 替代原回复文本——按钮流展示 Gateway catalog 静态选项闭集（args 有界视图），点按钮
-/// 发送 `/命令 <值>`（值原样回填）。与 ModelsInteractiveCard 同纪律：纯本地视图零命令
-/// 副作用，数据 = 命令目录缓存（REST #21 args 面板的同源数据），选择走 hub.send 通道。
-private struct CommandOptionsCard: View {
-    @State private var hub = HubStore.shared
-    let command: SlashCommand
-    let onSelectValue: (String) -> Void
-    @Environment(\.inkColors) private var ink
-
-    var body: some View {
-        let choices = command.choices ?? []
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: "slider.horizontal.3").font(.caption2)
-                Text(command.name).font(.caption.weight(.semibold))
-                if let arg = command.argName, !arg.isEmpty {
-                    Text("/\(arg)").font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
-                }
-                Spacer(minLength: 0)
-                Text("点击发送 /\(command.name.dropFirst()) <选项>")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-            }
-            .foregroundStyle(.secondary)
-            if choices.isEmpty {
-                Text("暂无可用选项").font(.footnote).foregroundStyle(.secondary)
-            } else {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 128), spacing: 6)], spacing: 6) {
-                    ForEach(choices, id: \.value) { choice in
-                        Button {
-                            onSelectValue(choice.value)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(choice.label)
-                                    .font(.footnote.weight(.medium))
-                                    .lineLimit(1)
-                                Text(choice.value)
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 10).padding(.vertical, 7)
-                            .background(RoundedRectangle(cornerRadius: 8).fill(ink.surfaceTertiary))
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(ink.borderTertiary, lineWidth: 0.5))
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("\(command.name) 设为 \(choice.label)")
-                    }
-                }
-            }
-        }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 12).fill(ink.elevated))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(ink.borderTertiary, lineWidth: 1))
+        .accessibilityLabel("\(command.name) 设为 \(choice.label)")
     }
 }
 
@@ -1271,12 +1363,13 @@ private final class ScrollProbeBox {
     var latest: ScrollProbe?
 }
 
-/// 交互卡种类透传（HubChatView.interactiveCard 判定产物；行内据此渲染对应卡替代回复文本）。
+/// 交互卡命中透传（HubChatView.interactiveCard 判定产物；行内据此渲染对应卡替代回复文本；
+/// executedCommand 非 nil = 已执行，卡呈结果态）。
  fileprivate struct HubMessageRow: View {
     let m: UiMessage
     /// 非 nil = 本行是最新一次裸交互命令交换的回复行——就地渲染对应交互卡**替代原回复
     /// 文本**（models → REST #22 模型卡；options → 通用选项卡）。
-    var interactiveSpec: HubChatView.InteractiveCardSpec? = nil
+    var cardHit: HubChatView.InteractiveCardHit? = nil
     /// #3（2026-11-07 UX 轮）：删除入口回调——二次确认弹层挂在会话页（pendingDeleteMessage），
     /// 行内只负责发起，不自带弹层（LazyVStack 行级弹层生命周期不可靠）。
     let onDelete: () -> Void
@@ -1284,7 +1377,13 @@ private final class ScrollProbeBox {
     @Environment(\.inkColors) private var ink
 
     var body: some View {
-        if m.role == "" {
+        if m.role == "assistant" && m.state == "streaming" && m.content.isEmpty {
+            // #3（2026-11-08 UX 轮，用户改版）：空正文流式占位行不再渲染——进行中信号移至
+            // 标题栏（标题旁小字 + 动画省略号，见 HubChatView principal）。思考期时间线只留
+            // 已送达的用户行（✓ 徽标语义不变）；正文返回即由 typewriter/Markdown 行承接
+            //（dstream 占位行同此口径——首 delta 前隐藏）。
+            Color.clear.frame(height: 0)
+        } else if m.role == "" {
             // 合成行（v1.1 additive：role="" = compaction/reset 标记行，无正文语义）渲染为分隔条
             HStack(spacing: 8) {
                 Rectangle().fill(ink.surfaceTertiary).frame(height: 1)
@@ -1300,29 +1399,24 @@ private final class ScrollProbeBox {
                 if m.role == "user" { Spacer(minLength: 40) }
                 VStack(alignment: m.role == "user" ? .trailing : .leading, spacing: 3) {
                     Group {
-                        if m.role == "assistant" && interactiveSpec != nil && m.state == "final" && !m.content.isEmpty {
-                            // 交互卡替换回复文本（挂最新一次裸交互命令交换的回复行，点选项发
-                            // `/命令 <值>` 后卡面保留，不再是临时追加元素）。
-                            switch interactiveSpec! {
+                        if m.role == "assistant" && cardHit != nil && m.state == "final" && !m.content.isEmpty {
+                            // 交互卡替换回复文本（挂最新一次裸交互命令交换的回复行）：未执行 =
+                            // 选项卡（点选项发 `/命令 <值>`）；已执行 = 结果态（见各卡 executedCommand）。
+                            switch cardHit!.spec {
                             case .models:
-                                ModelsInteractiveCard(conversationId: hub.selected?.conversationId ?? "") { item in
+                                ModelsInteractiveCard(
+                                    conversationId: hub.selected?.conversationId ?? "",
+                                    executedCommand: cardHit!.executedCommand
+                                ) { item in
                                     hub.send("/model \(item.id)")
                                 }
                             case let .options(command):
-                                CommandOptionsCard(command: command) { value in
+                                CommandOptionsCard(
+                                    command: command,
+                                    executedCommand: cardHit!.executedCommand
+                                ) { value in
                                     hub.send("\(command.name) \(value)")
                                 }
-                            }
-                        } else if m.content.isEmpty && m.state == "streaming" {
-                            // #2'（2026-11-07 二轮，x总改版）：工作过程条撤显示——进行中信号收敛到
-                            // 回复占位行：thinking 帧在途呈「正在思考…」，否则「<agent> 正在处理中…」
-                            //（三点脉冲 + 文案）；正文返回即被 Markdown/typewriter 替换。
-                            // 覆盖面含 dstream 占位行（首 delta 前 content 为空）。
-                            HStack(spacing: 8) {
-                                TypingIndicator()
-                                Text(hub.isThinkingNow ? "正在思考…" : "\(Self.agentDisplayLabel(hub)) 正在处理中…")
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
                             }
                         } else if m.role == "user" {
                             // wp-8③：空 SENDING 用户行维持发送中态——不渲染空气泡，占位点显示、
@@ -1347,7 +1441,7 @@ private final class ScrollProbeBox {
                     .padding(.horizontal, 12).padding(.vertical, 8)
                     .background(
                         Group {
-                            if m.role == "assistant" && interactiveSpec != nil && m.state == "final" && !m.content.isEmpty {
+                            if m.role == "assistant" && cardHit != nil && m.state == "final" && !m.content.isEmpty {
                                 // 交互卡行：卡自带底色边框，不再套消息气泡底
                                 Color.clear
                             } else {
@@ -1426,13 +1520,6 @@ private final class ScrollProbeBox {
         m.role == "user"
             && (m.uiState == "failed" || m.state == "failed")
             && !m.content.isEmpty
-    }
-
-    /// 占位行动画文案的 agent 显示名（会话快照 label → agentId → 兜底，与列表口径一致）。
-    private static func agentDisplayLabel(_ hub: HubStore) -> String {
-        guard let c = hub.selected else { return "Agent" }
-        if !c.label.isEmpty { return c.label }
-        return c.agentId.isEmpty ? "Agent" : c.agentId
     }
 
     // ── wp-8③：失败原因（六值脱敏闭集 → 人读文案） ──
@@ -1690,6 +1777,70 @@ private struct TypingIndicator: View {
             }
             .animation(.easeInOut(duration: Self.step), value: phase)
         }
+    }
+}
+
+/// #3（2026-11-08 UX 轮）：标题栏进行中态的动画省略号——"." / ".." / "..." 循环步进。
+/// TimelineView 定步驱动（与 TypingIndicator 同纪律，重渲不丢相位）；minWidth 锁宽
+/// 防步进抖动把标题文本推来推去。
+private struct AnimatedEllipsis: View {
+    var color: Color = .secondary
+
+    /// 单步时长：三点循环一圈 ≈1.2s。
+    private static let step: Double = 0.4
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: Self.step)) { context in
+            let n = Int(context.date.timeIntervalSinceReferenceDate / Self.step) % 3 + 1
+            Text(String(repeating: ".", count: n))
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(color)
+                .frame(minWidth: 14, alignment: .leading)
+        }
+    }
+}
+
+/// #2（2026-11-08 UX 轮）：交互卡分页按钮网格——模型/选项多时限制单页容量（2 列 ×
+/// rowsPerPage 行），TabView 横滑翻页（自带页点），卡片不再随目录长度无限增高。
+/// 单页时不显示页点、高度收敛到内容。页面下标 @State：行随 LazyVStack 物化/去物化
+/// 重置回首页（可接受——目录顺序稳定，首页即最常用项）。id 走 keyPath（KMP DTO
+/// 类非 Identifiable，与既有 ForEach(id:) 同口径）。
+private struct PagedChoiceGrid<Item, ID: Hashable, Card: View>: View {
+    let items: [Item]
+    let id: KeyPath<Item, ID>
+    /// 每页行数（列数固定 2，模型名/选项名两行文本按钮的实测行高 ~44pt）。
+    var rowsPerPage: Int = 3
+    @ViewBuilder let card: (Item) -> Card
+
+    @State private var page: Int = 0
+
+    private var perPage: Int { rowsPerPage * 2 }
+    private var pageCount: Int { max(1, (items.count + perPage - 1) / perPage) }
+
+    /// 页高 = 行高 44 × 行数 + 行距 6 × (行数-1)；多页时底部加页点净空（页点 overlay
+    /// 在 TabView 底缘内，不占独立高度，须预留防与末行按钮重叠）。
+    private var pageHeight: CGFloat {
+        let grid = CGFloat(rowsPerPage) * 44 + CGFloat(rowsPerPage - 1) * 6
+        return pageCount > 1 ? grid + 16 : grid + 2
+    }
+
+    var body: some View {
+        TabView(selection: $page) {
+            ForEach(0..<pageCount, id: \.self) { p in
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)],
+                          spacing: 6,
+                          content: {
+                    ForEach(Array(items.dropFirst(p * perPage).prefix(perPage)), id: id) { item in
+                        card(item)
+                    }
+                })
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.horizontal, 2)
+                .tag(p)
+            }
+        }
+        .tabViewStyle(.page(indexDisplayMode: pageCount > 1 ? .always : .never))
+        .frame(height: pageHeight)
     }
 }
 

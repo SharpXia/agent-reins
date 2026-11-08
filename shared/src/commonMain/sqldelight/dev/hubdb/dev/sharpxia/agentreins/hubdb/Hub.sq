@@ -235,13 +235,23 @@ ON CONFLICT(conversationId) DO UPDATE SET
   gatewayId = excluded.gatewayId,
   label = excluded.label,
   agentId = excluded.agentId,
-  lastMessagePreview = excluded.lastMessagePreview,
+  -- 择新合并（2026-11-08 UX 轮，#1 会话列表时间倒退修复）：lastActiveAt 取本地与校准行
+  -- 较新者——事件路径 touchConversationPreview 已把本地推进到消息事件时刻，校准行更旧
+  -- （服务端活动时间随 session 事件更新的间隙）不得把卡片时间打回；反之校准行更新
+  -- （离线补投）照常刷新。lastMessagePreview 跟随较新一行（谁的时间新用谁的摘要，
+  -- 防新时间 + 旧摘要错配）。前提：两侧均为同格式 UTC 定宽 RFC3339 毫秒串
+  -- （服务端 rfc3339Millis 统一出口），字典序 = 时间序。快照路径先清表后灌入，
+  -- 本合并仅作用于校准覆盖面。
+  lastActiveAt = MAX(hubConversations.lastActiveAt, excluded.lastActiveAt),
+  lastMessagePreview = CASE
+    WHEN excluded.lastActiveAt >= hubConversations.lastActiveAt THEN excluded.lastMessagePreview
+    ELSE hubConversations.lastMessagePreview
+  END,
   -- MAX 合并（2026-11-06 UX 轮）：lastSeq 现含客户端 fallback 分配值（事件缺
   -- sourceMessageSeq 时 = lastSeq+1，可与服务端域瞬时偏离）。校准回填不得回退
   -- 该水位——回退会让下一轮 fallback 重新从低位起算，新行排序倒挂进历史区间。
   -- 化身更替走 resetConversationIncarnation 显式清零，MAX 不阻碍重计。
   lastSeq = MAX(hubConversations.lastSeq, excluded.lastSeq),
-  lastActiveAt = excluded.lastActiveAt,
   unreadCount = excluded.unreadCount,
   hasActiveRun = excluded.hasActiveRun,
   activeRunId = CASE

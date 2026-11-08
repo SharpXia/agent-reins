@@ -749,9 +749,11 @@ internal fun ConversationScreen(
                         maxLines = 4,
                     )
                     Spacer(Modifier.width(8.dp))
-                    if (isRunActive && canCancelRun) {
-                        // wp-8②：Stop 按钮（grokbot 式常驻）——活跃 run 期间替代发送键；中止后部分
-                        // 输出保留由 Gateway 权威收敛（run.aborted 回流投影库，UI 只翻转回发送键）。
+                    if (isRunActive && canCancelRun && input.text.isBlank()) {
+                        // wp-8② + #4（2026-11-08 UX 轮改版，iOS 同口径）：Stop 按钮仅在「活跃 run
+                        // 且草稿为空」时占键位——草稿有内容时发送键优先（发送新消息不打断进行中
+                        // run，Gateway 排队语义，消息按 run 态落 queued 徽标）；中止后部分输出
+                        // 保留由 Gateway 权威收敛（run.aborted 回流投影库）。终止可经斜杠 /stop。
                         Button(
                             onClick = {
                                 val runId = liveConv?.activeRunId ?: return@Button

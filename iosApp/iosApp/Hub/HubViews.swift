@@ -407,19 +407,27 @@ struct HubChatView: View {
     /// wp-8②：活跃 run 态——grokbot 式 Stop 常驻 composer 的驱动源；列表未及推送时按无 run 处理（安全降级）。
     private var isRunActive: Bool { liveConv?.hasActiveRun == true }
 
-    /// #22（2026-11-08）：模型交互卡出现判定——最后一条用户行是 `/model` 无参查看形态
-    /// （大小写不敏感，Gateway mapCommand 归一），且其回复已落定（最后一条消息为 assistant
-    /// final 行——乐观行在途/流式未落定/run 活跃期间均不出现，卡不抢在回复前），且当前无
-    /// 活跃 run。出现即在时间线尾部渲染模型目录卡（数据 = REST #22 缓存，卡片 .task 触发
-    /// 拉取），点按钮发 `/model <id>`——发送后最后用户行变为带参形态，判定自然失效收卡。
-    private var modelsCardActive: Bool {
-        guard let live = liveConv, !live.hasActiveRun else { return false }
+    /// #22 修复轮（2026-11-08，用户拍板「卡片直接替换回复文本」）：模型交互卡挂到**最新一次
+    /// 裸 `/model` 交换的回复行**上——判定无状态、可从消息列表随时重推导（重进会话/重登后
+    /// 卡面保持）：找最后一条正文恰为 `/model` 的用户行，其后第一条 assistant final 行即回复
+    /// （两者之间不得夹任何其他用户行/assistant 行——回复流式未落定期间不出卡），该行就地
+    /// 渲染模型目录卡**替代原回复文本**。点按钮发 `/model <id>` 后卡面保留（历史的一部分，
+    /// 不再是「文字后挂临时卡操作完移除」）；再次裸发 `/model` 时卡面迁移到新交换，旧回复
+    /// 恢复文本渲染（同时只活一张卡）。
+    private var modelsCardMessageId: String? {
         let msgs = hub.messages
-        guard let lastUserIdx = msgs.lastIndex(where: { $0.role == "user" }) else { return false }
-        guard msgs[lastUserIdx].content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "/model"
-        else { return false }
-        guard let last = msgs.last else { return false }
-        return last.role == "assistant" && last.state == "final"
+        guard let lastBareIdx = msgs.lastIndex(where: {
+            $0.role == "user" && $0.content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "/model"
+        }) else { return nil }
+        for idx in (lastBareIdx + 1)..<msgs.count {
+            let m = msgs[idx]
+            if m.role == "user" { return nil } // 命令与回复间被其他用户行打断 = 交换不完整
+            if m.role == "assistant" {
+                guard m.state == "final" else { return nil } // 回复流式/未落定，不出卡
+                return m.messageId
+            }
+        }
+        return nil
     }
 
     /// wp-8②：Stop 可执行 = 活跃 run 且 activeRunId 已习得（wp-5 v4 投影）。映射未学习场景
@@ -541,7 +549,11 @@ struct HubChatView: View {
                         .frame(maxWidth: .infinity, alignment: .center)
                     }
                     ForEach(hub.messages, id: \.messageId) { m in
-                        HubMessageRow(m: m, onDelete: { pendingDeleteMessage = m }).id(m.messageId)
+                        HubMessageRow(
+                            m: m,
+                            showsModelsCard: m.messageId == modelsCardMessageId,
+                            onDelete: { pendingDeleteMessage = m }
+                        ).id(m.messageId)
                             // b8：末行视口位置探针（用户口径「last visible 是最底下的 item」——
                             // 判定基准=最后一条消息行，不是垫行）。全部行挂观察、仅末行写入
                             // （不做条件包装防结构翻转，b6 同款）；写入进非观测盒不触发重渲。
@@ -554,16 +566,6 @@ struct HubChatView: View {
                                     if showJump != showJumpToBottom { showJumpToBottom = showJump }
                                 }
                             }
-                    }
-                    // #22（2026-11-08）：斜杠交互卡——/model 无参命令回复落定后，时间线尾部
-                    // 渲染模型目录卡（REST #22 数据面），点按钮发 `/model <id>` 完成切换
-                    // （组合指令快捷路径：第一个命令发出后，后续切换只点卡片按钮）。
-                    if modelsCardActive {
-                        ModelsInteractiveCard(conversationId: conv.conversationId) { item in
-                            hub.send("/model \(item.id)")
-                        }
-                        .id("models-card")
-                        .padding(.top, 2)
                     }
                     // #6（2026-11-07 UX 轮）：底部贴距收窄——原 vertical 10 + 高度 4 垫行合计
                     // 视觉空隙 ~24pt 偏大；改 top 10 / bottom 0 + 垫行 2，尾行距输入区分隔线
@@ -645,10 +647,10 @@ struct HubChatView: View {
                 guard atBottom || ownSend else { return }
                 proxy.scrollTo("bottom", anchor: .bottom)
             }
-            .onChange(of: modelsCardActive) { _, active in
-                // #22：交互卡出现时（回复落定瞬间）用户在底部即贴底，防卡被输入区压住不可见；
-                // 上翻阅读中不打扰。
-                guard active, atBottom else { return }
+            .onChange(of: modelsCardMessageId) { _, newId in
+                // #22 修复轮：交互卡挂到回复行（内容替换渲染，行高变化）出现时用户在底部即
+                // 贴底，防卡被输入区压住不可见；上翻阅读中不打扰。
+                guard newId != nil, atBottom else { return }
                 proxy.scrollTo("bottom", anchor: .bottom)
             }
             .onAppear {
@@ -747,23 +749,21 @@ struct HubChatView: View {
                     .onChange(of: draft) { _, new in
                         hub.fetchCommandsIfNeeded(conversationId: conv.conversationId, draft: new)
                     }
-                if isRunActive {
+                if isRunActive && canCancelRun {
                     // wp-8②：Stop 按钮（grokbot 式常驻）——活跃 run 期间替代发送键；中止后部分
                     // 输出保留由 Gateway 权威收敛（run.aborted 回流投影库，UI 只翻转回发送键）。
-                    HStack(spacing: 4) {
-                        Button {
-                            hub.stopRun()
-                        } label: {
-                            Image(systemName: "stop.circle.fill").font(.title2)
-                        }
-                        .disabled(!canCancelRun)
-                        .opacity(canCancelRun ? 1 : 0.35)
-                        .accessibilityLabel(canCancelRun ? "停止生成" : "结束中")
-                        if !canCancelRun {
-                            Text("结束中").font(.caption2).foregroundStyle(.secondary)
-                        }
+                    Button {
+                        hub.stopRun()
+                    } label: {
+                        Image(systemName: "stop.circle.fill").font(.title2)
                     }
+                    .accessibilityLabel("停止生成")
                 } else {
+                    // #3 修复轮（2026-11-08）：防死锁——run 活跃但 activeRunId 缺失（映射未学习/
+                    // 服务端聚合分叉）时**不再让禁用态 Stop 独占键位**：发送键照常可用（发送照常
+                    // 走排队语义），旁挂「结束中」弱提示说明 run 在途。此前禁用 Stop 独占 +
+                    // 发送键被替换 = 服务端聚合一旦卡 true 用户既不能发也不能停（真机实测：
+                    // roster 瞬态信号把会话活跃 run 卡死后 composer 整体锁死）。
                     Button {
                         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !text.isEmpty else { return }
@@ -773,6 +773,11 @@ struct HubChatView: View {
                         Image(systemName: "arrow.up.circle.fill").font(.title2)
                     }
                     .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
+                    if isRunActive && !canCancelRun {
+                        Text("结束中")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
@@ -1119,6 +1124,9 @@ private final class ScrollProbeBox {
 
 private struct HubMessageRow: View {
     let m: UiMessage
+    /// #22 修复轮（2026-11-08）：true = 本行是最新一次裸 `/model` 交换的回复行——就地渲染
+    /// 模型目录卡**替代原回复文本**（modelsCardMessageId 判定，见 HubChatView）。
+    var showsModelsCard: Bool = false
     /// #3（2026-11-07 UX 轮）：删除入口回调——二次确认弹层挂在会话页（pendingDeleteMessage），
     /// 行内只负责发起，不自带弹层（LazyVStack 行级弹层生命周期不可靠）。
     let onDelete: () -> Void
@@ -1142,7 +1150,13 @@ private struct HubMessageRow: View {
                 if m.role == "user" { Spacer(minLength: 40) }
                 VStack(alignment: m.role == "user" ? .trailing : .leading, spacing: 3) {
                     Group {
-                        if m.content.isEmpty && m.state == "streaming" {
+                        if m.role == "assistant" && showsModelsCard && m.state == "final" && !m.content.isEmpty {
+                            // #22 修复轮：交互卡替换回复文本（挂最新一次裸 /model 交换的回复行，
+                            // 点按钮发 `/model <id>` 后卡面保留，不再是临时追加元素）。
+                            ModelsInteractiveCard(conversationId: hub.selected?.conversationId ?? "") { item in
+                                hub.send("/model \(item.id)")
+                            }
+                        } else if m.content.isEmpty && m.state == "streaming" {
                             // #2'（2026-11-07 二轮，x总改版）：工作过程条撤显示——进行中信号收敛到
                             // 回复占位行：thinking 帧在途呈「正在思考…」，否则「<agent> 正在处理中…」
                             //（三点脉冲 + 文案）；正文返回即被 Markdown/typewriter 替换。
@@ -1174,8 +1188,17 @@ private struct HubMessageRow: View {
                         }
                     }
                     .padding(.horizontal, 12).padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 16)
-                        .fill(m.role == "user" ? Color.accentColor.opacity(0.24) : ink.surfaceTertiary))
+                    .background(
+                        Group {
+                            if m.role == "assistant" && showsModelsCard && m.state == "final" && !m.content.isEmpty {
+                                // 交互卡行：卡自带底色边框，不再套消息气泡底
+                                Color.clear
+                            } else {
+                                RoundedRectangle(cornerRadius: 16)
+                                    .fill(m.role == "user" ? Color.accentColor.opacity(0.24) : ink.surfaceTertiary)
+                            }
+                        }
+                    )
                     // 消息时间（桌面 MessageRow formatTs 同族 parity，2026-11-06）：气泡下
                     // caption2 弱化行——用户行与状态徽标同行（桌面同款），解析失败/缺省省略。
                     if m.role == "user" {

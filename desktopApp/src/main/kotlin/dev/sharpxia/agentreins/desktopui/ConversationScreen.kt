@@ -453,20 +453,33 @@ internal fun ConversationScreen(
         catalog = mergedSlashCommands(dynamicCommands?.commands ?: emptyList()),
     )
 
-    // #22（2026-11-08）：模型交互卡出现判定——最后一条用户行是 `/model` 无参查看形态
-    // （大小写不敏感，Gateway mapCommand 归一），且其回复已落定（最后一条消息为 assistant
-    // final 行——乐观行在途/流式未落定/run 活跃期间均不出现），且当前无活跃 run。出现即
-    // 触发目录拉取（ModelsCache TTL + 在途去重在下方 effect），点按钮发 `/model <id>`
-    // （组合指令快捷路径：第一个命令发出后，后续切换只点卡片按钮；发送后最后用户行变为
-    // 带参形态，判定自然失效收卡）。
-    val modelsCardActive = !isRunActive && run {
-        val lastUserIdx = messages.indexOfLast { it.role == "user" }
-        lastUserIdx >= 0 &&
-            messages[lastUserIdx].content.trim().lowercase() == "/model" &&
-            messages.lastOrNull()?.let { it.role == "assistant" && it.state == "final" } == true
+    // #22 修复轮（2026-11-08，用户拍板「卡片直接替换回复文本」）：模型交互卡挂到**最新一次
+    // 裸 `/model` 交换的回复行**上——判定无状态、可从消息列表随时重推导：找最后一条正文恰为
+    // `/model` 的用户行，其后第一条 assistant final 行即回复（两者之间不得夹任何其他用户行/
+    // assistant 行——回复流式未落定期间不出卡），该行就地渲染模型目录卡**替代原回复文本**。
+    // 点按钮发 `/model <id>` 后卡面保留（历史的一部分，不再「文字后挂临时卡操作完移除」）；
+    // 再次裸发 `/model` 时卡面迁移到新交换，旧回复恢复文本渲染（同时只活一张卡）。
+    val modelsCardMessageId: String? = run {
+        val lastBareIdx = messages.indexOfLast {
+            it.role == "user" && it.content.trim().lowercase() == "/model"
+        }
+        if (lastBareIdx < 0) {
+            null
+        } else {
+            var result: String? = null
+            for (idx in (lastBareIdx + 1) until messages.size) {
+                val m = messages[idx]
+                if (m.role == "user") break // 命令与回复间被其他用户行打断 = 交换不完整
+                if (m.role == "assistant") {
+                    result = if (m.state == "final") m.messageId else null
+                    break // 回复流式未落定 → 不出卡
+                }
+            }
+            result
+        }
     }
-    LaunchedEffect(modelsCardActive) {
-        if (!modelsCardActive) return@LaunchedEffect
+    LaunchedEffect(modelsCardMessageId) {
+        if (modelsCardMessageId == null) return@LaunchedEffect
         if (ModelsCache.valid(conversationId) != null) return@LaunchedEffect
         val fetched = fetchModels(client, conversationId)
         if (fetched != null) ModelsCache.put(conversationId, fetched)
@@ -584,20 +597,12 @@ internal fun ConversationScreen(
                         scope,
                         thinkingNow = workActivity.phases.lastOrNull()?.phase == "thinking",
                         agentLabel = label.ifBlank { "Agent" },
+                        showsModelsCard = m.messageId == modelsCardMessageId,
+                        onModelSelect = { item ->
+                            input = TextFieldValue("")
+                            scope.launch { client.commands?.sendMessage(conversationId, "/model ${item.id}") }
+                        },
                     )
-                }
-                // #22：模型交互卡（iOS ModelsInteractiveCard 桌面同构）——/model 回复落定后
-                // 出现于时间线尾部，按供应商分节展示模型按钮，点按钮发 `/model <id>`。
-                if (modelsCardActive) {
-                    item(key = "models-card") {
-                        ModelsInteractiveCard(
-                            conversationId = conversationId,
-                            onSelect = { item ->
-                                input = TextFieldValue("")
-                                scope.launch { client.commands?.sendMessage(conversationId, "/model ${item.id}") }
-                            },
-                        )
-                    }
                 }
             }
             // 2026-11-07 二轮：回到底部悬浮按钮（iOS HubChatView 同款语义；最后一条不可见即浮现）
@@ -675,22 +680,24 @@ internal fun ConversationScreen(
                         maxLines = 4,
                     )
                     Spacer(Modifier.width(8.dp))
-                    if (isRunActive) {
+                    if (isRunActive && canCancelRun) {
                         // wp-8②：Stop 按钮（grokbot 式常驻）——活跃 run 期间替代发送键；中止后部分
                         // 输出保留由 Gateway 权威收敛（run.aborted 回流投影库，UI 只翻转回发送键）。
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Button(
-                                onClick = {
-                                    val runId = liveConv?.activeRunId ?: return@Button
-                                    scope.launch { client.commands?.cancelRun(runId) }
-                                },
-                                enabled = canCancelRun,
-                            ) { Text("■ 停止") }
-                            if (!canCancelRun) {
-                                Text("结束中", fontSize = 10.sp, color = Color(0xFF999999))
-                            }
-                        }
+                        Button(
+                            onClick = {
+                                val runId = liveConv?.activeRunId ?: return@Button
+                                scope.launch { client.commands?.cancelRun(runId) }
+                            },
+                        ) { Text("■ 停止") }
                     } else {
+                        // #3 修复轮（2026-11-08）：防死锁——run 活跃但 activeRunId 缺失时禁用态
+                        // Stop 不再独占键位：发送键照常可用（排队语义），「结束中」降级为旁注。
+                        // 此前禁用 Stop 独占 + 发送键被替换 = 服务端聚合卡 true 时 composer 整体锁死
+                        //（真机实测 roster 瞬态信号把会话活跃 run 卡死）。
+                        if (isRunActive) {
+                            Text("结束中", fontSize = 10.sp, color = Color(0xFF999999))
+                            Spacer(Modifier.width(6.dp))
+                        }
                         // 空正文防线（发送侧）：空白草稿禁发（isNotBlank = 去空白后非空），点击再兜一层
                         Button(
                             onClick = { sendDraft() },
@@ -722,6 +729,9 @@ private fun MessageRow(
     /** 2026-11-07 二轮：thinking 帧在途 + agent 显示名（占位行动画文案用，见流式空行分支）。 */
     thinkingNow: Boolean,
     agentLabel: String,
+    /** #22 修复轮：true = 本行是最新一次裸 `/model` 交换的回复行——就地渲染模型卡替代文本。 */
+    showsModelsCard: Boolean,
+    onModelSelect: (ModelOptionItem) -> Unit,
 ) {
     when {
         m.role.isEmpty() -> CompactionSeparator()
@@ -752,7 +762,7 @@ private fun MessageRow(
             ) {
                 when {
                     m.role == "user" -> UserMessageRow(m)
-                    else -> AssistantMessageRow(m, thinkingNow, agentLabel)
+                    else -> AssistantMessageRow(m, conversationId, thinkingNow, agentLabel, showsModelsCard, onModelSelect)
                 }
             }
         }
@@ -800,11 +810,23 @@ private fun UserMessageRow(m: UiMessage) {
 }
 
 @Composable
-private fun AssistantMessageRow(m: UiMessage, thinkingNow: Boolean, agentLabel: String) {
+private fun AssistantMessageRow(
+    m: UiMessage,
+    conversationId: String,
+    thinkingNow: Boolean,
+    agentLabel: String,
+    showsModelsCard: Boolean,
+    onModelSelect: (ModelOptionItem) -> Unit,
+) {
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.Start,
     ) {
+        if (showsModelsCard && m.state == "final" && m.content.isNotBlank()) {
+            // #22 修复轮：交互卡替换回复文本（挂最新一次裸 /model 交换的回复行，点按钮发
+            // `/model <id>` 后卡面保留，不再是临时追加元素）；时间行照常。
+            ModelsInteractiveCard(conversationId = conversationId, onSelect = onModelSelect)
+        } else
         Surface(
             color = MaterialTheme.colorScheme.surfaceVariant,
             shape = RoundedCornerShape(12.dp),

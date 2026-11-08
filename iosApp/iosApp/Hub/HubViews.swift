@@ -408,8 +408,8 @@ struct HubChatView: View {
     private var isRunActive: Bool { liveConv?.hasActiveRun == true }
 
     /// 交互卡数据面（2026-11-08 修复轮泛化）：`/model` → 模型目录卡（REST #22）；其余带
-    /// 静态选项闭集的命令（Gateway catalog args 有界视图，如 /think /usage /exec）→ 通用
-    /// 选项卡。点选项发送 `/命令 <值>`（值原样回填，ADR-14）。
+    /// 静态选项闭集的命令（Gateway catalog args 有界视图，如 /usage /exec）→ 通用选项卡。
+    /// 点选项发送 `/命令 <值>`（值原样回填，ADR-14）。
     fileprivate enum InteractiveCardSpec {
         case models
         case options(command: SlashCommand)
@@ -426,10 +426,10 @@ struct HubChatView: View {
             guard $0.role == "user" else { return false }
             let t = $0.content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             guard t.hasPrefix("/") else { return false }
-            return Self.interactiveSpec(forBareName: String(t.dropFirst()), catalog: slashCommands) != nil
+            return interactiveSpec(forBareName: String(t.dropFirst())) != nil
         }) else { return nil }
         let bare = msgs[lastBareIdx].content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard let spec = Self.interactiveSpec(forBareName: String(bare.dropFirst()), catalog: slashCommands) else {
+        guard let spec = interactiveSpec(forBareName: String(bare.dropFirst())) else {
             return nil
         }
         for idx in (lastBareIdx + 1)..<msgs.count {
@@ -443,13 +443,37 @@ struct HubChatView: View {
         return nil
     }
 
-    /// 裸命令名 → 交互卡种类：model 固定走 REST #22 模型卡；其余查合并目录首个带 choices
-    /// 的参数（Gateway catalog args 有界视图）。无命中 = 非交互命令（普通文本渲染）。
-    private static func interactiveSpec(forBareName name: String, catalog: [SlashCommand]) -> InteractiveCardSpec? {
-        if name == "model" { return .models }
-        guard let cmd = catalog.first(where: { $0.name.dropFirst().lowercased() == name }),
+    /// 裸命令名 → 交互卡种类（2026-11-08 自检轮泛化补齐）：model/models 固定走 REST #22
+    /// 模型卡（models 为列表型指令，结构化数据面同源——点按钮仍发 `/model <id>` 完成切换）；
+    /// think 走思考等级卡（动态闭集的值 = REST #22 当前模型 thinkingLevels，见
+    /// thinkCommand）；其余查合并目录首个带 choices 的参数（Gateway catalog args 有界视图）。
+    /// 无命中 = 非交互命令（普通文本渲染）。
+    private func interactiveSpec(forBareName name: String) -> InteractiveCardSpec? {
+        if name == "model" || name == "models" { return .models }
+        if name == "think" {
+            return Self.thinkCommand(modelsList: hub.modelsCache[conv.conversationId]).map { .options(command: $0) }
+        }
+        guard let cmd = slashCommands.first(where: { $0.name.dropFirst().lowercased() == name }),
               let choices = cmd.choices, !choices.isEmpty else { return nil }
         return .options(command: cmd)
+    }
+
+    /// /think 卡数据面（2026-11-08 自检轮）：Gateway /think.level 为函数型动态闭集（按当前
+    /// 模型解析，commands.list 不下发值仅标 dynamic:true）——结构化数据出口 = REST #22
+    /// 当前模型条目的 thinkingLevels；卡选项 = default 前置 + levels（剔除 value=="default"），
+    /// 镜像 OpenClaw listThinkingLevelChoices 形状。当前模型缺失（非投影路径/缓存未到）或
+    /// 无等级 → nil（无卡退化，不编造值集）。
+    private static func thinkCommand(modelsList: ModelsList?) -> SlashCommand? {
+        guard let current = modelsList?.models.first(where: { $0.current?.boolValue == true }),
+              let levels = current.thinkingLevels, !levels.isEmpty else { return nil }
+        var choices: [CommandChoice] = [CommandChoice(value: "default", label: "默认")]
+        for level in levels where level.value != "default" { choices.append(level) }
+        return SlashCommand(
+            name: "/think",
+            summary: "切换思考等级（当前模型：\(current.name)）",
+            takesArgument: true,
+            choices: choices,
+            argName: "level")
     }
 
     /// wp-8②：Stop 可执行 = 活跃 run 且 activeRunId 已习得（wp-5 v4 投影）。映射未学习场景
@@ -677,10 +701,12 @@ struct HubChatView: View {
                 proxy.scrollTo("bottom", anchor: .bottom)
             }
             .onChange(of: hub.messages.last?.content ?? "") { _, _ in
-                // choices 卡数据面鸡生蛋修复：用户可能不经 "/" 草稿直接发出交互命令——
-                // 每条新消息落定幂等触发一次目录拉取（TTL/在途去重内空转零成本），目录
-                // 到位（Flow 推送）后 interactiveCard 判定即出卡。
+                // choices/think 卡数据面鸡生蛋修复：用户可能不经 "/" 草稿直接发出交互命令
+                // ——每条新消息落定幂等触发一次目录拉取（TTL/在途去重内空转零成本），目录
+                // 到位（Flow 推送）后 interactiveCard 判定即出卡。think 卡数据面 = #22 当前
+                // 模型 thinkingLevels，模型目录同口径补拉（2026-11-08 自检轮）。
                 hub.ensureCommands(conversationId: conv.conversationId)
+                hub.fetchModelsIfNeeded(conversationId: conv.conversationId)
             }
             .onAppear {
                 // b8 进页锚定：置钉底在途逐帧重放收敛（单次 scrollTo 恒落 LazyVStack 估算

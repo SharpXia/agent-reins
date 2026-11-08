@@ -239,9 +239,11 @@ data class CommandListItem(
     val skillDisplayName: String? = null,
     /**
      * 可选（v1.1 additive，2026-11-08 修复轮，斜杠交互卡数据面）：参数定义有界视图——
-     * 白名单仅 name/required/choices；choices 为 Gateway 静态选项闭集（动态选项由 Gateway
-     * 构建 catalog 时已解析为具体值），客户端交互卡点选项发送 `/命令 <值>`（值原样回填，
-     * ADR-14）。无参命令/旧桥（includeArgs 仍 false）缺省 null。
+     * 白名单仅 name/required/choices + dynamic；choices 为 Gateway 静态选项闭集（动态
+     * 闭集 Gateway 不解析为值、仅标 dynamic:true——2026-11-08 自检轮勘误，动态选项的
+     * 值经其他结构化出口解析，如 /think 的 levels 来自 #22 thinkingLevels），客户端
+     * 交互卡点选项发送 `/命令 <值>`（值原样回填，ADR-14）。无参命令/旧桥（includeArgs
+     * 仍 false）缺省 null。
      */
     val args: List<CommandArg>? = null,
 )
@@ -255,6 +257,8 @@ data class CommandArg(
     val required: Boolean? = null,
     /** 可选：静态选项闭集（≤50，交互卡数据面）。 */
     val choices: List<CommandChoice>? = null,
+    /** 可选（v1.1 additive，2026-11-08 自检轮）：true = Gateway 函数型动态闭集（值按当前模型/配置解析，commands.list 不下发值）。 */
+    val dynamic: Boolean? = null,
 )
 
 /** 选项条目：value 为发送文本取值（原样回填），label 为展示名。 */
@@ -270,10 +274,11 @@ data class CommandsList(
 
 /**
  * 端点 #22 命令目录项（v1.1 additive，2026-11-08）：Gateway models.list 的**有界透传视图**
- * ——服务端只回白名单字段（id/name/provider/available），contextWindow/thinkingLevels/
- * runtimeChoices/agentRuntime 等内幕字段不过客户端面（去会话化纪律同时生效：请求/响应体
- * 零 sessionId/sessionKey）。id 为 Gateway 原生模型标识（provider/model 规范形）——客户端
- * 交互卡点按钮发送 `/model <id>` 即用此值，客户端不拼装不改写（ADR-14：原样保留不数值化）。
+ * ——服务端只回白名单字段（id/name/provider/available + thinkingLevels/thinkingDefault/
+ * current，2026-11-08 自检轮 additive），contextWindow/runtimeChoices/agentRuntime 等
+ * 其余内幕字段不过客户端面（去会话化纪律同时生效：请求/响应体零 sessionId/sessionKey）。
+ * id 为 Gateway 原生模型标识（provider/model 规范形）——客户端交互卡点按钮发送
+ * `/model <id>` 即用此值，客户端不拼装不改写（ADR-14：原样保留不数值化）。
  */
 @Serializable
 data class ModelOptionItem(
@@ -283,8 +288,19 @@ data class ModelOptionItem(
     val name: String,
     /** 供应商标识（交互卡分节/小字展示）。 */
     val provider: String,
-    /** true/缺省 = 可选；false = 当前不可用（客户端按钮置灰，不编造原因）。 */
+    /** true/缺省 = 可选；false = 当前不可用（客户端按钮置灰，不编造原因）。Gateway 投影对当前模型抽掉本键（缺失 + 无 current 标记的组合不出现）。 */
     val available: Boolean? = null,
+    /**
+     * 可选（v1.1 additive，2026-11-08 自检轮）：该模型的思考等级闭集（Gateway 原生
+     * thinkingLevels:[{id,label}] 有界透出——/think 动态闭集的结构化数据出口；/think 卡
+     * 数据源 = 会话当前模型条目的本字段 + default 前置，镜像 OpenClaw
+     * listThinkingLevelChoices 形状）。
+     */
+    val thinkingLevels: List<CommandChoice>? = null,
+    /** 可选（v1.1 additive，2026-11-08 自检轮）：该模型的默认思考等级（卡面标注当前默认档）。 */
+    val thinkingDefault: String? = null,
+    /** 可选（v1.1 additive，2026-11-08 自检轮）：true = 会话当前模型（桥把 Gateway 投影「抽掉 available 键」显式化，不臆造扩义；非投影路径无标记）。 */
+    val current: Boolean? = null,
 )
 
 /** 端点 #22 响应体（v1.1 additive）：truncated=true 表示列表被截断（条目上限 100 或桥帧预算 256KiB）。 */

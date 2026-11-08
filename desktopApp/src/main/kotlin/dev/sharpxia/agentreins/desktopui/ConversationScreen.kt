@@ -72,6 +72,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.sharpxia.agentreins.hub.DefaultHubClient
 import dev.sharpxia.agentreins.hub.UiApproval
+import dev.sharpxia.agentreins.hub.projection.CommandChoice
 import dev.sharpxia.agentreins.hub.projection.ModelOptionItem
 import dev.sharpxia.agentreins.hub.projection.ModelsList
 import dev.sharpxia.agentreins.hub.UiConversation
@@ -159,6 +160,31 @@ private suspend fun fetchModels(client: DefaultHubClient, conversationId: String
     } catch (_: Exception) {
         null
     }
+}
+
+/**
+ * /think 卡数据面（2026-11-08 自检轮；iOS HubViews.thinkCommand 桌面同构）：Gateway
+ * /think.level 为函数型动态闭集（按当前模型解析，commands.list 不下发值仅标
+ * args[].dynamic=true）——结构化数据出口 = REST #22 当前模型条目的 thinkingLevels；卡
+ * 选项 = default 前置 + levels（剔除 value=="default"），镜像 OpenClaw
+ * listThinkingLevelChoices 形状。当前模型缺失（非投影路径/缓存未到）或无等级 → null
+ * （无卡退化，不编造值集，ADR-14）。
+ */
+internal fun thinkCommand(modelsList: ModelsList?): SlashCommand? {
+    val current = modelsList?.models?.firstOrNull { it.current == true } ?: return null
+    val levels = current.thinkingLevels.orEmpty()
+    if (levels.isEmpty()) return null
+    val choices = buildList {
+        add(CommandChoice(value = "default", label = "默认"))
+        levels.forEach { if (it.value != "default") add(it) }
+    }
+    return SlashCommand(
+        name = "/think",
+        summary = "切换思考等级（当前模型：${current.name}）",
+        takesArgument = true,
+        choices = choices,
+        argName = "level",
+    )
 }
 
 /**
@@ -455,19 +481,25 @@ internal fun ConversationScreen(
         catalog = mergedSlashCommands(dynamicCommands?.commands ?: emptyList()),
     )
 
-    // 交互卡数据面（2026-11-08 修复轮泛化）：`/model` → 模型目录卡（REST #22）；其余带静态
-    // 选项闭集的命令（Gateway catalog args 有界视图，如 /think /usage /exec）→ 通用选项卡。
-    // 挂载判定（无状态可重推导）：最新一次裸交互命令交换的回复行——找最后一条正文恰为
-    // `/<交互命令名>` 的用户行，其后第一条 assistant final 行即回复（两者间不得夹任何其他
-    // 用户行/assistant 行——回复流式未落定期间不出卡），该行就地渲染交互卡替代原回复文本；
-    // 点选项后卡面保留，再次裸发同名命令时卡面迁移（同时只活一张卡）。
+    // 交互卡数据面（2026-11-08 修复轮泛化 + 同日自检轮补齐）：`/model`、`/models` → 模型
+    // 目录卡（REST #22；models 为列表型指令，结构化数据面同源——点按钮仍发 `/model <id>`
+    // 完成切换）；`/think` → 思考等级卡（Gateway 动态闭集的值 = #22 当前模型 thinkingLevels，
+    // 见 thinkCommand）；其余带静态选项闭集的命令（Gateway catalog args 有界视图，如
+    // /usage /exec）→ 通用选项卡。挂载判定（无状态可重推导）：最新一次裸交互命令交换的
+    // 回复行——找最后一条正文恰为 `/<交互命令名>` 的用户行，其后第一条 assistant final 行
+    // 即回复（两者间不得夹任何其他用户行/assistant 行——回复流式未落定期间不出卡），该行
+    // 就地渲染交互卡替代原回复文本；点选项后卡面保留，再次裸发同名命令时卡面迁移（同时
+    // 只活一张卡）。
     val mergedCatalog = mergedSlashCommands(dynamicCommands?.commands ?: emptyList())
     fun interactiveCommandFor(bareName: String): SlashCommand? {
-        if (bareName == "model") return SlashCommand(
+        if (bareName == "model" || bareName == "models") return SlashCommand(
             name = "/model",
             summary = "切换会话模型（REST #22 动态目录）",
             takesArgument = true,
         )
+        if (bareName == "think") {
+            return thinkCommand(ModelsCache.valid(conversationId))
+        }
         return mergedCatalog.firstOrNull {
             it.name.removePrefix("/").lowercase() == bareName && !it.choices.isNullOrEmpty()
         }
@@ -503,11 +535,16 @@ internal fun ConversationScreen(
             fetchModels(client, conversationId)?.let { ModelsCache.put(conversationId, it) }
         }
     }
-    // choices 卡数据面鸡生蛋修复：用户可能不经 "/" 草稿直接发出交互命令——每条新消息
-    // 落定幂等触发一次目录拉取（TTL 缓存命中即空转），目录到位后 interactiveCard 判定出卡。
+    // choices/think 卡数据面鸡生蛋修复：用户可能不经 "/" 草稿直接发出交互命令——每条新
+    // 消息落定幂等触发一次目录拉取（TTL 缓存命中即空转），目录到位后 interactiveCard 判定
+    // 出卡。think 卡数据面 = #22 当前模型 thinkingLevels，模型目录同口径补拉（2026-11-08
+    // 自检轮）。
     LaunchedEffect(messages.lastOrNull()?.content) {
         if (SlashCommandsCache.valid(conversationId) == null) {
             fetchSlashCommands(client, conversationId)?.let { SlashCommandsCache.put(conversationId, it) }
+        }
+        if (ModelsCache.valid(conversationId) == null) {
+            fetchModels(client, conversationId)?.let { ModelsCache.put(conversationId, it) }
         }
     }
 

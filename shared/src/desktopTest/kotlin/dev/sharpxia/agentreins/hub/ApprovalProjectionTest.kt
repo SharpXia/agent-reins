@@ -255,6 +255,7 @@ private class FakeHubApi(
     override suspend fun messages(conversationId: String, before: Long?, limit: Int?) = unused()
     override suspend fun sendMessage(conversationId: String, req: SendMessageRequest) = unused()
     override suspend fun uploadMedia(conversationId: String, bytes: ByteArray, mime: String, fileName: String?, width: Int?, height: Int?) = unused()
+    override suspend fun fetchMediaContent(mediaId: String) = unused()
     override suspend fun commands(conversationId: String) = unused()
     override suspend fun models(conversationId: String) = unused()
     override suspend fun markRead(conversationId: String, req: ReadCursorRequest) = unused()

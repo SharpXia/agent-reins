@@ -678,6 +678,7 @@ private open class StubHubApi(
     override suspend fun messages(conversationId: String, before: Long?, limit: Int?) = TODO()
     override suspend fun sendMessage(conversationId: String, req: dev.sharpxia.agentreins.hub.projection.SendMessageRequest) = TODO()
     override suspend fun uploadMedia(conversationId: String, bytes: ByteArray, mime: String, fileName: String?, width: Int?, height: Int?) = TODO()
+    override suspend fun fetchMediaContent(mediaId: String) = TODO() // #24 桩补齐（2026-11-09 多模态轮，此前缺桩 shared 测试编译不过）
     override suspend fun commands(conversationId: String) = TODO() // #21/#22 桩补齐（2026-11-09 多模态轮顺手修复，此前缺桩 shared 测试编译不过）
     override suspend fun models(conversationId: String) = TODO()
     override suspend fun markRead(conversationId: String, req: dev.sharpxia.agentreins.hub.projection.ReadCursorRequest) = TODO()

@@ -223,6 +223,7 @@ class HubMessagesPagingTest {
         override suspend fun conversations(limit: Int?, cursor: String?) = TODO()
         override suspend fun sendMessage(conversationId: String, req: SendMessageRequest) = TODO()
         override suspend fun uploadMedia(conversationId: String, bytes: ByteArray, mime: String, fileName: String?, width: Int?, height: Int?) = TODO()
+        override suspend fun fetchMediaContent(mediaId: String) = TODO()
         override suspend fun commands(conversationId: String) = TODO()
         override suspend fun models(conversationId: String) = TODO()
         override suspend fun markRead(conversationId: String, req: ReadCursorRequest) = TODO()

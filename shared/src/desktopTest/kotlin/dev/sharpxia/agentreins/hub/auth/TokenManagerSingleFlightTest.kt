@@ -81,6 +81,7 @@ class TokenManagerSingleFlightTest {
         override suspend fun messages(conversationId: String, before: Long?, limit: Int?): MessagesPage = unused()
         override suspend fun sendMessage(conversationId: String, req: SendMessageRequest): CommandReceipt = unused()
         override suspend fun uploadMedia(conversationId: String, bytes: ByteArray, mime: String, fileName: String?, width: Int?, height: Int?): MediaUpload = unused()
+        override suspend fun fetchMediaContent(mediaId: String): ByteArray = unused()
         override suspend fun commands(conversationId: String) = unused()
         override suspend fun models(conversationId: String) = unused()
         override suspend fun createConversation(gatewayId: String, agentId: String, req: CreateConversationRequest): CommandReceipt = unused()

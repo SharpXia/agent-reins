@@ -301,6 +301,15 @@ private struct LiteBlockView: View {
             LiteTableView(header: header, rows: rows)
         case .rule:
             Rectangle().fill(c.borderPrimary).frame(height: 1)
+        case let .image(url):
+            // v1.2.0 多模态（设计稿 §2.2 双口径）：https 内联渲染（占位 + 失败重试见
+            // RemoteImageView）；http（含 agent 局域网地址）降级链接 chip——ATS 默认拦
+            // http、客户端直连 agent 局域网地址在蜂窝网不可达，不做特例。
+            if url.scheme?.lowercased() == "https" {
+                RemoteImageView(url: url)
+            } else {
+                ExternalLinkChip(url: url)
+            }
         }
     }
 }
@@ -360,6 +369,10 @@ struct LiteBlock: Identifiable {
         case quote(AttributedString)
         case table(header: [AttributedString], rows: [[AttributedString]])
         case rule
+        /// v1.2.0 多模态（设计稿 §2.2）：整行 markdown 图片节点 `![alt](url)`——Foundation
+        /// AttributedString 解析不支持图片（静默丢弃），生图输出与外链图由此进渲染面。
+        /// 渲染口径（与桌面同型）：https 内联、http（含 agent 局域网地址）降级链接 chip。
+        case image(URL)
     }
 
     let id: Int
@@ -381,6 +394,32 @@ enum LiteMarkdownParser {
     )
 
     static func parse(_ raw: String) -> [LiteBlock] {
+        // v1.2.0 多模态：整行图片节点先行抽出（逐行扫描，非图行按原序归并成块交给既有
+        // Foundation 管线）；合并产物重编号保证 id 唯一（image 块与文本块 id 空间不重叠）。
+        var blocks: [LiteBlock] = []
+        var pending: [Substring] = []
+
+        func flushPending() {
+            guard !pending.isEmpty else { return }
+            let chunk = pending.joined(separator: "\n")
+            pending.removeAll(keepingCapacity: true)
+            blocks.append(contentsOf: parseTextChunk(chunk))
+        }
+
+        for line in raw.split(separator: "\n", omittingEmptySubsequences: false) {
+            if let url = imageOnlyLine(line) {
+                flushPending()
+                blocks.append(LiteBlock(id: blocks.count, kind: .image(url)))
+            } else {
+                pending.append(line)
+            }
+        }
+        flushPending()
+        return blocks.enumerated().map { LiteBlock(id: $0.offset, kind: $0.element.kind) }
+    }
+
+    /// 既有 Foundation 解析管线（原 parse 主体，未动）——只处理不含整行图片节点的文本段。
+    private static func parseTextChunk(_ raw: String) -> [LiteBlock] {
         guard var attr = try? AttributedString(markdown: raw, options: options) else {
             return [LiteBlock(id: 0, kind: .text(AttributedString(raw)))]
         }
@@ -390,6 +429,23 @@ enum LiteMarkdownParser {
             builder.consume(AttributedString(attr[range]), intent: intent)
         }
         return builder.finish()
+    }
+
+    /// 整行图片节点判定：`![alt](url)` 独占一行（允许首尾空白）→ 提取 URL。
+    /// 仅认 http(s) 协议（其余协议不外发渲染，按普通文本走既有管线）；正则为编译期字面量。
+    /// 段内混排图片不成块（Foundation 渲染 alt 文本，既有行为不追）。
+    /// 流式行半截前缀（如 `![a](https://x` 缺右括号）不匹配 → 文本，补全后下一帧成块。
+    private static let imageLineRegex = try! NSRegularExpression(
+        pattern: #"^!\[[^\]\n]*\]\(\s*(\S+?)\s*\)\s*$"#,
+    )
+
+    static func imageOnlyLine(_ line: Substring) -> URL? {
+        let s = line.trimmingCharacters(in: .whitespaces)
+        guard let m = imageLineRegex.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)),
+              let r = Range(m.range(at: 1), in: s),
+              let url = URL(string: String(s[r])) else { return nil }
+        let scheme = url.scheme?.lowercased()
+        return scheme == "https" || scheme == "http" ? url : nil
     }
 
     /// 相邻段落/标题合并进同一个 Text（少建视图）时的段间距：普通换行 + 一个 2pt 字号

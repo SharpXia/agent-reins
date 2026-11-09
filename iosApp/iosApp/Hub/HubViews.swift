@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import PhotosUI
 import composeApp
 
 /// Hub 主界面（P3 最小闭环，P4 起为唯一界面：网关直连面已退役）：会话 / 设置-设备。
@@ -384,6 +385,12 @@ struct HubChatView: View {
     @State private var bottomJumpActive = false
     /// #3（2026-11-07 UX 轮）：待删除确认的本地消息（长按菜单入口 → 会话页二次确认弹层）。
     @State private var pendingDeleteMessage: UiMessage?
+    /// v1.2.0 多模态（设计稿 §6 composer 行）：草稿附件——PhotosPicker 选中 → 压缩上传
+    ///（hub.uploadMedia，端点 #23）→ 上传成功挂 mediaId 就绪 chip；发送时随
+    /// hub.sendWithAttachments 提交 AttachmentRef（mediaId 引用，≤4 项）。
+    @State private var draftAttachments: [DraftAttachment] = []
+    /// PhotosPicker 绑定项（onChange 消费 → 逐项处理；chip 撤除时同步撤选，防选中态与草稿漂移）。
+    @State private var pickedItems: [PhotosPickerItem] = []
     /// #3'（2026-11-07 b8 口径返工）：回底按钮显隐唯一依据——距底 > 8pt 容差即显示（
     /// 「最后可见项不是底部哨兵」），≤ 容差即隐藏。b6 的 max(贴底容差, 末行实测高度)+迟滞
     /// 组合按用户口径整体退场（lastRowHeight 上报链同撤）。
@@ -508,8 +515,12 @@ struct HubChatView: View {
 
     /// #4（2026-11-08 UX 轮，用户改版）：草稿有内容 = 发送键优先——run 活跃也可直接发
     /// 新消息（不打断进行中 run，Gateway 排队语义，消息按 run 态落 queued 徽标）。
+    /// v1.2.0 多模态：就绪附件（上传成功的 mediaId）计入草稿内容——纯图片消息允许空文本
+    /// （契约 v1.2.0「message 与 attachments 至少一项非空」）；上传在途/失败的不计入（发了
+    /// 也只有空引用，服务端按缺 mediaId 拒绝）。
     private var draftHasContent: Bool {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || draftAttachments.contains { $0.upload != nil }
     }
 
     /// wp-14：斜杠命令建议——draft 起手 "/" 且未进入参数书写段时给出目录前缀命中；普通消息、
@@ -817,7 +828,7 @@ struct HubChatView: View {
                 timeline
             }
             // wp-14：斜杠命令建议面板——draft 由 "/" 起手时悬浮于 composer 上方，选中即动作；
-            // 无命中/进入参数书写段自动收起，其余输入零干扰。
+            // 无命中/进入参数书写段自动收起，其余输入零干扰不触发。
             if !slashSuggestions.isEmpty {
                 SlashCommandPanel(
                     suggestions: slashSuggestions,
@@ -826,10 +837,31 @@ struct HubChatView: View {
                 )
                 .padding(.horizontal, 12).padding(.top, 6)
             }
+            // v1.2.0 多模态：草稿附件 chip 行（选中即入列：上传在途 spinner / 就绪预览 /
+            // 失败重试态；点 ✕ 撤除并同步撤 picker 选中）。
+            if !draftAttachments.isEmpty {
+                DraftAttachmentChipsRow(
+                    drafts: $draftAttachments,
+                    onRemove: removeDraftAttachment,
+                    onRetry: retryDraftUpload,
+                )
+                .padding(.horizontal, 12).padding(.top, 8)
+            }
             Divider()
             // #2'（2026-11-07 二轮）：原「运行中发送将排队」composer 提示移除——排队语义
             // 上移为发送消息自身的「排队中」状态徽标（信息在消息现场，不再占 composer 行）。
             HStack(spacing: 10) {
+                // v1.2.0 多模态：图片选择入口（PHPicker 出程式面板，无需相册权限）；
+                // 上限 4 张（契约 AttachmentRef ≤4）。上传/失败细节在 chip 行呈现。
+                PhotosPicker(
+                    selection: $pickedItems,
+                    maxSelectionCount: Self.maxDraftAttachments,
+                    matching: .images,
+                ) {
+                    Image(systemName: "photo")
+                        .font(.title3)
+                }
+                .accessibilityLabel("添加图片（最多 \(Self.maxDraftAttachments) 张）")
                 TextField("发消息…", text: $draft, axis: .vertical)
                     .lineLimit(1...4)
                     .padding(8)
@@ -841,9 +873,10 @@ struct HubChatView: View {
                     }
                 if isRunActive && canCancelRun && !draftHasContent {
                     // wp-8② + #4（2026-11-08 UX 轮改版）：Stop 按钮仅在「活跃 run 且草稿为空」
-                    // 时占键位——草稿有内容时发送键优先（发送新消息不打断进行中 run，排队语义
-                    // 见消息 queued 徽标）；中止后部分输出保留由 Gateway 权威收敛（run.aborted
-                    // 回流投影库，UI 只翻转回发送键）。终止随时可经斜杠 /stop（静态目录在列）。
+                    // 时占键位——草稿有内容（文本或就绪附件）时发送键优先（发送新消息不打断
+                    // 进行中 run，排队语义见消息 queued 徽标）；中止后部分输出保留由 Gateway
+                    // 权威收敛（run.aborted 回流投影库，UI 只翻转回发送键）。终止随时可经斜杠
+                    // /stop（静态目录在列）。
                     Button {
                         hub.stopRun()
                     } label: {
@@ -856,11 +889,21 @@ struct HubChatView: View {
                     // 走排队语义），旁挂「结束中」弱提示说明 run 在途。此前禁用 Stop 独占 +
                     // 发送键被替换 = 服务端聚合一旦卡 true 用户既不能发也不能停（真机实测：
                     // roster 瞬态信号把会话活跃 run 卡死后 composer 整体锁死）。
+                    // v1.2.0 多模态：发送链二分——无就绪附件走 hub.send 纯文本（v1.1 字节级
+                    // 同形）；有就绪附件走 hub.sendWithAttachments（mediaId 引用集）。空文本 +
+                    // 纯图片合法（契约「至少一项非空」由本守卫与 draftHasContent 双侧保证）。
                     Button {
                         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !text.isEmpty else { return }
-                        hub.send(text)
+                        let refs = readyDraftRefs()
+                        guard !text.isEmpty || !refs.isEmpty else { return }
+                        if refs.isEmpty {
+                            hub.send(text)
+                        } else {
+                            hub.sendWithAttachments(text, refs: refs)
+                        }
                         draft = ""
+                        draftAttachments = []
+                        pickedItems = []
                     } label: {
                         Image(systemName: "arrow.up.circle.fill").font(.title2)
                     }
@@ -873,6 +916,9 @@ struct HubChatView: View {
                 }
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
+            .onChange(of: pickedItems) { _, items in
+                consumePickedItems(items)
+            }
         }
         .navigationBarTitleDisplayMode(.inline)
         // #2（2026-11-07 UX 轮）：会话详情页隐藏底部 Tab 栏——IM 详情页惯例（聊天内容+输入区
@@ -987,6 +1033,215 @@ struct HubChatView: View {
         guard let last = hub.messages.last else { return "" }
         let c = last.content
         return "\(hub.messages.count)|\(last.messageId)|\(last.state)|\(c.utf8.count)|\(c.prefix(16))|\(c.suffix(64))"
+    }
+
+    // ── v1.2.0 多模态：草稿附件链（PhotosPicker → 压缩 → #23 上传 → 发送引用集） ──
+
+    /// 附件上限（契约 AttachmentRef ≤4 / 设计稿 composer 行「最高 4 张」）。
+    private static let maxDraftAttachments = 4
+
+    /// 就绪引用集（发送键动作取用）：仅上传成功的草稿按草稿序映射 AttachmentRef
+    ///（mediaId 必带 + mimeType/fileName/sizeBytes/width/height 展示回显字段）。
+    private func readyDraftRefs() -> [AttachmentRef] {
+        var refs: [AttachmentRef] = []
+        for d in draftAttachments {
+            guard let u = d.upload else { continue }
+            refs.append(AttachmentRef(
+                mediaId: u.mediaId,
+                mimeType: u.mimeType,
+                fileName: d.fileName,
+                // UiMediaUpload.sizeBytes 为非空 Kotlin Long（Swift Int64）；AttachmentRef
+                // sizeBytes 为可空 Long?（Swift KotlinLong?）——此处装箱传入。
+                sizeBytes: KotlinLong(longLong: u.sizeBytes),
+                width: u.width,
+                height: u.height,
+            ))
+        }
+        return refs
+    }
+
+    /// PhotosPicker 选中变化消费：撤除用户在系统选择器里取消的项；新选中项入列处理。
+    /// 已入列项按 pickerItemIdentifier 去重（onChange 会对同批选中重放）。
+    @MainActor
+    private func consumePickedItems(_ items: [PhotosPickerItem]) {
+        let selectedIds = Set(items.compactMap(\.itemIdentifier))
+        // 选择器侧撤选 → 草稿 chip 同步撤下（本地 ✕ 撤除走 removeDraftAttachment，双通道一致）
+        draftAttachments.removeAll { d in
+            if let pid = d.pickerItemIdentifier, !selectedIds.contains(pid) { return true }
+            return false
+        }
+        let known = Set(draftAttachments.compactMap(\.pickerItemIdentifier))
+        for item in items {
+            guard let pid = item.itemIdentifier, !known.contains(pid),
+                  draftAttachments.count < Self.maxDraftAttachments else { continue }
+            addDraftAttachment(from: item, identifier: pid)
+        }
+    }
+
+    /// 单项入列：占位 chip（上传中）→ 拷入字节 → 压缩（R9）→ #23 上传 → 就绪/失败落位。
+    /// 上传直调不走幂等队列（HubStore.uploadMedia 注释）；失败呈失败态可重试，不静默。
+    @MainActor
+    private func addDraftAttachment(from item: PhotosPickerItem, identifier: String) {
+        let slot = DraftAttachment(
+            id: UUID(), pickerItemIdentifier: identifier, preview: nil,
+            fileName: "image-\(Int(Date().timeIntervalSince1970)).jpg",
+            upload: nil, error: nil, uploading: true, sourceData: nil,
+        )
+        draftAttachments.append(slot)
+        let slotId = slot.id
+        Task { @MainActor in
+            guard let raw = try? await item.loadTransferable(type: Data.self), !raw.isEmpty else {
+                if let idx = draftAttachments.firstIndex(where: { $0.id == slotId }) {
+                    draftAttachments[idx].uploading = false
+                    draftAttachments[idx].error = "无法读取所选图片"
+                }
+                return
+            }
+            guard let prepared = MediaImageProcessing.prepare(raw, fileName: "image-\(Int(Date().timeIntervalSince1970)).jpg") else {
+                if let idx = draftAttachments.firstIndex(where: { $0.id == slotId }) {
+                    draftAttachments[idx].uploading = false
+                    draftAttachments[idx].error = "无法识别的图片格式"
+                }
+                return
+            }
+            // 压缩失败早退前先落预览；继续走上传链
+            if let idx = draftAttachments.firstIndex(where: { $0.id == slotId }) {
+                draftAttachments[idx].preview = MediaImageProcessing.decodeForDisplay(prepared.data, maxPixel: 512)
+                draftAttachments[idx].sourceData = prepared.data
+            }
+            uploadDraft(slotId: slotId, data: prepared.data, mime: prepared.mime,
+                        fileName: prepared.fileName, width: prepared.width, height: prepared.height)
+        }
+    }
+
+    /// #23 上传执行（retryDraftUpload 复用；完成落 upload/error 态，不动用户已见 chip 序）。
+    /// width/height 透传为 nil 时不带表单字段（契约可选；不发明 0 值）。
+    @MainActor
+    private func uploadDraft(slotId: UUID, data: Data, mime: String,
+                             fileName: String, width: Int?, height: Int?) {
+        hub.uploadMedia(
+            conversationId: conv.conversationId,
+            data: data, mime: mime, fileName: fileName,
+            width: width, height: height,
+        ) { upload, error in
+            guard let idx = draftAttachments.firstIndex(where: { $0.id == slotId }) else { return }
+            draftAttachments[idx].uploading = false
+            if let upload {
+                draftAttachments[idx].upload = upload
+                draftAttachments[idx].error = nil
+            } else {
+                // 显式失败态（HUB-BIZ-004 类型/大小拒绝、网络不可达等），chip 点按重试
+                draftAttachments[idx].error = error ?? "上传失败"
+            }
+        }
+    }
+
+    /// 失败 chip 点按重试：用已压缩字节重走 #23（服务端限流 20 次/分/设备，重试节流由
+    /// 用户点按节律天然承担）。
+    @MainActor
+    private func retryDraftUpload(_ id: UUID) {
+        guard let idx = draftAttachments.firstIndex(where: { $0.id == id }),
+              draftAttachments[idx].upload == nil,
+              !draftAttachments[idx].uploading,
+              let data = draftAttachments[idx].sourceData else { return }
+        draftAttachments[idx].error = nil
+        draftAttachments[idx].uploading = true
+        // 压缩产物恒为 jpeg（MediaImageProcessing.prepare 契约）；尺寸从预览取回，
+        // 预览缺失（罕见：上传成功前预览已就绪是常例）即不带该字段。
+        let w = draftAttachments[idx].preview.map { Int($0.size.width * $0.scale) }
+        let h = draftAttachments[idx].preview.map { Int($0.size.height * $0.scale) }
+        uploadDraft(slotId: id, data: data, mime: "image/jpeg",
+                    fileName: draftAttachments[idx].fileName, width: w, height: h)
+    }
+
+    /// chip ✕ 撤除：清草稿并同步撤 picker 选中（防 onChange 重放入列）。
+    @MainActor
+    private func removeDraftAttachment(_ id: UUID) {
+        guard let idx = draftAttachments.firstIndex(where: { $0.id == id }) else { return }
+        let pid = draftAttachments[idx].pickerItemIdentifier
+        draftAttachments.remove(at: idx)
+        if let pid {
+            pickedItems.removeAll { $0.itemIdentifier == pid }
+        }
+    }
+}
+
+/// 草稿附件（composer 本地态，非投影数据）：upload 非 nil = 就绪（可随发送提交）；
+/// uploading/error 为上传在途与失败态；sourceData = 已压缩字节（重试用，不落盘）。
+struct DraftAttachment: Identifiable {
+    let id: UUID
+    /// PhotosPickerItem.itemIdentifier（撤选同步用；nil = 非本会话 picker 来源）。
+    let pickerItemIdentifier: String?
+    /// chip 预览缩略图（512px 解码）。
+    var preview: UIImage?
+    /// 展示元数据文件名（仅随 AttachmentRef 回显；服务端永不进存储路径）。
+    var fileName: String
+    var upload: UiMediaUpload?
+    var error: String?
+    var uploading: Bool
+    var sourceData: Data?
+}
+
+/// 草稿附件 chip 行：预览缩略图 + 状态角标（上传中 spinner / 失败 ⚠ 可点重试 / ✕ 撤除）。
+private struct DraftAttachmentChipsRow: View {
+    @Binding var drafts: [DraftAttachment]
+    let onRemove: (UUID) -> Void
+    let onRetry: (UUID) -> Void
+    @Environment(\.inkColors) private var ink
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(drafts) { d in
+                chip(d)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func chip(_ d: DraftAttachment) -> some View {
+        ZStack(alignment: .topTrailing) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10).fill(ink.surfaceTertiary)
+                if let preview = d.preview {
+                    Image(uiImage: preview)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 52, height: 52)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                } else {
+                    Image(systemName: "photo").foregroundStyle(.secondary)
+                }
+                if d.uploading {
+                    ProgressView().controlSize(.small)
+                }
+                if d.error != nil {
+                    // 失败态：整 chip 可点重试（显式降级，不静默——wp-9 纪律同源）
+                    RoundedRectangle(cornerRadius: 10).fill(Color.red.opacity(0.18))
+                    Image(systemName: "arrow.clockwise")
+                        .font(.caption.bold())
+                        .foregroundStyle(.red)
+                }
+            }
+            .frame(width: 52, height: 52)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if d.error != nil { onRetry(d.id) }
+            }
+            .accessibilityLabel(d.error != nil
+                ? "图片上传失败，点按重试"
+                : (d.uploading ? "图片上传中" : "已选图片附件"))
+            // ✕ 撤除角标
+            Button {
+                onRemove(d.id)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .background(Circle().fill(.thinMaterial))
+            }
+            .offset(x: 6, y: -6)
+            .accessibilityLabel("移除该图片")
+        }
     }
 }
 
@@ -1421,14 +1676,21 @@ private final class ScrollProbeBox {
                         } else if m.role == "user" {
                             // wp-8③：空 SENDING 用户行维持发送中态——不渲染空气泡，占位点显示、
                             // 状态徽标照常翻转（sending→delivered）。
-                            Text(m.content.isEmpty ? "…" : m.content)
-                                .foregroundStyle(m.content.isEmpty ? Color.secondary : Color.primary)
+                            // v1.2.0 多模态：空正文 + 有附件（纯图消息）不再落「…」占位——媒体
+                            // 由下方 attachmentsRow 渲染，文本段整段省略。
+                            if !m.content.isEmpty {
+                                Text(m.content)
+                            } else if m.attachments.isEmpty {
+                                Text("…")
+                                    .foregroundStyle(Color.secondary)
+                            }
                         } else if m.state == "streaming" {
                             // wp-7 可选增强：流式行 typewriter 渐进揭示——数据 2s 一块、渲染逐字放出
                             StreamingTypewriter(content: m.content)
-                        } else if m.content.isEmpty {
+                        } else if m.content.isEmpty && m.attachments.isEmpty {
                             // wp-8③：final/failed 空正文助手行渲染占位文案，不再出现空气泡
                             //（勘察确认投影层零过滤：空 content 行照常入库，防线只能在渲染侧）。
+                            // v1.2.0 多模态：有附件（含生图外链）时空正文不再落占位——媒体即内容。
                             Text("（无文本内容）")
                                 .font(.footnote)
                                 .italic()
@@ -1444,12 +1706,23 @@ private final class ScrollProbeBox {
                             if m.role == "assistant" && cardHit != nil && m.state == "final" && !m.content.isEmpty {
                                 // 交互卡行：卡自带底色边框，不再套消息气泡底
                                 Color.clear
+                            } else if m.content.isEmpty && !m.attachments.isEmpty {
+                                // v1.2.0 多模态：纯附件行（空正文 + 附件）——文本段为空，不套
+                                // 空气泡壳（媒体由下方 attachmentsRow 直陈，防「空壳+图」双底）
+                                Color.clear
                             } else {
                                 RoundedRectangle(cornerRadius: 16)
                                     .fill(m.role == "user" ? Color.accentColor.opacity(0.24) : ink.surfaceTertiary)
                             }
                         }
                     )
+                    // v1.2.0 多模态：行级媒体附件（user 行 = 上传引用回显，source=hub 走 #24
+                    // Bearer 自定义 loader；assistant 行 = Bridge 规范化的外发产物引用，
+                    // source=external）。纯图消息（空正文+附件）由此渲染，不再落占位文本。
+                    if !m.attachments.isEmpty {
+                        MessageAttachmentsRow(attachments: m.attachments)
+                            .padding(.horizontal, 6)
+                    }
                     // 消息时间（桌面 MessageRow formatTs 同族 parity，2026-11-06）：气泡下
                     // caption2 弱化行——用户行与状态徽标同行（桌面同款），解析失败/缺省省略。
                     if m.role == "user" {

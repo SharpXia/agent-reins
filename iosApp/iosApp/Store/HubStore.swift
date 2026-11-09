@@ -471,6 +471,52 @@ final class HubStore {
         bridge.hubSend(conversationId: c.conversationId, text: text)
     }
 
+    // ---------- v1.2.0 多模态 v1（设计稿 docs/multimodal-design-20261108.md §6 iOS 行） ----------
+
+    /// 发送带附件消息（与 [send] 同通道同贴底语义；附件引用 = 端点 #23 上传产物，
+    /// ≤4 项、mediaId 必带）。契约「message 与 attachments 至少一项非空」由调用方保证
+    ///（composer 侧 refs 非空或文本非空才可发）。
+    func sendWithAttachments(_ text: String, refs: [AttachmentRef]) {
+        guard let c = selected, !refs.isEmpty else { return }
+        ownSendScrollPending = true
+        bridge.hubSendWithAttachments(conversationId: c.conversationId, text: text, attachments: refs)
+    }
+
+    /// 媒体上传（端点 #23 直调，不走幂等队列——见桥 [AgentBridge.hubUploadMedia] 注释）。
+    /// onDone upload 非 null = 成功（mediaId 随 sendWithAttachments 提交；草稿挂 chip 用）；
+    /// null = 失败（未登录/网络不可达/类型大小拒绝 400 HUB-BIZ-004 等），error = 人读原因，
+    /// 调用方须显式呈现失败 + 可重试，不静默。
+    func uploadMedia(
+        conversationId: String,
+        data: Data,
+        mime: String,
+        fileName: String?,
+        width: Int?,
+        height: Int?,
+        onDone: @escaping (UiMediaUpload?, String?) -> Void,
+    ) {
+        let bytes = kotlinByteArray(from: data)
+        bridge.hubUploadMedia(
+            conversationId: conversationId,
+            bytes: bytes,
+            mime: mime,
+            fileName: fileName,
+            width: width.map { KotlinInt(int: Int32($0)) },
+            height: height.map { KotlinInt(int: Int32($0)) },
+        ) { upload, error in
+            onDone(upload, error)
+        }
+    }
+
+    /// 媒体内容拉取（端点 #24 Bearer 分支；凭据只在 KMP 内圈，本方法即 Swift 侧唯一出口——
+    /// 消息行媒体加载器 [HubMediaLoader] 专用）。onDone data 非 null = 成功（原始字节）；
+    /// null = 失败，error = 人读原因（加载器只分「有图/失败」两态）。
+    func fetchMedia(mediaId: String, onDone: @escaping (Data?, String?) -> Void) {
+        bridge.hubFetchMedia(mediaId: mediaId) { bytes, error in
+            onDone(bytes.map(dataFromKotlinByteArray), error)
+        }
+    }
+
     // ---------- 崩溃防护 + 本地清理（2026-11-07 UX 轮） ----------
 
     /// 后台/锁屏暂停同步栈（App.swift scenePhase 离开 active 驱动）：桥侧停连接循环并优雅

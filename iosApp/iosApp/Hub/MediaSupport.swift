@@ -332,7 +332,7 @@ struct ExternalLinkChip: View {
     }
 }
 
-/// 消息行附件横排（≤4 项；气泡内 VStack 之下一行）。
+/// 消息行附件横排（≤9 项，v1.2.1 契约上限；气泡内 VStack 之下一行）。
 struct MessageAttachmentsRow: View {
     let attachments: [UiAttachment]
 

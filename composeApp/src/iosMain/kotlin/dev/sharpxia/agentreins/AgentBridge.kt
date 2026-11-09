@@ -25,6 +25,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 
 /**
@@ -55,6 +58,12 @@ class AgentBridge {
 
     /** wp-13：审批请求通知回调（Swift 注册；见 [hubWatchApprovalRequested]）。 */
     private var approvalRequestedSink: ((conversationId: String) -> Unit)? = null
+
+    /**
+     * v1.3 通知摘要轮：assistant final 权威行回调（Swift 注册；见 [hubWatchReplyMessage]）——
+     * 携带消息正文与附件数，供 Swift 侧生成通知摘要（剥 markdown/纯附件「[图片]×N」）。
+     */
+    private var replyMessageSink: ((conversationId: String, content: String, attachmentCount: Int) -> Unit)? = null
 
     /** 投影库句柄进程内唯一（登出清表后复用同一连接，重登从空库 bootstrap）。 */
     private val hubDb: HubDatabase? by lazy { openHubDatabase(createHubDriver()) }
@@ -204,9 +213,8 @@ class AgentBridge {
      * run 终态事件回调（wp-13 通知面；Swift 启动时注册一次，重复调用覆盖旧回调）：
      * conversationId = 桥侧经 hubConvKeys 映射解析（与投影 resolveConversation 同一通道①；
      * 未映射会话为空串，调用方不得编造归属）、runId = 信封 runId、status ∈ completed/failed。
-     * 回调在主线程（同步引擎运行于本桥 scope = Dispatchers.Main）。回复通知不走本通道：
-     * assistant final 以会话列表 Flow 的 unread 增量为源（「非当前打开」是 Swift UI 态，
-     * 静音判定与点按跳转也都需要 conversationId）；审批走 [hubWatchApprovalRequested]。
+     * 回调在主线程（同步引擎运行于本桥 scope = Dispatchers.Main）。回复通知（v1.3 起）同样
+     * 走本通道 MESSAGE_CREATED 分支（摘要需要消息正文与附件数）；审批走 [hubWatchApprovalRequested]。
      */
     fun hubWatchRunTerminal(onEvent: (conversationId: String, runId: String, status: String) -> Unit) {
         runTerminalSink = onEvent
@@ -225,10 +233,22 @@ class AgentBridge {
     }
 
     /**
+     * assistant final 权威行回调（v1.3 iOS 通知摘要轮；Swift 启动时注册一次，重复调用覆盖旧回调）：
+     * message.created 事件（role≠user）到达即回调 (conversationId, content, attachmentCount)。
+     * 动机：回复通知的正文摘要需要消息正文与附件数（剥 markdown / 纯附件「[图片]×N」）——
+     * 会话卡片 preview 只是裸 content，纯附件行剥不出附件计数；事件旁路是唯一可得面。
+     * conversationId = hubConvKeys 解析（未映射 = 空串，Swift 侧按归属可得性显式降级，不编造）；
+     * 载荷形状漂移（缺 role/content）按空值降级，不抛不崩。回调在主线程（同 [hubWatchRunTerminal]）。
+     */
+    fun hubWatchReplyMessage(onEvent: (conversationId: String, content: String, attachmentCount: Int) -> Unit) {
+        replyMessageSink = onEvent
+    }
+
+    /**
      * DefaultHubClient eventTap（wp-13）：投影应用后按信封类型分派通知触发面。取 run 终态
      * completed/failed——run.aborted 是用户主动 Stop 的自致结果，不提醒——与
-     * approval.requested（回复通知仍走投影库 Flow 面：unread 增量与「非当前打开」判定都在
-     * Swift 会话列表态）。conversationId 经 hubConvKeys 直查（信封 gatewayId + sessionKey，
+     * approval.requested 与 message.created（v1.3 起：回复通知触发面自会话列表 unread 差异
+     * 迁移到事件旁路，摘要需要正文与附件数）。conversationId 经 hubConvKeys 直查（信封 gatewayId + sessionKey，
      * run/approval 域必带 sessionKey；wp-4 起两跳连结行也在此解析出——通知面放开两跳归属）；
      * 未映射 = 空串透传，由 Swift 侧显式降级。
      * wp-4 修法二发起方门（两端协调器同口径 = RunOriginRegistry.isRunLocal 消费）：run 终态仅
@@ -251,7 +271,18 @@ class AgentBridge {
                 runTerminalSink?.invoke(conversationId, runId, status)
             }
             EventEnvelope.APPROVAL_REQUESTED -> approvalRequestedSink?.invoke(conversationId)
-            else -> Unit // 其余事件不走通知面（回复 = 会话列表 Flow 的 unread 增量）
+            EventEnvelope.MESSAGE_CREATED -> {
+                // v1.3 通知摘要轮：assistant final 权威行（role≠user）→ 摘要数据面
+                //（content + 附件数；用户行是本端消息回显，不提醒）。载荷解析宽松降级
+                //（缺键/形状漂移 = 空值，与 DefaultEventProjector「宽松解析、缺键降级」同纪律）。
+                val obj = runCatching { envelope.data.jsonObject }.getOrNull() ?: return
+                val role = (obj["role"] as? JsonPrimitive)?.contentOrNull
+                if (role == "user") return
+                val content = (obj["content"] as? JsonPrimitive)?.contentOrNull ?: ""
+                val attachmentCount = (obj["attachments"] as? JsonArray)?.size ?: 0
+                replyMessageSink?.invoke(conversationId, content, attachmentCount)
+            }
+            else -> Unit // 其余事件不走通知面（回复通知见 MESSAGE_CREATED 分支）
         }
     }
 

@@ -354,7 +354,8 @@ private struct HubConversationRow: View {
 /// 工具审批（wp-9）：归属本会话的 pending 审批卡内嵌于时间线上方，批准/拒绝走幂等队列。
 struct HubChatView: View {
     @State private var hub = HubStore.shared
-    @State private var draft = ""
+    // v1.3 发送链：草稿文本与 pending 附件住在 HubStore 会话草稿层（可存活模型层，per
+    // conversationId）——视图重建/切后台/滚动往返不丢（验收④），本视图只持 picker 选中态。
     @State private var renaming = false
     @State private var renameDraft = ""
     @State private var compacting = false
@@ -385,11 +386,9 @@ struct HubChatView: View {
     @State private var bottomJumpActive = false
     /// #3（2026-11-07 UX 轮）：待删除确认的本地消息（长按菜单入口 → 会话页二次确认弹层）。
     @State private var pendingDeleteMessage: UiMessage?
-    /// v1.2.0 多模态（设计稿 §6 composer 行）：草稿附件——PhotosPicker 选中 → 压缩上传
-    ///（hub.uploadMedia，端点 #23）→ 上传成功挂 mediaId 就绪 chip；发送时随
-    /// hub.sendWithAttachments 提交 AttachmentRef（mediaId 引用，≤4 项）。
-    @State private var draftAttachments: [DraftAttachment] = []
-    /// PhotosPicker 绑定项（onChange 消费 → 逐项处理；chip 撤除时同步撤选，防选中态与草稿漂移）。
+    /// v1.3 发送链：PhotosPicker 绑定项（视图本地瞬态；onChange 消费 = 只增入列，草稿槽
+    /// 撤除唯一通道是 ✕ 按钮——撤选同步见 consumePickedItems 注释）。pending 附件本体在
+    /// HubStore 会话草稿层（可存活），本绑定只服务系统选择器的选中态回显。
     @State private var pickedItems: [PhotosPickerItem] = []
     /// #3'（2026-11-07 b8 口径返工）：回底按钮显隐唯一依据——距底 > 8pt 容差即显示（
     /// 「最后可见项不是底部哨兵」），≤ 容差即隐藏。b6 的 max(贴底容差, 末行实测高度)+迟滞
@@ -514,13 +513,25 @@ struct HubChatView: View {
     }
 
     /// #4（2026-11-08 UX 轮，用户改版）：草稿有内容 = 发送键优先——run 活跃也可直接发
-    /// 新消息（不打断进行中 run，Gateway 排队语义，消息按 run 态落 queued 徽标）。
-    /// v1.2.0 多模态：就绪附件（上传成功的 mediaId）计入草稿内容——纯图片消息允许空文本
-    /// （契约 v1.2.0「message 与 attachments 至少一项非空」）；上传在途/失败的不计入（发了
-    /// 也只有空引用，服务端按缺 mediaId 拒绝）。
+    /// 新消息（不打断进行中 run，排队语义，消息按 run 态落 queued 徽标）。
+    /// v1.3 发送链：文本与 pending 附件（任意上传态）都计入草稿内容——纯图片消息允许空
+    /// 文本（契约「message 与 attachments 至少一项非空」）；未就绪的附件由发送链补传
+    ///（sendComposerDraft），不再是发送键的禁用条件。
     private var draftHasContent: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || draftAttachments.contains { $0.upload != nil }
+        hub.draftHasContent(conv.conversationId)
+    }
+
+    /// 草稿文本（store 可存活层读侧；写入走 draftBinding set 侧）。
+    private var draftText: String {
+        hub.draft(for: conv.conversationId).text
+    }
+
+    /// 草稿文本双向绑定（TextField ↔ store 会话草稿层）。
+    private var draftBinding: Binding<String> {
+        Binding(
+            get: { hub.draft(for: conv.conversationId).text },
+            set: { hub.setDraftText($0, conversationId: conv.conversationId) },
+        )
     }
 
     /// wp-14：斜杠命令建议——draft 起手 "/" 且未进入参数书写段时给出目录前缀命中；普通消息、
@@ -528,7 +539,7 @@ struct HubChatView: View {
     /// #21（v1.1 additive 2026-11-07）：数据源 = 动态目录 ∪ 静态六合并（动态优先，见
     /// SlashCommandCatalog.merged）；动态列表取 HubStore 缓存，未拉取/未命中即纯静态六。
     private var slashSuggestions: [SlashCommand] {
-        SlashCommandCatalog.suggestions(forDraft: draft, from: slashCommands)
+        SlashCommandCatalog.suggestions(forDraft: draftText, from: slashCommands)
     }
 
     /// #21：合并命令目录——动态列表读 HubStore 缓存（fetchCommandsIfNeeded 在 composer
@@ -542,13 +553,13 @@ struct HubChatView: View {
     /// 裸发由 Gateway 回用法提示，需要写参数时走行尾 ✎ 预填路径（prefillSlashCommand）。
     private func selectSlashCommand(_ cmd: SlashCommand) {
         hub.send(cmd.name)
-        draft = ""
+        hub.setDraftText("", conversationId: conv.conversationId)
     }
 
     /// 2026-11-08 修复轮：斜杠命令行尾 ✎ = 预填命令文本（含尾随空格）进输入框续写参数，
     /// 等待用户发送（不直接发送）。
     private func prefillSlashCommand(_ cmd: SlashCommand) {
-        draft = cmd.name + " "
+        hub.setDraftText(cmd.name + " ", conversationId: conv.conversationId)
     }
 
     /// wp-9：会话页内嵌审批卡的数据源——只挂归属本会话（conversationId 命中）的 pending 审批；
@@ -837,43 +848,64 @@ struct HubChatView: View {
                 )
                 .padding(.horizontal, 12).padding(.top, 6)
             }
-            // v1.2.0 多模态：草稿附件 chip 行（选中即入列：上传在途 spinner / 就绪预览 /
-            // 失败重试态；点 ✕ 撤除并同步撤 picker 选中）。
-            if !draftAttachments.isEmpty {
+            // v1.3 发送链：pending 附件预览区（TG 同款——选完立即呈现于输入框上方：上传在途
+            // spinner / 就绪预览 / 失败重试态；点 ✕ 撤除并同步撤 picker 选中；点缩略图走
+            // openPendingPreview 查看器接入点）。数据源 = HubStore 会话草稿层。
+            let pendingDraft = hub.draft(for: conv.conversationId)
+            if !pendingDraft.attachments.isEmpty {
                 DraftAttachmentChipsRow(
-                    drafts: $draftAttachments,
-                    onRemove: removeDraftAttachment,
-                    onRetry: retryDraftUpload,
+                    drafts: pendingDraft.attachments,
+                    onRemove: { id in
+                        if let pid = hub.draft(for: conv.conversationId).attachments
+                            .first(where: { $0.id == id })?.pickerItemIdentifier {
+                            pickedItems.removeAll { $0.itemIdentifier == pid }
+                        }
+                        hub.removeDraftAttachment(conv.conversationId, slotId: id)
+                    },
+                    onRetry: { hub.retryDraftUpload(conv.conversationId, slotId: $0) },
+                    onOpenPreview: openPendingPreview,
                 )
                 .padding(.horizontal, 12).padding(.top, 8)
+            }
+            // v1.3 发送链：发送失败显式降级（任一附件补传失败 = 整体不发送，pending 区保留）
+            if let sendErr = hub.draftSendError[conv.conversationId] {
+                Label {
+                    Text(sendErr)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                }
+                .font(.caption)
+                .foregroundStyle(.red.opacity(0.9))
+                .padding(.horizontal, 12).padding(.top, 4)
             }
             Divider()
             // #2'（2026-11-07 二轮）：原「运行中发送将排队」composer 提示移除——排队语义
             // 上移为发送消息自身的「排队中」状态徽标（信息在消息现场，不再占 composer 行）。
             HStack(spacing: 10) {
-                // v1.2.0 多模态：图片选择入口（PHPicker 出程式面板，无需相册权限）；
-                // 上限 4 张（契约 AttachmentRef ≤4）。上传/失败细节在 chip 行呈现。
+                // v1.3 发送链：图片选择入口（PHPicker 出程式面板，无需相册权限）；多选上限
+                // 9 张（契约 v1.2.1 attachments maxItems）。上传/失败细节在 pending 预览区呈现。
                 PhotosPicker(
                     selection: $pickedItems,
-                    maxSelectionCount: Self.maxDraftAttachments,
+                    maxSelectionCount: HubStore.maxDraftAttachments,
                     matching: .images,
                 ) {
                     Image(systemName: "photo")
                         .font(.title3)
                 }
-                .accessibilityLabel("添加图片（最多 \(Self.maxDraftAttachments) 张）")
-                TextField("发消息…", text: $draft, axis: .vertical)
+                .accessibilityLabel("添加图片（最多 \(HubStore.maxDraftAttachments) 张）")
+                TextField("发消息…", text: draftBinding, axis: .vertical)
                     .lineLimit(1...4)
                     .padding(8)
                     .background(RoundedRectangle(cornerRadius: 18).fill(ink.surfaceTertiary))
                     // #21：草稿以 "/" 起手时按需拉取动态命令目录（TTL 5 分钟缓存 + 在途去重
-                    // 在 HubStore.fetchCommandsIfNeeded；其余输入空转零网络）。
-                    .onChange(of: draft) { _, new in
+                    // 在 HubStore.fetchCommandsIfNeeded；其余输入空转零网络）。观察源 = store
+                    // 草稿文本（可存活层），行为与旧视图 @State 同型。
+                    .onChange(of: draftText) { _, new in
                         hub.fetchCommandsIfNeeded(conversationId: conv.conversationId, draft: new)
                     }
                 if isRunActive && canCancelRun && !draftHasContent {
                     // wp-8② + #4（2026-11-08 UX 轮改版）：Stop 按钮仅在「活跃 run 且草稿为空」
-                    // 时占键位——草稿有内容（文本或就绪附件）时发送键优先（发送新消息不打断
+                    // 时占键位——草稿有内容（文本或 pending 附件）时发送键优先（发送新消息不打断
                     // 进行中 run，排队语义见消息 queued 徽标）；中止后部分输出保留由 Gateway
                     // 权威收敛（run.aborted 回流投影库，UI 只翻转回发送键）。终止随时可经斜杠
                     // /stop（静态目录在列）。
@@ -889,25 +921,22 @@ struct HubChatView: View {
                     // 走排队语义），旁挂「结束中」弱提示说明 run 在途。此前禁用 Stop 独占 +
                     // 发送键被替换 = 服务端聚合一旦卡 true 用户既不能发也不能停（真机实测：
                     // roster 瞬态信号把会话活跃 run 卡死后 composer 整体锁死）。
-                    // v1.2.0 多模态：发送链二分——无就绪附件走 hub.send 纯文本（v1.1 字节级
-                    // 同形）；有就绪附件走 hub.sendWithAttachments（mediaId 引用集）。空文本 +
-                    // 纯图片合法（契约「至少一项非空」由本守卫与 draftHasContent 双侧保证）。
-                    Button {
-                        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let refs = readyDraftRefs()
-                        guard !text.isEmpty || !refs.isEmpty else { return }
-                        if refs.isEmpty {
-                            hub.send(text)
-                        } else {
-                            hub.sendWithAttachments(text, refs: refs)
+                    // v1.3 发送链：发送 = HubStore.sendComposerDraft（逐槽补传 → 一条消息发出，
+                    // 文本与全部 pending 图同发；纯文本走 hub.send v1.1 同形通道）。发送在途 =
+                    // loading 态占键位 + 防重复点击（验收③）；成功回调清 picker 选中态，
+                    // pending 区/文本清空由 store 承担。
+                    if hub.sendingDraftFor.contains(conv.conversationId) {
+                        ProgressView()
+                            .frame(width: 28, height: 28)
+                            .accessibilityLabel("发送中")
+                    } else {
+                        Button {
+                            sendDraft()
+                        } label: {
+                            Image(systemName: "arrow.up.circle.fill").font(.title2)
                         }
-                        draft = ""
-                        draftAttachments = []
-                        pickedItems = []
-                    } label: {
-                        Image(systemName: "arrow.up.circle.fill").font(.title2)
+                        .disabled(!draftHasContent)
                     }
-                    .disabled(!draftHasContent)
                     if isRunActive && !canCancelRun {
                         Text("结束中")
                             .font(.caption2)
@@ -1035,170 +1064,65 @@ struct HubChatView: View {
         return "\(hub.messages.count)|\(last.messageId)|\(last.state)|\(c.utf8.count)|\(c.prefix(16))|\(c.suffix(64))"
     }
 
-    // ── v1.2.0 多模态：草稿附件链（PhotosPicker → 压缩 → #23 上传 → 发送引用集） ──
+    // ── v1.3 发送链（TG 水准）：选图消费 + 发送 + 查看器接入点 ──
 
-    /// 附件上限（契约 AttachmentRef ≤4 / 设计稿 composer 行「最高 4 张」）。
-    private static let maxDraftAttachments = 4
-
-    /// 就绪引用集（发送键动作取用）：仅上传成功的草稿按草稿序映射 AttachmentRef
-    ///（mediaId 必带 + mimeType/fileName/sizeBytes/width/height 展示回显字段）。
-    private func readyDraftRefs() -> [AttachmentRef] {
-        var refs: [AttachmentRef] = []
-        for d in draftAttachments {
-            guard let u = d.upload else { continue }
-            refs.append(AttachmentRef(
-                mediaId: u.mediaId,
-                mimeType: u.mimeType,
-                fileName: d.fileName,
-                // UiMediaUpload.sizeBytes 为非空 Kotlin Long（Swift Int64）；AttachmentRef
-                // sizeBytes 为可空 Long?（Swift KotlinLong?）——此处装箱传入。
-                sizeBytes: KotlinLong(longLong: u.sizeBytes),
-                width: u.width,
-                height: u.height,
-            ))
+    /// 发送（composer 发送键动作）：链路在 HubStore.sendComposerDraft（补传 → 一条消息
+    /// → loading/防重 → 成功清空 pending 区与文本）。成功后本视图只清 picker 选中态
+    ///（草稿槽/文本清空由 store 承担）；失败保持一切现状，错误由 store 显式降级展示。
+    private func sendDraft() {
+        hub.sendComposerDraft(conv) { ok, _ in
+            if ok { pickedItems = [] }
         }
-        return refs
     }
 
-    /// PhotosPicker 选中变化消费：撤除用户在系统选择器里取消的项；新选中项入列处理。
-    /// 已入列项按 pickerItemIdentifier 去重（onChange 会对同批选中重放）。
+    /// PhotosPicker 选中变化消费：**只增入列**（同 identifier 去重，onChange 对同批选中重放）。
+    /// 与旧版差异：不再按「选中集差集」撤槽——pending 槽本体在 store 可存活层，视图重建后
+    /// pickedItems 归零，若按差集撤除会把未发送的 pending 图一并抹掉（验收④「pending 图与
+    /// 文本不得丢失」）；槽位撤除唯一通道 = 预览区 ✕ 按钮（同步撤 picker 选中，见 body 内
+    /// onRemove），系统选择器内的取消勾选不影响已入列槽位。
     @MainActor
     private func consumePickedItems(_ items: [PhotosPickerItem]) {
-        let selectedIds = Set(items.compactMap(\.itemIdentifier))
-        // 选择器侧撤选 → 草稿 chip 同步撤下（本地 ✕ 撤除走 removeDraftAttachment，双通道一致）
-        draftAttachments.removeAll { d in
-            if let pid = d.pickerItemIdentifier, !selectedIds.contains(pid) { return true }
-            return false
+        let known = Set(hub.draft(for: conv.conversationId).attachments.compactMap(\.pickerItemIdentifier))
+        let fresh = items.filter { item in
+            guard let pid = item.itemIdentifier else { return false }
+            return !known.contains(pid)
         }
-        let known = Set(draftAttachments.compactMap(\.pickerItemIdentifier))
-        for item in items {
-            guard let pid = item.itemIdentifier, !known.contains(pid),
-                  draftAttachments.count < Self.maxDraftAttachments else { continue }
-            addDraftAttachment(from: item, identifier: pid)
-        }
+        guard !fresh.isEmpty else { return }
+        hub.addPickedImages(conversationId: conv.conversationId, items: fresh)
     }
 
-    /// 单项入列：占位 chip（上传中）→ 拷入字节 → 压缩（R9）→ #23 上传 → 就绪/失败落位。
-    /// 上传直调不走幂等队列（HubStore.uploadMedia 注释）；失败呈失败态可重试，不静默。
-    @MainActor
-    private func addDraftAttachment(from item: PhotosPickerItem, identifier: String) {
-        let slot = DraftAttachment(
-            id: UUID(), pickerItemIdentifier: identifier, preview: nil,
-            fileName: "image-\(Int(Date().timeIntervalSince1970)).jpg",
-            upload: nil, error: nil, uploading: true, sourceData: nil,
-        )
-        draftAttachments.append(slot)
-        let slotId = slot.id
-        Task { @MainActor in
-            guard let raw = try? await item.loadTransferable(type: Data.self), !raw.isEmpty else {
-                if let idx = draftAttachments.firstIndex(where: { $0.id == slotId }) {
-                    draftAttachments[idx].uploading = false
-                    draftAttachments[idx].error = "无法读取所选图片"
-                }
-                return
-            }
-            guard let prepared = MediaImageProcessing.prepare(raw, fileName: "image-\(Int(Date().timeIntervalSince1970)).jpg") else {
-                if let idx = draftAttachments.firstIndex(where: { $0.id == slotId }) {
-                    draftAttachments[idx].uploading = false
-                    draftAttachments[idx].error = "无法识别的图片格式"
-                }
-                return
-            }
-            // 压缩失败早退前先落预览；继续走上传链
-            if let idx = draftAttachments.firstIndex(where: { $0.id == slotId }) {
-                draftAttachments[idx].preview = MediaImageProcessing.decodeForDisplay(prepared.data, maxPixel: 512)
-                draftAttachments[idx].sourceData = prepared.data
-            }
-            uploadDraft(slotId: slotId, data: prepared.data, mime: prepared.mime,
-                        fileName: prepared.fileName, width: prepared.width, height: prepared.height)
-        }
-    }
-
-    /// #23 上传执行（retryDraftUpload 复用；完成落 upload/error 态，不动用户已见 chip 序）。
-    /// width/height 透传为 nil 时不带表单字段（契约可选；不发明 0 值）。
-    @MainActor
-    private func uploadDraft(slotId: UUID, data: Data, mime: String,
-                             fileName: String, width: Int?, height: Int?) {
-        hub.uploadMedia(
-            conversationId: conv.conversationId,
-            data: data, mime: mime, fileName: fileName,
-            width: width, height: height,
-        ) { upload, error in
-            guard let idx = draftAttachments.firstIndex(where: { $0.id == slotId }) else { return }
-            draftAttachments[idx].uploading = false
-            if let upload {
-                draftAttachments[idx].upload = upload
-                draftAttachments[idx].error = nil
-            } else {
-                // 显式失败态（HUB-BIZ-004 类型/大小拒绝、网络不可达等），chip 点按重试
-                draftAttachments[idx].error = error ?? "上传失败"
-            }
-        }
-    }
-
-    /// 失败 chip 点按重试：用已压缩字节重走 #23（服务端限流 20 次/分/设备，重试节流由
-    /// 用户点按节律天然承担）。
-    @MainActor
-    private func retryDraftUpload(_ id: UUID) {
-        guard let idx = draftAttachments.firstIndex(where: { $0.id == id }),
-              draftAttachments[idx].upload == nil,
-              !draftAttachments[idx].uploading,
-              let data = draftAttachments[idx].sourceData else { return }
-        draftAttachments[idx].error = nil
-        draftAttachments[idx].uploading = true
-        // 压缩产物恒为 jpeg（MediaImageProcessing.prepare 契约）；尺寸从预览取回，
-        // 预览缺失（罕见：上传成功前预览已就绪是常例）即不带该字段。
-        let w = draftAttachments[idx].preview.map { Int($0.size.width * $0.scale) }
-        let h = draftAttachments[idx].preview.map { Int($0.size.height * $0.scale) }
-        uploadDraft(slotId: id, data: data, mime: "image/jpeg",
-                    fileName: draftAttachments[idx].fileName, width: w, height: h)
-    }
-
-    /// chip ✕ 撤除：清草稿并同步撤 picker 选中（防 onChange 重放入列）。
-    @MainActor
-    private func removeDraftAttachment(_ id: UUID) {
-        guard let idx = draftAttachments.firstIndex(where: { $0.id == id }) else { return }
-        let pid = draftAttachments[idx].pickerItemIdentifier
-        draftAttachments.remove(at: idx)
-        if let pid {
-            pickedItems.removeAll { $0.itemIdentifier == pid }
-        }
+    /// pending 附件查看器接入点（v1.3 发送轮暴露）：点缩略图回调，参数 = 草稿序 index
+    ///（数据面 = hub.draft(for:).attachments）。
+    ///
+    /// TODO(查看器接线)：下一位施工员在此打开全屏 pending 预览查看器（sheet / fullScreenCover，
+    /// 初始页 = index，左右滑动遍历 pending 附件，可含 ✕ 撤除与发送前确认）。本轮只暴露
+    /// 入口不实现查看器——点按暂为 no-op。
+    private func openPendingPreview(_ index: Int) {
+        // TODO(查看器接线): 打开全屏查看器（初始页 index）
     }
 }
 
-/// 草稿附件（composer 本地态，非投影数据）：upload 非 nil = 就绪（可随发送提交）；
-/// uploading/error 为上传在途与失败态；sourceData = 已压缩字节（重试用，不落盘）。
-struct DraftAttachment: Identifiable {
-    let id: UUID
-    /// PhotosPickerItem.itemIdentifier（撤选同步用；nil = 非本会话 picker 来源）。
-    let pickerItemIdentifier: String?
-    /// chip 预览缩略图（512px 解码）。
-    var preview: UIImage?
-    /// 展示元数据文件名（仅随 AttachmentRef 回显；服务端永不进存储路径）。
-    var fileName: String
-    var upload: UiMediaUpload?
-    var error: String?
-    var uploading: Bool
-    var sourceData: Data?
-}
-
-/// 草稿附件 chip 行：预览缩略图 + 状态角标（上传中 spinner / 失败 ⚠ 可点重试 / ✕ 撤除）。
+/// pending 附件预览区（v1.3 发送链，TG 同款输入框上方缩略图行）：预览缩略图 + 状态角标
+///（上传中 spinner / 失败 ⚠ 可点重试 / ✕ 撤除）。点缩略图（非失败态）= openPendingPreview
+/// 查看器接入点（HubChatView TODO 标注）。草稿槽本体在 HubStore 会话草稿层，本行只读渲染。
 private struct DraftAttachmentChipsRow: View {
-    @Binding var drafts: [DraftAttachment]
+    let drafts: [DraftAttachment]
     let onRemove: (UUID) -> Void
     let onRetry: (UUID) -> Void
+    /// 点缩略图回调（参数 = 草稿序 index；查看器接线 TODO 在 HubChatView.openPendingPreview）。
+    let onOpenPreview: (Int) -> Void
     @Environment(\.inkColors) private var ink
 
     var body: some View {
         HStack(spacing: 8) {
-            ForEach(drafts) { d in
-                chip(d)
+            ForEach(Array(drafts.enumerated()), id: \.element.id) { index, d in
+                chip(d, index: index)
             }
             Spacer(minLength: 0)
         }
     }
 
-    private func chip(_ d: DraftAttachment) -> some View {
+    private func chip(_ d: DraftAttachment, index: Int) -> some View {
         ZStack(alignment: .topTrailing) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10).fill(ink.surfaceTertiary)
@@ -1225,11 +1149,11 @@ private struct DraftAttachmentChipsRow: View {
             .frame(width: 52, height: 52)
             .contentShape(Rectangle())
             .onTapGesture {
-                if d.error != nil { onRetry(d.id) }
+                if d.error != nil { onRetry(d.id) } else { onOpenPreview(index) }
             }
             .accessibilityLabel(d.error != nil
                 ? "图片上传失败，点按重试"
-                : (d.uploading ? "图片上传中" : "已选图片附件"))
+                : (d.uploading ? "图片上传中" : "已选图片附件，点按查看"))
             // ✕ 撤除角标
             Button {
                 onRemove(d.id)

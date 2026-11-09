@@ -51,9 +51,13 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
         post(kind: "approval", conversationId: conversationId, title: "有待审批", body: body)
     }
 
-    /// 新回复（assistant final 且非当前打开）：不携带消息正文。
-    func replyArrived(conversationId: String, label: String) {
-        post(kind: "reply", conversationId: conversationId, title: "有新回复", body: "「\(label)」有新的回复")
+    /// 新回复（assistant final 且非当前打开；v1.3 通知摘要轮）：title=会话名，
+    /// body=消息摘要（HubStore 侧 MessageSummary 生成：剥 markdown/合并空白/≤140，
+    /// 纯附件 =「[图片]」家族；summary 空串回退静态文案——空正文无附件行理论不存在，
+    /// 防御性兜底不虚构消息内容）。
+    func replyArrived(conversationId: String, label: String, summary: String) {
+        let body = summary.isEmpty ? "有新的回复" : summary
+        post(kind: "reply", conversationId: conversationId, title: label, body: body)
     }
 
     /// run 完成（run.completed）。

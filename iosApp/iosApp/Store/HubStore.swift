@@ -1,6 +1,33 @@
 import SwiftUI
 import UIKit
+import PhotosUI
 import composeApp
+
+// ── v1.3 发送链：会话草稿模型（文件域类型——HubViews 与本 store 共用） ──
+
+/// 草稿附件槽（会话草稿层持有，非瞬时视图态）：upload 非 nil = 已就绪（mediaId 可随
+/// 发送提交）；uploading = 上传在途；error = 失败（点按重试，发送时自动补传）；
+/// sourceData = 已压缩字节（补传复用，不落盘）。
+struct DraftAttachment: Identifiable {
+    let id: UUID
+    /// PhotosPickerItem.itemIdentifier（撤选去重用；nil = 非 picker 来源）。
+    let pickerItemIdentifier: String?
+    /// chip 预览缩略图（512px 解码）。
+    var preview: UIImage?
+    /// 展示元数据文件名（仅随 AttachmentRef 回显；服务端永不进存储路径）。
+    var fileName: String
+    var upload: UiMediaUpload?
+    var error: String?
+    var uploading: Bool
+    var sourceData: Data?
+}
+
+/// 会话草稿（可存活层持有）：未发送文本 + pending 附件。放在 store 而非视图 @State——
+/// 视图销毁/切后台/滚动往返不丢（验收：未发送状态下 pending 图与文本不得丢失）。
+struct ConversationDraft {
+    var text: String = ""
+    var attachments: [DraftAttachment] = []
+}
 
 /// Hub 账号态与数据面（P4 定稿）：自持 AgentBridge（shared/hub 的唯一 Swift 入口），订阅
 /// hubObserve；baseUrl 为非敏感配置存 UserDefaults，口令只经登录请求体、refreshToken 由
@@ -255,22 +282,17 @@ final class HubStore {
     /// 跨登出保留——静音是本地用户偏好，非账号数据）。
     private(set) var mutedConversations: Set<String> = HubStore.loadMutedConversations()
 
-    /// 通知差异面基线：已知卡片的 unread 增量 = assistant final 到达（与投影 countUnread 同
-    /// 口径：role=assistant 且 state=final 且 seq>readUpTo）→「有新回复」。只对**已知**卡片
-    /// 通知——登录/bootstrap 快照带 unread>0 入表的新卡片不算「到达」（首次推送打底 +
-    /// 新卡片只记录不提醒），随后 live 增量才提醒。
-    private var conversationsPrimed = false
-    private var lastUnreadByConversation: [String: Int] = [:]
+    /// （v1.3 通知摘要轮：回复通知触发面自会话列表 unread 差异迁移到 message.created 事件
+    /// 旁路——摘要需要消息正文与附件数（剥 markdown / 纯附件「[图片]×N」），卡片 preview
+    /// 只是裸 content 给不出附件计数；见 noteReplyMessage。旧 unread 差异面随之退役。）
 
     private let notifications = NotificationCoordinator.shared
 
-    /// 订阅会话列表（loggedIn 后调用一次；重复调用由桥侧换订阅）。每次推送同时喂通知差异面
-    ///（wp-13：已知卡片的 unread 增量 = assistant final 到达）。
+    /// 订阅会话列表（loggedIn 后调用一次；重复调用由桥侧换订阅）。
     func watchConversations() {
         bridge.hubWatchConversations { [weak self] list in
             guard let self else { return }
             self.conversations = list
-            self.noteConversationsPush(list)
         }
     }
 
@@ -517,6 +539,282 @@ final class HubStore {
         }
     }
 
+    // ---------- v1.3 发送链（TG 水准）：会话草稿可存活层 + 补传发送 ----------
+
+    /// 附件上限（契约 v1.2.1：MessageSendRequest.attachments maxItems 9——2026-11-10 放宽，
+    /// 对齐移动端相册多选口径；PhotosPicker maxSelectionCount 同值）。
+    static let maxDraftAttachments = 9
+
+    /// 会话草稿（conversationId → 草稿）。发送成功清空；登出清空。
+    private(set) var drafts: [String: ConversationDraft] = [:]
+
+    /// 草稿附件上传任务（slotId → 任务）：选图期在途任务与发送期补传任务同一登记——
+    /// 发送补传对「上传中」的槽**等待复用任务产物**，不重复发起 #23（同槽双传浪费
+    /// 20 次/分限流配额且产生孤儿媒体对象）。
+    private var draftUploadTasks: [UUID: Task<UiMediaUpload?, Never>] = [:]
+
+    /// 发送在途标记（conversationId）：发送按钮 loading 态 + 防重复点击（验收③）。
+    private(set) var sendingDraftFor: Set<String> = []
+
+    /// 最近一次发送失败原因（composer 显式降级展示，不静默；下次发送尝试清空）。
+    private(set) var draftSendError: [String: String] = [:]
+
+    /// 草稿读取（无草稿 = 空草稿，不落键）。
+    func draft(for conversationId: String) -> ConversationDraft {
+        drafts[conversationId] ?? ConversationDraft()
+    }
+
+    /// 草稿文本写入（composer TextField 双向绑定 set 侧；全空时收键防字典无界增长，
+    /// 同步清残留的发送失败提示）。
+    func setDraftText(_ text: String, conversationId: String) {
+        var d = draft(for: conversationId)
+        d.text = text
+        if d.text.isEmpty && d.attachments.isEmpty {
+            drafts.removeValue(forKey: conversationId)
+            draftSendError.removeValue(forKey: conversationId)
+        } else {
+            drafts[conversationId] = d
+        }
+    }
+
+    /// 草稿是否可发送（验收②：纯图无文本允许发送）。
+    func draftHasContent(_ conversationId: String) -> Bool {
+        let d = draft(for: conversationId)
+        return !d.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !d.attachments.isEmpty
+    }
+
+    /// PhotosPicker 选中项入列（追加语义，再次打开选择器可续选；槽位满 9 后静默忽略溢出，
+    /// 选择器侧 maxSelectionCount 同口径兜底）。同 identifier 去重（onChange 对同批选中重放）。
+    @MainActor
+    func addPickedImages(conversationId: String, items: [PhotosPickerItem]) {
+        var d = draft(for: conversationId)
+        let known = Set(d.attachments.compactMap(\.pickerItemIdentifier))
+        for item in items {
+            guard let pid = item.itemIdentifier, !known.contains(pid),
+                  d.attachments.count < Self.maxDraftAttachments else { continue }
+            let slot = DraftAttachment(
+                id: UUID(), pickerItemIdentifier: pid, preview: nil,
+                fileName: Self.draftFileName(), upload: nil, error: nil, uploading: true, sourceData: nil,
+            )
+            d.attachments.append(slot)
+            drafts[conversationId] = d
+            processDraftSlot(conversationId, slotId: slot.id, item: item)
+        }
+    }
+
+    /// 槽位 ✕ 撤除（撤除在途/失败/就绪槽均可；在途 #23 请求不撤回，回调落空槽为 no-op）。
+    /// 草稿随之全空时同步清残留发送失败提示。
+    func removeDraftAttachment(_ conversationId: String, slotId: UUID) {
+        guard var d = drafts[conversationId],
+              let idx = d.attachments.firstIndex(where: { $0.id == slotId }) else { return }
+        d.attachments.remove(at: idx)
+        if d.text.isEmpty && d.attachments.isEmpty {
+            drafts.removeValue(forKey: conversationId)
+            draftSendError.removeValue(forKey: conversationId)
+        } else {
+            drafts[conversationId] = d
+        }
+        draftUploadTasks.removeValue(forKey: slotId)
+    }
+
+    /// 失败槽点按重试：用已压缩字节重走 #23（服务端限流 20 次/分/设备，重试节流由用户
+    /// 点按节律天然承担）。任务进 draftUploadTasks 登记——发送期补传可等待复用。
+    func retryDraftUpload(_ conversationId: String, slotId: UUID) {
+        guard let slot = draft(for: conversationId).attachments.first(where: { $0.id == slotId }),
+              slot.upload == nil, !slot.uploading, let data = slot.sourceData else { return }
+        let w = slot.preview.map { Int($0.size.width * $0.scale) }
+        let h = slot.preview.map { Int($0.size.height * $0.scale) }
+        let fileName = slot.fileName
+        draftUploadTasks[slotId] = Task { @MainActor () -> UiMediaUpload? in
+            await self.performUpload(conversationId, slotId: slotId, data: data,
+                                     mime: "image/jpeg", fileName: fileName, width: w, height: h)
+        }
+    }
+
+    /// 发送草稿（验收②③④）：逐槽补传（就绪复用 / 在途等待 / 失败补传）→ 全部 mediaId
+    /// 就绪后**一条消息**发出（content=文本 + attachments=mediaId 数组；纯文本无附件走
+    /// v1.1 同形 hub.send 通道，字节级不变）。任一槽失败 = 整体不发送（不发半截消息）：
+    /// pending 区与文本原样保留、失败槽呈可重试态、composer 显式降级提示——不静默。
+    /// 发送在途置 sendingDraftFor（按钮 loading + 防重复点击）；全部成功清空已发送内容
+    ///（保留发送期间新输入的差量）。onResult(true) 后调用方清 picker 选中态。
+    func sendComposerDraft(_ conv: UiConversation, onResult: ((Bool, String?) -> Void)? = nil) {
+        let cid = conv.conversationId
+        guard isLoggedIn else { onResult?(false, "未登录"); return }
+        guard !sendingDraftFor.contains(cid) else { return }
+        guard let snapshot = drafts[cid], draftHasContent(cid) else { return }
+        let text = snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        sendingDraftFor.insert(cid)
+        draftSendError[cid] = nil
+        let slotIds = snapshot.attachments.map(\.id)
+        Task { @MainActor in
+            defer { self.sendingDraftFor.remove(cid) }
+            var refs: [AttachmentRef] = []
+            var failure: String? = nil
+            for slotId in slotIds {
+                // 发送期间被 ✕ 撤除的槽 → 跳过（用户已裁决该图不随本条消息发出）；
+                // await 前后各查一次（上传等待期间撤除同判）。
+                guard self.drafts[cid]?.attachments.contains(where: { $0.id == slotId }) == true else { continue }
+                let upload = await self.ensureSlotUploaded(cid, slotId: slotId)
+                guard let slotAfter = self.drafts[cid]?.attachments.first(where: { $0.id == slotId }) else { continue }
+                if let upload {
+                    refs.append(Self.attachmentRef(slot: slotAfter, upload: upload))
+                } else {
+                    failure = "第 \(refs.count + 1) 张图片上传失败" + ((slotAfter.error).map { "：\($0)" } ?? "")
+                    break
+                }
+            }
+            if let failure {
+                self.draftSendError[cid] = failure
+                onResult?(false, failure)
+                return
+            }
+            // 文本与全部 pending 图一条消息发出（ownSend 贴底信号与 hub.send 同语义）
+            self.ownSendScrollPending = true
+            if refs.isEmpty {
+                self.bridge.hubSend(conversationId: cid, text: text)
+            } else {
+                self.bridge.hubSendWithAttachments(conversationId: cid, text: text, attachments: refs)
+            }
+            self.clearSentDraft(cid, sentSlotIds: Set(slotIds), sentText: snapshot.text)
+            for slotId in slotIds { self.draftUploadTasks.removeValue(forKey: slotId) }
+            onResult?(true, nil)
+        }
+    }
+
+    /// 发送成功后的清空（验收③「全部成功后清空 pending 区」）：只清本次快照内容——
+    /// 发送期间新输入的文本差量与新增槽位保留（不吞并行输入）。
+    private func clearSentDraft(_ cid: String, sentSlotIds: Set<UUID>, sentText: String) {
+        var remaining = draft(for: cid)
+        remaining.attachments.removeAll { sentSlotIds.contains($0.id) }
+        var curText = remaining.text
+        // 发送期间用户在快照文本之后续写 → 剥离已发出的前缀；前缀不符（罕见：编辑了前段）
+        // 保守清空，不残留在已发内容之后的无上下文片段。
+        if curText.hasPrefix(sentText) {
+            curText = String(curText.dropFirst(sentText.count))
+        } else {
+            curText = ""
+        }
+        remaining.text = curText
+        if remaining.text.isEmpty && remaining.attachments.isEmpty {
+            drafts.removeValue(forKey: cid)
+        } else {
+            drafts[cid] = remaining
+        }
+    }
+
+    /// 单槽上传就绪（发送补传核心）：就绪复用 → 在途任务等待（不重复发起 #23）→
+    /// 未传/失败的补传。无压缩字节（读图/压缩失败的槽）返回 nil（发送整体失败，槽呈
+    /// 失败态由用户 ✕ 或重试裁决）。
+    @MainActor
+    private func ensureSlotUploaded(_ cid: String, slotId: UUID) async -> UiMediaUpload? {
+        guard let slot = draft(for: cid).attachments.first(where: { $0.id == slotId }) else { return nil }
+        if let upload = slot.upload { return upload }
+        if slot.uploading, let task = draftUploadTasks[slotId] {
+            return await task.value
+        }
+        guard let data = slot.sourceData else { return nil }
+        let w = slot.preview.map { Int($0.size.width * $0.scale) }
+        let h = slot.preview.map { Int($0.size.height * $0.scale) }
+        let fileName = slot.fileName
+        let task = Task { @MainActor () -> UiMediaUpload? in
+            await self.performUpload(cid, slotId: slotId, data: data,
+                                     mime: "image/jpeg", fileName: fileName, width: w, height: h)
+        }
+        draftUploadTasks[slotId] = task
+        return await task.value
+    }
+
+    /// 选图期槽处理（store 承接原视图侧链）：拷入字节 → 压缩（R9）→ 预览/字节落位 →
+    /// #23 上传 → 就绪/失败落位。失败呈显式失败态（不静默），可点重试/发送时补传。
+    @MainActor
+    private func processDraftSlot(_ conversationId: String, slotId: UUID, item: PhotosPickerItem) {
+        let task = Task { @MainActor () -> UiMediaUpload? in
+            guard let raw = try? await item.loadTransferable(type: Data.self), !raw.isEmpty else {
+                self.failSlot(conversationId, slotId: slotId, "无法读取所选图片")
+                return nil
+            }
+            guard let prepared = MediaImageProcessing.prepare(raw, fileName: Self.draftFileName()) else {
+                self.failSlot(conversationId, slotId: slotId, "无法识别的图片格式")
+                return nil
+            }
+            self.mutateSlot(conversationId, slotId: slotId) {
+                $0.preview = MediaImageProcessing.decodeForDisplay(prepared.data, maxPixel: 512)
+                $0.sourceData = prepared.data
+                $0.fileName = prepared.fileName
+            }
+            return await self.performUpload(conversationId, slotId: slotId, data: prepared.data,
+                                            mime: prepared.mime, fileName: prepared.fileName,
+                                            width: prepared.width, height: prepared.height)
+        }
+        draftUploadTasks[slotId] = task
+    }
+
+    /// #23 上传执行（选图/重试/发送补传三路共用；完成落 upload/error 态，不动用户已见槽序）。
+    /// width/height 透传为 nil 时不带表单字段（契约可选；不发明 0 值）。槽位状态变更全部在
+    /// 本 @MainActor await 侧落位——桥回调只 resume continuation（回调线程不承诺 actor 隔离，
+    /// 不在回调闭包内直触 @Observable 状态）。
+    @MainActor
+    private func performUpload(_ conversationId: String, slotId: UUID, data: Data, mime: String,
+                               fileName: String, width: Int?, height: Int?) async -> UiMediaUpload? {
+        mutateSlot(conversationId, slotId: slotId) { $0.uploading = true; $0.error = nil }
+        let result: (upload: UiMediaUpload?, error: String?) = await withCheckedContinuation { continuation in
+            self.uploadMedia(
+                conversationId: conversationId,
+                data: data, mime: mime, fileName: fileName,
+                width: width, height: height,
+            ) { upload, error in
+                continuation.resume(returning: (upload, error))
+            }
+        }
+        mutateSlot(conversationId, slotId: slotId) {
+            $0.uploading = false
+            if let upload = result.upload {
+                $0.upload = upload
+                $0.error = nil
+            } else {
+                // 显式失败态（HUB-BIZ-004 类型/大小拒绝、网络不可达等），点按重试
+                $0.error = result.error ?? "上传失败"
+            }
+        }
+        return result.upload
+    }
+
+    /// 槽位失败落位（读图/压缩失败早退；不整槽删除——用户可见失败态再裁决）。
+    @MainActor
+    private func failSlot(_ conversationId: String, slotId: UUID, _ message: String) {
+        mutateSlot(conversationId, slotId: slotId) {
+            $0.uploading = false
+            $0.error = message
+        }
+    }
+
+    /// 槽位原位变更（槽可能已被 ✕ 撤除：无槽即 no-op；在途 #23 回调落空槽自然吞掉）。
+    @MainActor
+    private func mutateSlot(_ conversationId: String, slotId: UUID, _ mutate: (inout DraftAttachment) -> Void) {
+        guard var d = drafts[conversationId],
+              let idx = d.attachments.firstIndex(where: { $0.id == slotId }) else { return }
+        mutate(&d.attachments[idx])
+        drafts[conversationId] = d
+    }
+
+    /// 草稿槽 → AttachmentRef（mediaId 必带 + mimeType/fileName/sizeBytes/width/height
+    /// 展示回显字段）。UiMediaUpload.sizeBytes 为非空 Kotlin Long（Swift Int64）；
+    /// AttachmentRef.sizeBytes 为可空 Long?（Swift KotlinLong?）——装箱传入。
+    private static func attachmentRef(slot: DraftAttachment, upload: UiMediaUpload) -> AttachmentRef {
+        AttachmentRef(
+            mediaId: upload.mediaId,
+            mimeType: upload.mimeType,
+            fileName: slot.fileName,
+            sizeBytes: KotlinLong(longLong: upload.sizeBytes),
+            width: upload.width,
+            height: upload.height,
+        )
+    }
+
+    private static func draftFileName() -> String {
+        "image-\(Int(Date().timeIntervalSince1970)).jpg"
+    }
+
     // ---------- 崩溃防护 + 本地清理（2026-11-07 UX 轮） ----------
 
     /// 后台/锁屏暂停同步栈（App.swift scenePhase 离开 active 驱动）：桥侧停连接循环并优雅
@@ -589,30 +887,22 @@ final class HubStore {
         UIApplication.shared.applicationState == .active && syncPhase != "rebuilding"
     }
 
-    /// 会话列表推送喂通知差异面（主线程，KMP 回调）。
-    private func noteConversationsPush(_ list: [UiConversation]) {
-        guard conversationsPrimed else {
-            conversationsPrimed = true
-            lastUnreadByConversation = Dictionary(
-                uniqueKeysWithValues: list.map { ($0.conversationId, Int($0.unread)) }
-            )
-            return
-        }
-        for c in list {
-            let id = c.conversationId
-            let now = Int(c.unread)
-            // 只对已知卡片判增量（登录/快照重建后新入列的卡片带 unread 只记录，不算「到达」）
-            guard let prev = lastUnreadByConversation[id] else {
-                lastUnreadByConversation[id] = now
-                continue
-            }
-            lastUnreadByConversation[id] = now
-            guard now > prev else { continue }                       // assistant final 才增 unread
-            guard selected?.conversationId != id else { continue }   // 当前打开不提醒（scope 语义）
-            guard !mutedConversations.contains(id) else { continue } // 按会话静音
-            guard shouldNotifyLocally else { continue }              // #4：后台/重建期不派发本地通知
-            notifications.replyArrived(conversationId: id, label: displayLabel(c))
-        }
+    /// message.created（assistant final）事件（桥 eventTap 回调，主线程；v1.3 通知摘要轮）。
+    /// 回复通知触发面（替代旧会话列表 unread 差异）：摘要需要消息正文与附件数——事件载荷是
+    /// 唯一可得面（卡片 preview 是裸 content，纯附件行剥不出「[图片]×N」计数）。判定链与
+    /// 旧触发面同口径：只对已知卡片提醒（列表未及校准/非主线会话不提醒，与旧「只对已知
+    /// 卡片」语义一致）、非当前打开（消息在时间线实时可见）、按会话静音、前台 + 非重建期
+    ///（#4 派发门槛；后台由 APNs 承载——「前台=本地/后台=APNs」通道切分不动）。
+    /// 断线窗口的回复经重连补投事件触发（cursor 去重后对客户端确属新事件）；bootstrap
+    /// 快照积压行不经事件路径，天然不带假阳性。
+    private func noteReplyMessage(conversationId: String, content: String, attachmentCount: Int) {
+        guard isLoggedIn, !conversationId.isEmpty else { return }
+        guard let c = conversations.first(where: { $0.conversationId == conversationId }) else { return }
+        guard selected?.conversationId != conversationId else { return }   // 当前打开不提醒（scope 语义）
+        guard !mutedConversations.contains(conversationId) else { return } // 按会话静音
+        guard shouldNotifyLocally else { return }                          // #4：后台/重建期不派发本地通知
+        let summary = MessageSummary.make(content: content, attachments: attachmentCount)
+        notifications.replyArrived(conversationId: conversationId, label: displayLabel(c), summary: summary)
     }
 
     /// approval.requested 事件（桥 eventTap 回调，主线程）。触发面用事件旁路而非审批 Flow
@@ -864,6 +1154,15 @@ final class HubStore {
         bridge.hubWatchApprovalRequested { [weak self] conversationId in
             self?.noteApprovalRequested(conversationId: conversationId)
         }
+        // v1.3 通知摘要轮：assistant final 权威行 → 回复通知（摘要见 MessageSummary）。
+        // 桥回调 Int 参数经 ObjC 互携为 KotlinInt 装箱（函数类型参数位）——解箱为 Int。
+        bridge.hubWatchReplyMessage { [weak self] conversationId, content, attachmentCount in
+            self?.noteReplyMessage(
+                conversationId: conversationId,
+                content: content,
+                attachmentCount: Int(attachmentCount.int32Value),
+            )
+        }
         bridge.hubObserve { [weak self] kind, message, user, deviceId in
             guard let self else { return }
             self.kind = kind
@@ -973,10 +1272,12 @@ final class HubStore {
         syncBannerVisible = false
         bannerDebounceTask?.cancel()
         bannerDebounceTask = nil
-        // wp-13：通知差异面基线随投影数据一并作废（重登 bootstrap 快照不是新事件）；
+        // v1.3 发送链：会话草稿与发送在途态随登出作废（草稿属账号数据面，不跨登出残留）
+        drafts = [:]
+        draftUploadTasks = [:]
+        sendingDraftFor = []
+        draftSendError = [:]
         // mutedConversations 为本地偏好，跨登出保留。
-        conversationsPrimed = false
-        lastUnreadByConversation = [:]
         bridge.hubLogout()
     }
 }

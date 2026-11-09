@@ -127,6 +127,61 @@ class MarkdownParserTest {
         assertEquals(1, p2.lines.size)
     }
 
+    // ── 图片块（v1.2.0 多模态：markdown 图片 URL 渲染面，设计稿 §6 桌面行） ──
+
+    @Test
+    fun standaloneImageLineParsesToImageBlock() {
+        val blocks = parseMarkdownBlocks("前文\n![一只橙猫](https://example.com/cat.png)\n后文")
+        assertEquals(3, blocks.size)
+        val img = assertIs<MdBlock.Image>(blocks[1])
+        assertEquals("https://example.com/cat.png", img.url)
+        assertEquals("一只橙猫", img.alt)
+        // 空 alt（生图输出常见形态）也成块
+        val bare = parseMarkdownBlocks("![](https://example.com/out.png)").single()
+        val bareImg = assertIs<MdBlock.Image>(bare)
+        assertEquals("https://example.com/out.png", bareImg.url)
+        assertEquals("", bareImg.alt)
+    }
+
+    @Test
+    fun imageOnlyContentRoutesThroughGate() {
+        // 图片行本身不含 * ` _ 语素，gate 需显式放行（否则纯图片消息误落纯文本回退）
+        assertTrue(looksLikeMarkdown("![橙猫](https://example.com/cat.png)"))
+        assertTrue(looksLikeMarkdown("  ![a](https://e.com/a.png)  "))
+        assertEquals(1, markdownBlocksOrFallback("![a](https://e.com/a.png)", cursor = false)?.size)
+        // 裸 URL（非图片行）不放行——既有口径不回归
+        assertFalse(looksLikeMarkdown("https://example.com/path?a=1"))
+    }
+
+    @Test
+    fun inlineAndMalformedImagesStayLiteral() {
+        // 行内混排不成图片块（整行独占才成块）——按段落字面量保留（纯文本等价契约）
+        val inline = assertIs<MdBlock.Paragraph>(
+            parseMarkdownBlocks("看 ![图](https://e.com/a.png) 这张").single(),
+        )
+        assertEquals(
+            listOf(listOf<MdSpan>(MdSpan.Text("看 ![图](https://e.com/a.png) 这张"))),
+            inline.lines,
+        )
+        // 带标题形（url 含空格）→ 字面量
+        assertIs<MdBlock.Paragraph>(parseMarkdownBlocks("""![a](https://e.com/a.png "标题")""").single())
+        // 未闭合 → 字面量
+        assertIs<MdBlock.Paragraph>(parseMarkdownBlocks("![a](https://e.com/a.png").single())
+        // 列表项内的图片 → 列表行内字面量（不提升为图片块）
+        val list = assertIs<MdBlock.ListBlock>(parseMarkdownBlocks("- ![x](https://e.com/x.png)").single())
+        assertEquals(1, list.items.size)
+    }
+
+    @Test
+    fun imageBlockDoesNotCarryCursor() {
+        // 图片语素是完整行：cursor 挂不上 Image 块（半流期尾随 ▌ 使行不成块、按段落字面量
+        // + 光标呈现，终态收敛为 Image——设计注释既定行为，此处锚定）
+        val img = assertIs<MdBlock.Image>(
+            parseMarkdownBlocks("![a](https://e.com/a.png)", cursor = true).single(),
+        )
+        assertEquals("https://e.com/a.png", img.url)
+    }
+
     // ── 行内：粗斜体 ──
 
     @Test
@@ -212,6 +267,9 @@ class MarkdownParserTest {
                     is MdBlock.Heading -> spansText(b.spans)
                     is MdBlock.CodeBlock -> b.code
                     is MdBlock.ListBlock -> b.items.joinToString("\n") { spansText(it.spans) }
+                    // 图片块按语法形态重建（图片是有意渲染语素，不参与「无配对语素逐字等价」
+                    // 断言面——本用例输入均为无配对语素，此分支只为穷尽）
+                    is MdBlock.Image -> "![${b.alt}](${b.url})"
                 }
             }
         // 无配对语素 → 逐字往返等价

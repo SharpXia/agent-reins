@@ -1,6 +1,7 @@
 package dev.sharpxia.agentreins.desktopui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -17,8 +18,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.sharpxia.agentreins.hub.UiAttachment
 import java.time.Instant
 import java.time.OffsetDateTime
 import java.time.ZoneId
@@ -68,6 +71,42 @@ internal fun ActiveRunDot(modifier: Modifier = Modifier) {
             .size(8.dp)
             .background(Color(0xFF2E9E44), CircleShape),
     )
+}
+
+/**
+ * 消息附件 chip 行（v1.2.0 多模态，设计稿 §6 桌面行「user 行附件 chip 渲染」；assistant 行
+ * 空正文+有附件同用）：chip 面只呈现元数据（mediaId 尾段 / fileName / mimeType / url），
+ * 不经端点 #24 拉取字节——桌面最小口径（iOS 缩略图自定义 loader 是另一档实现，此处有意
+ * 不对齐）。source=external 行附 URL 小字原样透出（不改写不代理）；未知 source 原样兜底
+ * 走图标行不丢行。
+ */
+@Composable
+internal fun AttachmentChipsRow(attachments: List<UiAttachment>, modifier: Modifier = Modifier) {
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        attachments.forEach { a ->
+            Surface(color = Color(0x14888888), shape = RoundedCornerShape(8.dp)) {
+                Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+                    val label = a.fileName
+                        ?: a.mediaId?.let { "…${it.takeLast(8)}" }
+                        ?: "图片"
+                    val icon = if (a.mimeType?.startsWith("image/") == true) "🖼" else "📎"
+                    Text("$icon $label", fontSize = 12.sp)
+                    // 跨模块属性无智能转换：url 先落本地再判空（Kotlin 编译纪律）
+                    val url = a.url
+                    if (url != null) {
+                        Text(
+                            text = url,
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = Color(0xFF777777),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        }
+    }
 }
 
 /** 分隔条（role="" 的 compaction/reset 合成行，06 §3.1.2；渲染为系统分隔条不占消息位）。 */

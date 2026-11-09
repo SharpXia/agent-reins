@@ -9,6 +9,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ContextMenuArea
 import androidx.compose.foundation.ContextMenuItem
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Arrangement
@@ -71,7 +72,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.sharpxia.agentreins.hub.DefaultHubClient
+import dev.sharpxia.agentreins.hub.HubException
 import dev.sharpxia.agentreins.hub.UiApproval
+import dev.sharpxia.agentreins.hub.projection.AttachmentRef
 import dev.sharpxia.agentreins.hub.projection.CommandChoice
 import dev.sharpxia.agentreins.hub.projection.ModelOptionItem
 import dev.sharpxia.agentreins.hub.projection.ModelsList
@@ -79,8 +82,11 @@ import dev.sharpxia.agentreins.hub.UiConversation
 import dev.sharpxia.agentreins.hub.UiMessage
 import dev.sharpxia.agentreins.hub.UiWorkActivity
 import dev.sharpxia.agentreins.hub.projection.CommandsList
+import java.io.File
 import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private const val OPTIMISTIC_SEQ_SENTINEL: Long = Long.MAX_VALUE
 
@@ -239,6 +245,12 @@ internal fun ConversationScreen(
     // wp-6：TextFieldValue 携带 IME 组合区间（composition），Enter 发送裁决要区分
     // 「组合窗中回车 = 提交候选词」与「普通回车 = 发送」——纯 String 拿不到该信号。
     var input by remember { mutableStateOf(TextFieldValue("")) }
+    // v1.2.0 多模态（设计稿 §6 桌面行）最小附件入口草稿态：FileDialog 选图 → uploadMedia
+    // 上传成功即挂 AttachmentRef 草稿 chip → 发送随 commands.sendMessage 携带。进程内轻量态，
+    // 随会话切换（remember key）重置；上传失败显式横幅可重试，不静默。
+    var draftAttachments by remember(conversationId) { mutableStateOf<List<AttachmentRef>>(emptyList()) }
+    var uploadingAttachments by remember(conversationId) { mutableStateOf(false) }
+    var attachmentError by remember(conversationId) { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
     // 2026-11-07 二轮：回到底部按钮可见性——最后一条 item 不在视口即显示（derivedStateOf
     // 只在跨阈值时重composition，逐帧布局信息不触发）
@@ -417,11 +429,74 @@ internal fun ConversationScreen(
 
     // wp-6：发送一条（发送键 / Enter / 无参斜杠命令选中三路同一通道）——commands 幂等队列，
     // sendMessage 每次生成新幂等键（ADR-07）；空白草稿禁发（与发送键 isNotBlank 防线同口径）。
+    // v1.2.0 多模态：纯图片消息允许空文本（契约「message 与 attachments 至少一项非空」，服务端
+    // 校验；空文本随 attachments 发出，乐观行落附件列即时渲染 chip）；两者皆空仍禁发。
     fun sendDraft() {
         val text = input.text.trim()
-        if (text.isEmpty()) return
+        if (text.isEmpty() && draftAttachments.isEmpty()) return
+        val attachments = draftAttachments
         input = TextFieldValue("")
-        scope.launch { client.commands?.sendMessage(conversationId, text) }
+        draftAttachments = emptyList()
+        scope.launch { client.commands?.sendMessage(conversationId, text, attachments) }
+    }
+
+    /**
+     * v1.2.0 多模态（设计稿 §6 桌面行）：附件入口——JVM Swing FileDialog 选图（≤4 张，
+     * [MAX_DRAFT_ATTACHMENTS]）→ 逐张经 shared [DefaultHubClient.uploadMedia]（端点 #23，
+     * 服务端魔数嗅探 + 20MB 帽为准）→ 成功即挂草稿 chip。失败显式 [attachmentError] 可重试
+     * 不静默；白名单外扩展名与超限选择本地先拦（减少无谓上传）。取数挂屏幕级 scope（同斜杠
+     * 目录轮纪律：逐张上传不被 UI 重组重启，屏幕销毁即放弃）。
+     */
+    fun pickAndUploadAttachments() {
+        if (uploadingAttachments) return
+        val remaining = MAX_DRAFT_ATTACHMENTS - draftAttachments.size
+        if (remaining <= 0) {
+            attachmentError = "附件最多 $MAX_DRAFT_ATTACHMENTS 张"
+            return
+        }
+        uploadingAttachments = true
+        attachmentError = null
+        scope.launch {
+            try {
+                val picked = pickImageFiles()
+                if (picked.isEmpty()) return@launch // 用户取消：finally 收在途标记
+                val images = picked.filter { imageMimeOf(it.name) != null }
+                val accepted = images.take(remaining)
+                val hints = buildList {
+                    if (images.size > remaining) add("附件最多 $MAX_DRAFT_ATTACHMENTS 张，仅收前 $remaining 张")
+                    val rejected = picked.size - images.size
+                    if (rejected > 0) add("$rejected 个非图片文件已跳过（白名单 jpg/png/webp/gif）")
+                }
+                if (hints.isNotEmpty()) attachmentError = hints.joinToString("；")
+                for (file in accepted) {
+                    val bytes = withContext(Dispatchers.IO) { file.readBytes() }
+                    val upload = client.uploadMedia(
+                        conversationId,
+                        bytes,
+                        mime = imageMimeOf(file.name) ?: continue,
+                        fileName = file.name,
+                    )
+                    draftAttachments = draftAttachments + AttachmentRef(
+                        mediaId = upload.mediaId,
+                        mimeType = upload.mimeType,
+                        fileName = file.name,
+                        sizeBytes = upload.sizeBytes,
+                        width = upload.width,
+                        height = upload.height,
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: HubException) {
+                // 服务端确定性拒绝（400 HUB-BIZ-004 类型/大小、401/403 鉴权、429 限流）与网络
+                // 失败分开呈现——错误码原样带出，不吞不译
+                attachmentError = "附件上传被拒（${e.payload.code}），可重试"
+            } catch (_: Exception) {
+                attachmentError = "附件上传失败（网络或服务不可达），可重试"
+            } finally {
+                uploadingAttachments = false
+            }
+        }
     }
 
     // wp-6 + 2026-11-08 修复轮（用户拍板）：斜杠命令**点行 = 直接发送**——无论是否带参，
@@ -712,6 +787,52 @@ internal fun ConversationScreen(
                 // #3（2026-11-08）：composer「运行中发送将排队」提示撤显示（iOS 2026-11-07
                 // 二轮同款）——排队语义上移为消息自身的「排队中」状态徽标（消息级落库状态，
                 // 见 UserMessageRow queued 分支），composer 行不再占位。
+                // v1.2.0 多模态：草稿附件 chip 行（可摘除）+ 上传失败/超限提示（显式可重试，
+                // 不静默——与 loadEarlierError 横幅同纪律）。
+                if (draftAttachments.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        draftAttachments.forEachIndexed { idx, ref ->
+                            Surface(
+                                color = MaterialTheme.colorScheme.surface,
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant),
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(start = 8.dp),
+                                ) {
+                                    Text(
+                                        text = "🖼 ${ref.fileName ?: "…${ref.mediaId.takeLast(6)}"}",
+                                        fontSize = 11.sp,
+                                        maxLines = 1,
+                                    )
+                                    TextButton(
+                                        onClick = {
+                                            draftAttachments =
+                                                draftAttachments.filterIndexed { i, _ -> i != idx }
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 4.dp),
+                                    ) {
+                                        Text("✕", fontSize = 10.sp, color = Color(0xFF999999))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (attachmentError != null) {
+                    Text(
+                        "⚠ $attachmentError",
+                        fontSize = 11.sp,
+                        color = Color(0xFFC53030),
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -749,11 +870,24 @@ internal fun ConversationScreen(
                         maxLines = 4,
                     )
                     Spacer(Modifier.width(8.dp))
-                    if (isRunActive && canCancelRun && input.text.isBlank()) {
+                    // v1.2.0 多模态最小附件入口（设计稿 §6 桌面行）：文件选择器选图（≤4 张）→
+                    // 经 shared uploadMedia 上传 → 草稿挂 chip → 发送带 attachments。在途态防
+                    // 并发开框，上限满即禁（入口侧先拦，契约 ≤4 服务端同校验）。
+                    TextButton(
+                        onClick = ::pickAndUploadAttachments,
+                        enabled = !uploadingAttachments &&
+                            draftAttachments.size < MAX_DRAFT_ATTACHMENTS,
+                        contentPadding = PaddingValues(horizontal = 8.dp),
+                    ) {
+                        Text(if (uploadingAttachments) "上传中…" else "📎", fontSize = 16.sp)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    if (isRunActive && canCancelRun && input.text.isBlank() && draftAttachments.isEmpty()) {
                         // wp-8② + #4（2026-11-08 UX 轮改版，iOS 同口径）：Stop 按钮仅在「活跃 run
                         // 且草稿为空」时占键位——草稿有内容时发送键优先（发送新消息不打断进行中
                         // run，Gateway 排队语义，消息按 run 态落 queued 徽标）；中止后部分输出
                         // 保留由 Gateway 权威收敛（run.aborted 回流投影库）。终止可经斜杠 /stop。
+                        // v1.2.0 多模态：附件也算草稿内容——纯附件草稿（文本空）同样发送键优先。
                         Button(
                             onClick = {
                                 val runId = liveConv?.activeRunId ?: return@Button
@@ -769,10 +903,13 @@ internal fun ConversationScreen(
                             Text("结束中", fontSize = 10.sp, color = Color(0xFF999999))
                             Spacer(Modifier.width(6.dp))
                         }
-                        // 空正文防线（发送侧）：空白草稿禁发（isNotBlank = 去空白后非空），点击再兜一层
+                        // 空正文防线（发送侧）：空白草稿禁发（isNotBlank = 去空白后非空），点击再兜一层。
+                        // v1.2.0 多模态：纯附件草稿（文本空、附件非空）放行——契约允许空文本消息，
+                        // sendDraft 内再兜「两者皆空禁发」。（Enter 仍按 resolveEnterKey 既有口径
+                        // 对空白草稿不发送：附件独发走发送键，纯函数层零改动。）
                         Button(
                             onClick = { sendDraft() },
-                            enabled = input.text.isNotBlank(),
+                            enabled = input.text.isNotBlank() || draftAttachments.isNotEmpty(),
                         ) {
                             Text("发送")
                         }
@@ -847,6 +984,11 @@ private fun UserMessageRow(m: UiMessage) {
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.End,
     ) {
+        // v1.2.0 多模态（设计稿 §6 桌面行）：user 行附件 chip 渲染（mediaId 引用元数据面，
+        // 不经 #24 拉字节——桌面最小口径）。本地乐观行（v9 附件随行落列）与服务端权威行同构。
+        if (m.attachments.isNotEmpty()) {
+            AttachmentChipsRow(m.attachments, modifier = Modifier.padding(bottom = 4.dp))
+        }
         Surface(
             color = MaterialTheme.colorScheme.primaryContainer,
             shape = RoundedCornerShape(12.dp),
@@ -918,13 +1060,22 @@ private fun AssistantMessageRow(
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                 )
                 // wp-8③ 空正文防线：final/failed 空助手行渲染占位（不再出现空气泡——
-                // 按 MessageActions.isEmptyBodyPlaceholder 既定契约补上占位文案）
-                isEmptyBodyPlaceholder(m) -> Text(
-                    "（无文本内容）",
-                    fontStyle = FontStyle.Italic,
-                    color = Color(0xFF999999),
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                )
+                // 按 MessageActions.isEmptyBodyPlaceholder 既定契约补上占位文案）。
+                // v1.2.0 多模态：空正文+有附件行不再落「（无文本内容）」占位（iOS 同口径，
+                // 设计稿 §6）——附件 chip 面替代空气泡。
+                isEmptyBodyPlaceholder(m) -> if (m.attachments.isNotEmpty()) {
+                    AttachmentChipsRow(
+                        m.attachments,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
+                } else {
+                    Text(
+                        "（无文本内容）",
+                        fontStyle = FontStyle.Italic,
+                        color = Color(0xFF999999),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
+                }
                 // wp-18：助手行走轻量 Markdown 渲染器（标题/列表/代码块/粗斜体，流式行尾随
                 // ▌ 光标）；无 Markdown 语素或解析异常时内置回退 wp-6 纯文本路径
                 else -> MarkdownText(
@@ -1176,4 +1327,38 @@ private fun ModelOptionButton(item: ModelOptionItem, onSelect: (ModelOptionItem)
             )
         }
     }
+}
+
+// ── v1.2.0 多模态最小附件入口（设计稿 §6 桌面行）：选图 → 上传 → 草稿 ──────────
+
+/** 附件张数上限（契约 SendMessageRequest.attachments ≤4；服务端同校验，客户端入口先拦）。 */
+private const val MAX_DRAFT_ATTACHMENTS = 4
+
+/** 服务端媒体白名单（契约 #23：jpeg/png/webp/gif，魔数嗅探为准）→ 本地声明 mime。 */
+private val IMAGE_MIME_BY_EXT = mapOf(
+    "jpg" to "image/jpeg",
+    "jpeg" to "image/jpeg",
+    "png" to "image/png",
+    "webp" to "image/webp",
+    "gif" to "image/gif",
+)
+
+/** 扩展名 → 声明 mime；白名单外 null（服务端以魔数判定为准，本地先拦减少无谓上传）。 */
+private fun imageMimeOf(name: String): String? =
+    IMAGE_MIME_BY_EXT[name.substringAfterLast('.', "").lowercase()]
+
+/**
+ * Swing FileDialog 选图（ask 指定的 JVM 文件选择最小面）：多选开启，返回所选文件
+ * （空 = 用户取消）。null 父窗——compose 1.12 的 WindowInfo 不再暴露 AWT container
+ * （jar 实查仅 isWindowFocused/keyboardModifiers/containerSize），非模态对话框语义可接受；
+ * setFilenameFilter 在 macOS 不生效（AWT 平台限制），白名单过滤由调用方按扩展名做。
+ * 挂 IO 调度器：FileDialog.isVisible 阻塞至选完/取消，绝不上主线程。
+ */
+private suspend fun pickImageFiles(): List<File> = withContext(Dispatchers.IO) {
+    val dialog = java.awt.FileDialog(null as java.awt.Frame?, "选择图片", java.awt.FileDialog.LOAD)
+    dialog.isMultipleMode = true
+    dialog.isVisible = true
+    val files = dialog.files?.toList().orEmpty()
+    dialog.dispose()
+    files
 }

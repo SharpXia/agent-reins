@@ -1,11 +1,13 @@
 package dev.sharpxia.agentreins.desktopui
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -15,6 +17,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -22,6 +25,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.decodeToImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -33,6 +39,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -48,8 +56,10 @@ private val ListMarkerInk = Color(0xFF777777)
  * wp-18：桌面助手行轻量 Markdown 渲染器（iOS Chat/MarkdownView 的起步同位）。
  *
  * 覆盖起步集：标题（#–######）/ 列表（无序 + 有序，一层缩进近似）/ 围栏代码块 /
- * 粗体、斜体、粗斜体 + 行内代码。已知取舍与 iOS 版同向：表格、引用、嵌套强调、远程图片
- * 不渲染（原样呈现为段落文本）。
+ * 粗体、斜体、粗斜体 + 行内代码；v1.2.0 多模态轮（设计稿 docs/multimodal-design-20261108.md
+ * §2.2/§6 桌面行）增图片块双口径——https 内联渲染、http（含 agent 外发 LAN 地址）与其余
+ * scheme 一律降级链接 chip（不发起请求、不做特例，生图输出观测面的唯一渲染通道）。
+ * 其余已知取舍与 iOS 版同向：表格、引用、嵌套强调不渲染（原样呈现为段落文本）。
  *
  * wp-6 纯文本回退（验收硬要求）：[looksLikeMarkdown] 为 false 或解析抛异常时走纯文本
  * `Text`——与 wp-6 MVP 渲染逐字一致；解析器对未配对定界符逐字保留，纯文本语义不漂移。
@@ -140,6 +150,93 @@ private fun MarkdownBlockView(block: MdBlock) {
                     )
                 }
             }
+        }
+        is MdBlock.Image -> MarkdownImageBlock(block)
+    }
+}
+
+// ── 图片块渲染（v1.2.0 多模态，设计稿 §2.2/§6 桌面行双口径） ─────────────────────
+
+/** 图片块内联渲染高度帽（宽随气泡，Fit 保持纵横比——高图不撑爆时间线）。 */
+private val MD_IMAGE_MAX_HEIGHT = 320.dp
+
+/** 图片加载态（视图层 remember，不进解析产物——与 JSON 卡折叠态同纪律）。 */
+private sealed interface MdImageLoad {
+    data object Loading : MdImageLoad
+    data class Ready(val bitmap: ImageBitmap) : MdImageLoad
+    data object Failed : MdImageLoad
+}
+
+/**
+ * 图片块双口径分流（设计稿 §2.2 原文口径）：https 内联渲染；http（探针观察到的 agent 外发
+ * LAN 地址属此类，客户端直连在跨网环境不可达）与其余 scheme 一律降级链接 chip——不发起
+ * 请求、不做特例。加载失败同样落链接 chip（显式降级不静默空块）。
+ */
+@Composable
+private fun MarkdownImageBlock(block: MdBlock.Image) {
+    if (block.url.startsWith("https://")) {
+        MarkdownHttpsImage(url = block.url, alt = block.alt)
+    } else {
+        MarkdownImageLinkChip(url = block.url, alt = block.alt, stale = false)
+    }
+}
+
+@Composable
+private fun MarkdownHttpsImage(url: String, alt: String) {
+    var load by remember(url) { mutableStateOf<MdImageLoad>(MdImageLoad.Loading) }
+    // 取数挂 IO 调度器（网络 + Skia 解码均不上主线程）；会话切换/行离屏即取消（LaunchedEffect
+    // 生命周期即作用域），失败降级链接 chip——不炸消息行、不空块。
+    LaunchedEffect(url) {
+        load = withContext(Dispatchers.IO) {
+            runCatching {
+                val bytes = java.net.URI(url).toURL().openStream().use { it.readBytes() }
+                // decodeToImageBitmap（compose 桌面 ByteArray 扩展）：Skia 解码 + ImageBitmap
+                // 一体；解码失败（坏字节/非图片）同样走 Failed 降级链接 chip
+                MdImageLoad.Ready(bytes.decodeToImageBitmap())
+            }.getOrElse { MdImageLoad.Failed }
+        }
+    }
+    when (val l = load) {
+        is MdImageLoad.Ready -> Image(
+            bitmap = l.bitmap,
+            contentDescription = alt.ifBlank { url },
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.fillMaxWidth().heightIn(max = MD_IMAGE_MAX_HEIGHT),
+        )
+        is MdImageLoad.Loading -> Text(
+            "图片加载中…",
+            fontSize = 11.sp,
+            color = ListMarkerInk,
+            modifier = Modifier.padding(vertical = 2.dp),
+        )
+        is MdImageLoad.Failed -> MarkdownImageLinkChip(url = url, alt = alt, stale = true)
+    }
+}
+
+/**
+ * 链接 chip（http/加载失败降级面）：图标行 + URL 小字，URL 原样透出不改写不代理（与
+ * MessageAttachment.source=external 客户端纪律同向）；stale = https 加载失败的失败态标注。
+ */
+@Composable
+private fun MarkdownImageLinkChip(url: String, alt: String, stale: Boolean) {
+    Surface(shape = RoundedCornerShape(8.dp), color = CodeTint, modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp)) {
+            Text(
+                text = if (stale) {
+                    "🖼 ${alt.ifBlank { "图片" }}（加载失败，链接如下）"
+                } else {
+                    "🔗 ${alt.ifBlank { "图片" }}（图片链接，http 不内联渲染）"
+                },
+                fontSize = 12.sp,
+            )
+            Text(
+                text = url,
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
+                color = ListMarkerInk,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

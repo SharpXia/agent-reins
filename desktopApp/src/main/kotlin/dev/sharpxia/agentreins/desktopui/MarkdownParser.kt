@@ -4,8 +4,9 @@ package dev.sharpxia.agentreins.desktopui
  * wp-18：桌面助手行轻量 Markdown 解析器（纯 Kotlin，无 Compose 依赖，单测直接覆盖）。
  *
  * 与 iOS Chat/MarkdownView.swift（LiteMarkdownParser，cmark-gfm 同源）的起步同位：本解析器
- * 只覆盖「标题 / 列表 / 围栏代码块 / 粗斜体 + 行内代码」起步集——表格、引用、嵌套强调、远程
- * 图片不在本期（iOS 版已知取舍同理：解析不了的块按普通段落原样呈现，不丢文本）。
+ * 覆盖「标题 / 列表 / 围栏代码块 / 粗斜体 + 行内代码」起步集；v1.2.0 多模态轮（设计稿
+ * docs/multimodal-design-20261108.md §6 桌面行）增「整行独占」的图片块——表格、引用、嵌套
+ * 强调仍不在本期（iOS 版已知取舍同理：解析不了的块按普通段落原样呈现，不丢文本）。
  *
  * 回退契约（验收硬要求）：[looksLikeMarkdown] 为 false 或解析抛异常时，调用方必须走 wp-6
  * MVP 纯文本路径原样渲染——解析器永不改变「纯文本等价」语义：任何未闭合/不构成 Markdown
@@ -20,6 +21,13 @@ internal sealed interface MdBlock {
     /** [language] = 围栏 info string 首段（```json → "json"）：JSON 卡分支按它免首字符闸门；此前连语言都丢弃。 */
     data class CodeBlock(val code: String, val language: String? = null) : MdBlock
     data class ListBlock(val items: List<MdListItem>) : MdBlock
+    /**
+     * 图片块（v1.2.0 多模态，设计稿 §6 桌面行「MdBlock 增 Image 块」）：整行恰为一个
+     * `![alt](url)` 语素才成块——行内混排、带标题形（url 含空格）、未闭合等一律按段落
+     * 字面量保留（「纯文本等价」契约不破）。渲染双口径见 MarkdownText：https 内联 /
+     * http 及其余 scheme 链接 chip（不发起请求）。
+     */
+    data class Image(val url: String, val alt: String) : MdBlock
 }
 
 internal data class MdListItem(
@@ -51,6 +59,12 @@ internal fun stripMdCursor(text: String): String =
 
 private val MD_HEADING = Regex("""^(#{1,6})\s+(.+)$""")
 private val MD_LIST_ITEM = Regex("""^(\s*)([-*+]|\d{1,9}[.)])\s+(.+)$""")
+
+/**
+ * 图片行（v1.2.0 多模态）：整行（trim 后）恰为 `![alt](url)`。url 段禁空白与 `)`——带标题形
+ * （`![a](u "t")`）与嵌套括号不成块，落回段落字面量；alt 段禁 `]`（嵌套/未闭合同理）。
+ */
+private val MD_IMAGE_LINE = Regex("""^!\[([^\]]*)\]\(([^\s)]+)\)$""")
 private const val MD_MAX_LIST_DEPTH = 4
 
 /**
@@ -63,7 +77,10 @@ internal fun looksLikeMarkdown(text: String): Boolean {
     return text.lineSequence().any { line ->
         val t = line.trimStart()
         t.startsWith("```") || t.startsWith("~~~") ||
-            MD_HEADING.matches(t) || MD_LIST_ITEM.matches(t)
+            MD_HEADING.matches(t) || MD_LIST_ITEM.matches(t) ||
+            // 图片行（v1.2.0 多模态）：`![..](..)` 不含 * ` _ 语素，需显式放行否则纯图片
+            // 消息（生图输出常见形态）会误落纯文本回退
+            MD_IMAGE_LINE.matches(t.trim())
     }
 }
 
@@ -135,12 +152,22 @@ internal fun parseMarkdownBlocks(text: String, cursor: Boolean = false): List<Md
             else -> {
                 val heading = MD_HEADING.matchEntire(line.trimStart())
                 val item = MD_LIST_ITEM.matchEntire(line)
+                val image = MD_IMAGE_LINE.matchEntire(line.trim())
                 when {
                     heading != null -> {
                         flushParagraph(); flushList()
                         blocks += MdBlock.Heading(
                             level = heading.groupValues[1].length,
                             spans = parseInlineSpans(heading.groupValues[2].trim()),
+                        )
+                        i++
+                    }
+                    image != null -> {
+                        // 图片块（v1.2.0 多模态）：整行独占才成块，alt/url 按 MD_IMAGE_LINE 捕获
+                        flushParagraph(); flushList()
+                        blocks += MdBlock.Image(
+                            url = image.groupValues[2],
+                            alt = image.groupValues[1],
                         )
                         i++
                     }
@@ -181,6 +208,9 @@ internal fun parseMarkdownBlocks(text: String, cursor: Boolean = false): List<Md
                     },
                 )
                 is MdBlock.CodeBlock -> last.copy(code = last.code + MD_CURSOR)
+                // 图片块不承载光标：图片语素是完整行（半流期尾随 ▌ 使其不成块、按段落字面量
+                // + 光标呈现，终态才收敛为 Image——与 JSON 卡「半流行不出卡」同向，无闪变）
+                is MdBlock.Image -> last
             }
         }
     }

@@ -2,15 +2,19 @@ package dev.sharpxia.agentreins.hub.command
 
 import dev.sharpxia.agentreins.hub.HubApi
 import dev.sharpxia.agentreins.hub.HubException
+import dev.sharpxia.agentreins.hub.HubJson
 import dev.sharpxia.agentreins.hub.RunOriginRegistry
 import dev.sharpxia.agentreins.hub.auth.TokenManager
 import dev.sharpxia.agentreins.hub.projection.ApprovalDecisionRequest
+import dev.sharpxia.agentreins.hub.projection.AttachmentRef
 import dev.sharpxia.agentreins.hub.projection.CancelRunRequest
 import dev.sharpxia.agentreins.hub.projection.CommandReceipt
 import dev.sharpxia.agentreins.hub.projection.CreateConversationRequest
+import dev.sharpxia.agentreins.hub.projection.MessageAttachment
 import dev.sharpxia.agentreins.hub.projection.ReadCursorRequest
 import dev.sharpxia.agentreins.hub.projection.RenameConversationRequest
 import dev.sharpxia.agentreins.hub.projection.SendMessageRequest
+import dev.sharpxia.agentreins.hub.projection.encodeAttachments
 import dev.sharpxia.agentreins.hubdb.HubDatabase
 import kotlinx.coroutines.CancellationException
 import kotlin.random.Random
@@ -37,26 +41,44 @@ class DefaultCommandClient(
     private val runOriginRegistry: RunOriginRegistry? = null,
 ) : CommandClient {
 
-    override suspend fun sendMessage(conversationId: String, text: String): CommandReceipt? =
-        enqueueAndSubmit("message.send", conversationId, text) { key ->
-            api.sendMessage(conversationId, SendMessageRequest(idempotencyKey = key, message = text))
+    /**
+     * v1.2.0 additive：payloadJson 升级为 SendMessageRequest 同形 JSON（idempotencyKey + message
+     * + attachments）——设计稿 §6「透传 attachments 进 payloadJson（同键同载荷重试语义不变，
+     * 重试重发同一 mediaId 集合，幂等键不换）」。存量行 payloadJson 为裸文本，retryUnfinished
+     * 解码失败即回退裸文本口径（见下）；decodeFromJsonElement 失败面窄（仅用户正文恰为该形
+     * JSON 的病态输入），后果仍是同键重发，可接受。
+     */
+    override suspend fun sendMessage(conversationId: String, text: String, attachments: List<AttachmentRef>): CommandReceipt? =
+        enqueueAndSubmit(
+            "message.send",
+            conversationId,
+            payload = { key ->
+                HubJson.encodeToString(
+                    SendMessageRequest.serializer(),
+                    SendMessageRequest(idempotencyKey = key, message = text, attachments = attachments),
+                )
+            },
+            optimisticContent = text,
+            optimisticAttachments = attachments,
+        ) { key ->
+            api.sendMessage(conversationId, SendMessageRequest(idempotencyKey = key, message = text, attachments = attachments))
         }
 
     override suspend fun markRead(conversationId: String, readUpTo: Long) {
-        enqueueAndSubmit("read.mark", conversationId, readUpTo.toString()) { key ->
+        enqueueAndSubmit("read.mark", conversationId, payload = { readUpTo.toString() }) { key ->
             api.markRead(conversationId, ReadCursorRequest(idempotencyKey = key, readUpTo = readUpTo))
         }
     }
 
     override suspend fun cancelRun(runId: String) {
-        enqueueAndSubmit("run.cancel", null, runId) { key ->
+        enqueueAndSubmit("run.cancel", null, payload = { runId }) { key ->
             api.cancelRun(runId, CancelRunRequest(idempotencyKey = key))
         }
     }
 
     /** 审批决定（wp-9）：同 sendMessage 语义——PERSISTED 回执返回 receipt，确定性拒绝/网络不可达返回 null。 */
     override suspend fun decideApproval(approvalId: String, decision: String): CommandReceipt? =
-        enqueueAndSubmit("approval.decide", null, "$approvalId:$decision") { key ->
+        enqueueAndSubmit("approval.decide", null, payload = { "$approvalId:$decision" }) { key ->
             api.decideApproval(approvalId, ApprovalDecisionRequest(idempotencyKey = key, decision = decision))
         }
 
@@ -84,11 +106,16 @@ class DefaultCommandClient(
             when (cmd.type) {
                 "message.send" -> if (cmd.conversationId != null && cmd.payloadJson.isNotEmpty()) {
                     val convId = cmd.conversationId
+                    // v1.2.0 additive：payloadJson 为 SendMessageRequest 同形 JSON（含 attachments
+                    // mediaId 集合），同键同载荷幂等重发；存量裸文本行解码失败回退旧口径（空附件）。
+                    val req = runCatching {
+                        HubJson.decodeFromString(SendMessageRequest.serializer(), cmd.payloadJson)
+                    }.getOrElse { SendMessageRequest(idempotencyKey = cmd.idempotencyKey, message = cmd.payloadJson) }
                     submit(cmd.idempotencyKey, onPersisted = {
                         // 断线恢复重试成功同样登记 SEND 准入（消息此时才真正发出、run 才由它发起）
                         runOriginRegistry?.markSubmission(convId, RunOriginRegistry.Kind.SEND)
                     }) {
-                        api.sendMessage(convId, SendMessageRequest(cmd.idempotencyKey, cmd.payloadJson))
+                        api.sendMessage(convId, req.copy(idempotencyKey = cmd.idempotencyKey))
                     }
                 }
                 "read.mark" -> {
@@ -106,10 +133,17 @@ class DefaultCommandClient(
 
     // ── 内部 ──
 
+    /**
+     * [payload] 为幂等键 → 载荷 JSON 编码函数（键在函数内生成，message.send 的载荷含键）；
+     * [optimisticContent]/[optimisticAttachments] 仅 message.send 乐观行落库用（v9：附件随行
+     * 落列供本地即时渲染，回执提升 promoteLocalEcho 不触附件列，保留至服务端权威行）。
+     */
     private suspend fun enqueueAndSubmit(
         type: String,
         conversationId: String?,
-        payload: String,
+        payload: (key: String) -> String,
+        optimisticContent: String? = null,
+        optimisticAttachments: List<AttachmentRef> = emptyList(),
         call: suspend (key: String) -> CommandReceipt,
     ): CommandReceipt? {
         val key = newUuid()
@@ -117,7 +151,7 @@ class DefaultCommandClient(
         db.hubQueries.insertCommand(
             idempotencyKey = key, commandId = null, conversationId = conversationId,
             runId = null, approvalId = null, type = type,
-            payloadJson = payload, state = "PENDING_LOCAL", errorCode = null,
+            payloadJson = payload(key), state = "PENDING_LOCAL", errorCode = null,
             createdAt = now, updatedAt = now,
         )
         // message.send 同步插乐观行（messageId=幂等键临时占位，message.created 回执时提升为服务端行；
@@ -132,9 +166,23 @@ class DefaultCommandClient(
                 ?.hasActiveRun == 1L
             db.hubQueries.upsertMessage(
                 messageId = key, conversationId = conversationId, seq = Long.MAX_VALUE,
-                role = "user", content = payload, state = "final", reason = null,
+                role = "user", content = optimisticContent ?: payload(key), state = "final", reason = null,
                 uiState = if (runActive) "queued" else "sending",
                 commandId = null, idempotencyKey = key, ts = now,
+                // v9：附件随乐观行落列（MessageAttachment[] JSON）供本地即时渲染；空清单落 NULL
+                attachments = encodeAttachments(
+                    optimisticAttachments.map { ref ->
+                        MessageAttachment(
+                            source = "hub",
+                            mediaId = ref.mediaId,
+                            mimeType = ref.mimeType,
+                            fileName = ref.fileName,
+                            sizeBytes = ref.sizeBytes,
+                            width = ref.width,
+                            height = ref.height,
+                        )
+                    },
+                ),
             )
         }
         return submit(key, onPersisted = {

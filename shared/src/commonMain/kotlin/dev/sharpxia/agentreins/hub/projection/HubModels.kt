@@ -1,7 +1,10 @@
 package dev.sharpxia.agentreins.hub.projection
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.decodeFromJsonElement
 
 @Serializable
 data class AgentRef(val agentId: String, val label: String)
@@ -77,6 +80,13 @@ data class MessageRow(
     val commandId: String? = null,
     val idempotencyKey: String? = null,
     val timestamp: String? = null,
+    /**
+     * 可选（v1.2.0 additive，多模态 v1，设计稿 docs/multimodal-design-20261108.md §3）：
+     * 行级媒体附件视图（[MessageAttachment]，≤4 项）。source=hub 行经端点 #24 Bearer 拉取
+     * （行内不落 URL）；source=external 行 url 必带（agent 外发 URL 原样）。快照、历史、
+     * 事件三面共用行 Schema；老服务端/存量行无此字段即 null（宽解析容缺）。
+     */
+    val attachments: List<MessageAttachment>? = null,
 )
 
 @Serializable
@@ -172,8 +182,97 @@ data class SnapshotResponse(
 
 // ── 命令请求/回执（08 §4.4–4.8 共用 202 + CommandReceipt） ──────────────────
 
+/**
+ * 发送消息请求（#9）。v1.2.0 additive：可选 [AttachmentRef] 附件引用（≤4 项，mediaId 必填，
+ * 须为本设备账号经端点 #23 上传且 state=available 的对象；mimeType/fileName/sizeBytes/width/
+ * height 仅展示回显用，服务端以存储行魔数嗅探值为准）。encodeDefaults=false 下空清单不编码
+ * ——纯文本消息的线上载荷与 v1.1 字节级同形，老服务端宽松 JSON 解码忽略未知字段亦兼容
+ * （设计稿 §3 向后兼容论证；附件语义：message 与 attachments 至少一项非空，服务端校验）。
+ */
 @Serializable
-data class SendMessageRequest(val idempotencyKey: String, val message: String)
+data class SendMessageRequest(
+    val idempotencyKey: String,
+    val message: String,
+    val attachments: List<AttachmentRef> = emptyList(),
+)
+
+/**
+ * 消息发送附件引用（端点 #9 请求体，v1.2.0 契约 AttachmentRef：required=[mediaId]）。
+ * 绑定随消息受理落库、一次绑定不可复用于第二条消息；幂等重试重发同一 mediaId 集合
+ * （ADR-07 同键同载荷语义不变——DefaultCommandClient payloadJson 即本形 JSON）。
+ */
+@Serializable
+data class AttachmentRef(
+    /** 端点 #23 上传返回的 Hub ULID。 */
+    val mediaId: String,
+    /** 展示回显用；服务端以存储行嗅探值为准。 */
+    val mimeType: String? = null,
+    val fileName: String? = null,
+    val sizeBytes: Long? = null,
+    val width: Int? = null,
+    val height: Int? = null,
+)
+
+/**
+ * 消息行附件视图（v1.2.0 契约 MessageAttachment：required=[source]；MessageRow.attachments
+ * 与事件 message.created 载荷 attachments 同形，载荷为开放对象 additive）。
+ * source=hub 行 [mediaId] 必带（经端点 #24 Bearer 拉取，行内永不落签名 URL——随 eventlog
+ * 持久化会结构性过期）；source=external 行 [url] 必带（agent 外发 URL 原样透传，客户端
+ * 对 http 降级链接 chip，不改写不代理）。其余字段服务端有则透传、无则省略（不发明）。
+ */
+@Serializable
+data class MessageAttachment(
+    /** hub = Hub 存储对象；external = agent 外发 URL 引用。 */
+    val source: String,
+    val mediaId: String? = null,
+    /** source=external 必带；http(s) URL。 */
+    val url: String? = null,
+    val mimeType: String? = null,
+    val fileName: String? = null,
+    val sizeBytes: Long? = null,
+    val width: Int? = null,
+    val height: Int? = null,
+)
+
+/** 上传成功响应（端点 #23，v1.2.0 契约 MediaUploadResponse：required=[mediaId, mimeType, sizeBytes]）。 */
+@Serializable
+data class MediaUpload(
+    /** Hub ULID = 媒体对象 ID，随 SendMessageRequest.attachments.mediaId 回传。 */
+    val mediaId: String,
+    /** 服务端魔数嗅探结果（非请求声明值）。 */
+    val mimeType: String,
+    val sizeBytes: Long,
+    /** 请求可选表单字段回显；未提供则省略（null）。 */
+    val width: Int? = null,
+    val height: Int? = null,
+)
+
+// ── attachments 列 JSON 口径（v1.2.0 多模态，设计稿 §6；投影/命令/UI 三层共用） ──
+
+/** hubMessages.attachments 列（JSON 文本，可空 = 无附件）的编解码器：宽松容缺与全文件同族。 */
+val AttachmentsJson: Json = Json {
+    ignoreUnknownKeys = true
+    isLenient = true
+    explicitNulls = false
+}
+
+private val ATTACHMENTS_LIST = ListSerializer(MessageAttachment.serializer())
+
+/** 落库编码：空清单 → null（列保持空，与存量老行同形）；非空 → MessageAttachment 数组 JSON 文本。 */
+fun encodeAttachments(list: List<MessageAttachment>): String? =
+    if (list.isEmpty()) null else AttachmentsJson.encodeToString(ATTACHMENTS_LIST, list)
+
+/** 读取解码：null/空串/坏 JSON/形状漂移一律降级空清单——坏 JSON 丢弃不炸行（呈现面非权威纪律）。 */
+fun decodeAttachments(text: String?): List<MessageAttachment> {
+    if (text.isNullOrEmpty()) return emptyList()
+    return runCatching { AttachmentsJson.decodeFromString(ATTACHMENTS_LIST, text) }.getOrDefault(emptyList())
+}
+
+/** 事件载荷 attachments（开放对象 additive 的原始 JsonElement）解码；解析失败降级空清单不炸帧。 */
+fun decodeAttachmentsElement(el: JsonElement?): List<MessageAttachment> {
+    el ?: return emptyList()
+    return runCatching { AttachmentsJson.decodeFromJsonElement(ATTACHMENTS_LIST, el) }.getOrDefault(emptyList())
+}
 
 @Serializable
 data class ReadCursorRequest(val idempotencyKey: String, val readUpTo: Long)

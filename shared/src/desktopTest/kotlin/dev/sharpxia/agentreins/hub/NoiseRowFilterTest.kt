@@ -22,7 +22,7 @@ class NoiseRowFilterTest {
         db.hubQueries.upsertMessage(
             messageId = id, conversationId = CONV, seq = seq, role = role, content = content,
             state = "final", reason = null, uiState = null, commandId = null,
-            idempotencyKey = null, ts = T0,
+            idempotencyKey = null, ts = T0, attachments = null,
         )
     }
 

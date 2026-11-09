@@ -18,6 +18,7 @@ import dev.sharpxia.agentreins.hub.projection.ConversationsPage
 import dev.sharpxia.agentreins.hub.projection.CreateConversationRequest
 import dev.sharpxia.agentreins.hub.projection.EventsPage
 import dev.sharpxia.agentreins.hub.projection.GatewaysPage
+import dev.sharpxia.agentreins.hub.projection.MediaUpload
 import dev.sharpxia.agentreins.hub.projection.MessagesPage
 import dev.sharpxia.agentreins.hub.projection.ReadCursorRequest
 import dev.sharpxia.agentreins.hub.projection.RenameConversationRequest
@@ -28,15 +29,18 @@ import io.ktor.client.call.body
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.delete
+import io.ktor.client.request.forms.formData
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.patch
 import io.ktor.client.request.parameter
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
+import io.ktor.client.request.forms.submitFormWithBinaryData
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
+import io.ktor.http.Headers
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
@@ -101,6 +105,52 @@ class DefaultHubApi(
 
     override suspend fun sendMessage(conversationId: String, req: SendMessageRequest): CommandReceipt =
         post("/conversations/$conversationId/messages", req)
+
+    /**
+     * #23（v1.2.0 additive）：multipart 上传（MediaUploadBody：file 必填二进制 + fileName/
+     * width/height 可选表单字段）。[mime] 只作 file part 的 Content-Type 声明——服务端以魔数
+     * 字节判定白名单类型、不信任本头（契约端点 #23 description）；返回 mimeType 为服务端嗅探值。
+     * 路径参数 conversationId 为 Hub ULID（服务端签发句柄），直拼与既有样板同口径安全。
+     */
+    override suspend fun uploadMedia(
+        conversationId: String,
+        bytes: ByteArray,
+        mime: String,
+        fileName: String?,
+        width: Int?,
+        height: Int?,
+    ): MediaUpload {
+        // 部件表单以第二位置参数显式传入——submitFormWithBinaryData 的表单参数带缺省（空表单），
+        // 缺位会静默上送空 multipart，必须始终传值（Ktor 3.6 该参数在 common 源码中不叫
+        // formDataBinaryContent，具名不可靠，位置参数 + 始终传值是防呆必需）。
+        val resp = http.submitFormWithBinaryData(
+            config.baseUrl + "/conversations/$conversationId/media",
+            formData {
+                append(
+                    "file", bytes,
+                    Headers.build { append(HttpHeaders.ContentType, mime) },
+                )
+                fileName?.let { append("fileName", it) }
+                width?.let { append("width", it.toString()) }
+                height?.let { append("height", it.toString()) }
+            },
+        ) {
+            bearer()
+        }
+        return decode(resp)
+    }
+
+    /**
+     * #24（v1.2.0 additive）：媒体内容拉取（GET /media/{mediaId}/content，Bearer 分支）。
+     * 响应为原始字节——不走 JSON decode 管线（ContentNegotiation 只作用于 JSON 壳），
+     * ensureSuccess 后直读 ByteArray body。[mediaId] 为 Hub ULID（服务端签发句柄），
+     * 直拼与既有路径样板同口径安全；契约 404 HUB-BIZ-002 防枚举由服务端裁决。
+     */
+    override suspend fun fetchMediaContent(mediaId: String): ByteArray {
+        val resp = http.get(config.baseUrl + "/media/$mediaId/content") { bearer() }
+        ensureSuccess(resp)
+        return resp.body()
+    }
 
     override suspend fun markRead(conversationId: String, req: ReadCursorRequest): CommandReceipt =
         post("/conversations/$conversationId/read-cursor", req)

@@ -18,8 +18,11 @@ import dev.sharpxia.agentreins.hubdb.HubDatabase
  *  即真机「点开会话即崩」根因；本版本号今后与 Hub.sq 结构变更必须同步升。
  *  8 = additive（2026-11-06 真机修复）：message.created 容缺解码 + seq 兜底 + deleteDeliveredOptimisticExcept
  *  （Hub.sq 新查询）；升版另承担「存量事件流已消费、cursor 已越过无 seq 事件」的自愈面——drop 重建
- *  清 cursor → 冷启动快照全量重取，0.5.4 已损坏设备（详情页空）免重装即恢复。 */
-internal const val HUB_DB_VERSION = 8L
+ *  清 cursor → 冷启动快照全量重取，0.5.4 已损坏设备（详情页空）免重装即恢复。
+ *  9 = additive（2026-11-09 多模态 v1，契约 v1.2.0）：hubMessages 增 attachments（消息行媒体附件
+ *  引用，MessageAttachment[] JSON 文本列、可空）——版本号与结构同步升（v3 死库教训），投影可弃，
+ *  drop 重建后从快照重取。 */
+internal const val HUB_DB_VERSION = 9L
 
 /** 版本记账行键（hubSyncState；beta-0.5.4 真机死库根因修复——PRAGMA 层归 SQLiter，见 openHubDatabase）。 */
 private const val DB_VERSION_KEY = "db_version"

@@ -17,6 +17,7 @@ import dev.sharpxia.agentreins.hub.projection.ConversationsPage
 import dev.sharpxia.agentreins.hub.projection.CreateConversationRequest
 import dev.sharpxia.agentreins.hub.projection.EventsPage
 import dev.sharpxia.agentreins.hub.projection.GatewaysPage
+import dev.sharpxia.agentreins.hub.projection.MediaUpload
 import dev.sharpxia.agentreins.hub.projection.MessagesPage
 import dev.sharpxia.agentreins.hub.projection.ReadCursorRequest
 import dev.sharpxia.agentreins.hub.projection.RenameConversationRequest
@@ -25,11 +26,11 @@ import dev.sharpxia.agentreins.hub.projection.SnapshotResponse
 import dev.sharpxia.agentreins.hub.projection.CancelRunRequest
 
 /**
- * Hub REST 客户端（契约 v1.1.0：18 端点 + WSS，tag hub-api-v1.1.1；v1.0 14 端点 + v1.1 新增 4）。
+ * Hub REST 客户端（契约 v1.2.0：22 端点 + WSS，tag hub-api-v1.2.0；v1.1 20 端点 + 多模态新增 #23/#24）。
  *
  * 契约钉版（P0 验收②，docs/plans/hub-migration-plan.md §6-P0；v1.1 迁移见 §8 变更清单）：
- * - REST 契约：`api/hub-api-v1.yaml` — OpenAPI 3.0.3，info.version = **v1.1.0**，`x-hub-api-version: 1`，
- *   冻结 git tag `hub-api-v1.1.1`（AgentReinService 仓）
+ * - REST 契约：`api/hub-api-v1.yaml` — OpenAPI 3.0.3，info.version = **v1.2.0**，`x-hub-api-version: 1`，
+ *   冻结 git tag `hub-api-v1.2.0`（AgentReinService 仓；tag 名 ≠ yaml version，AGENTS.md 纪律）
  * - WSS 帧契约：`api/hub-wss-frames-v1.schema.json` — JSON Schema 2020-12，protocolVersion 支持集 = {1}
  * - 版本策略（08 §6.1）：/v1 内仅 additive（新增端点、可选请求字段、响应字段、错误码）；
  *   破坏性变更升 /v2 并行 ≥90 天（v1.1 为前端未开工期的破坏性修订特例，不经 /v2）。客户端义务
@@ -76,6 +77,34 @@ interface HubApi {
 
     /** 发送消息命令 message.send（202 CommandReceipt）；同键同内容重放返回原 commandId，同键不同内容 409 HUB-BIZ-001。 */
     suspend fun sendMessage(conversationId: String, req: SendMessageRequest): CommandReceipt
+
+    /**
+     * #23（v1.2.0 additive，多模态 v1）：媒体上传——multipart/form-data（file 必填 +
+     * fileName/width/height 可选表单字段），201 MediaUploadResponse。硬约束：附件不经 WS
+     * 帧传输与存储（internal/artifacts/api.go 硬约束段）——图片字节只走本 REST 端点，命令
+     * 载荷只带 mediaId+元数据。服务端以魔数字节判定类型（白名单 jpeg/png/webp/gif，不信任
+     * 声明 Content-Type）、单文件 ≤20MB（流式读超限即断）；返回 mimeType 为服务端嗅探值
+     * （非请求声明值）。限流：上传类每设备 20 次/分钟（429 HUB-BIZ-003）。
+     * conversationId 仅作存在性归属校验，不产生绑定；404 = 会话不存在/无权（HUB-BIZ-002
+     * 防枚举），400 = 形状/类型/大小（HUB-BIZ-004）。
+     */
+    suspend fun uploadMedia(
+        conversationId: String,
+        bytes: ByteArray,
+        mime: String,
+        fileName: String? = null,
+        width: Int? = null,
+        height: Int? = null,
+    ): MediaUpload
+
+    /**
+     * #24（v1.2.0 additive，多模态 v1）：媒体内容拉取——客户端渲染面走 **Bearer** 分支
+     * （设备绑定 Token；设计稿 §2.4：签名 URL 分支供 Bridge 机对面，客户端面不用——签名
+     * URL 进历史行会结构性过期）。200 = 原始字节（Content-Type 为服务端嗅探 mime）；
+     * 401 = Bearer 失效（TokenManager.withBearer 负责刷新重试）、404 = mediaId 非 ULID/
+     * 未知/非 available（HUB-BIZ-002 防枚举）。[mediaId] 须为端点 #23 返回的 Hub ULID。
+     */
+    suspend fun fetchMediaContent(mediaId: String): ByteArray
 
     /** 已读上报命令 read.mark；readUpTo 指向当前化身的既有精确 message seq（05 §3.10）。 */
     suspend fun markRead(conversationId: String, req: ReadCursorRequest): CommandReceipt

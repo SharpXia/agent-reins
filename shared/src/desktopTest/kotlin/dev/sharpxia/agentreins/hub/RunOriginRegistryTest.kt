@@ -249,6 +249,9 @@ private open class RegisterFakeHubApi(private val receipt: CommandReceipt) : Hub
     override suspend fun conversations(limit: Int?, cursor: String?) = unused()
     override suspend fun messages(conversationId: String, before: Long?, limit: Int?) = unused()
     override suspend fun sendMessage(conversationId: String, req: SendMessageRequest): CommandReceipt = onSendMessage(conversationId, req)
+    override suspend fun uploadMedia(conversationId: String, bytes: ByteArray, mime: String, fileName: String?, width: Int?, height: Int?) = unused()
+    override suspend fun commands(conversationId: String) = unused()
+    override suspend fun models(conversationId: String) = unused()
     override suspend fun markRead(conversationId: String, req: ReadCursorRequest) = unused()
     override suspend fun createConversation(gatewayId: String, agentId: String, req: CreateConversationRequest) = unused()
     override suspend fun compactConversation(conversationId: String): CommandReceipt = receipt

@@ -8,12 +8,14 @@ import dev.sharpxia.agentreins.hub.HubRuntime
 import dev.sharpxia.agentreins.hub.UiApproval
 import dev.sharpxia.agentreins.hub.UiConversation
 import dev.sharpxia.agentreins.hub.UiGateway
+import dev.sharpxia.agentreins.hub.UiMediaUpload
 import dev.sharpxia.agentreins.hub.UiMessage
 import dev.sharpxia.agentreins.hub.UiMessagesPage
 import dev.sharpxia.agentreins.hub.UiWorkActivity
 import dev.sharpxia.agentreins.hub.auth.DeviceInfo
 import dev.sharpxia.agentreins.hub.db.createHubDriver
 import dev.sharpxia.agentreins.hub.db.openHubDatabase
+import dev.sharpxia.agentreins.hub.projection.AttachmentRef
 import dev.sharpxia.agentreins.hub.projection.CommandsList
 import dev.sharpxia.agentreins.hub.projection.ModelsList
 import dev.sharpxia.agentreins.hub.projection.EventEnvelope
@@ -258,6 +260,78 @@ class AgentBridge {
     /** 发送消息（幂等队列 + 乐观行；进度经 command.acked/message.created 事件翻转）。 */
     fun hubSend(conversationId: String, text: String) {
         scope.launch { runCatching { hubClient?.commands?.sendMessage(conversationId, text) } }
+    }
+
+    /**
+     * 发送带附件消息（v1.2.0 多模态 v1，设计稿 §6；幂等队列同 [hubSend]——附件引用进
+     * SendMessageRequest.attachments，命令载荷只带 mediaId+元数据（无 URL、无字节，附件
+     * 不经 WS 帧传输）。[attachments] = 端点 #23 上传返回的引用集合（≤4 项，mediaId 必带）。
+     * 乐观行随行落 attachments 列供本地即时渲染；断线重试同键重发同一 mediaId 集合
+     * （ADR-07 同键同载荷）。
+     */
+    fun hubSendWithAttachments(
+        conversationId: String,
+        text: String,
+        attachments: List<AttachmentRef>,
+    ) {
+        scope.launch {
+            runCatching { hubClient?.commands?.sendMessage(conversationId, text, attachments) }
+        }
+    }
+
+    /**
+     * 媒体上传（端点 #23，v1.2.0 additive；**纯上传直调不走幂等队列**，与 hubCommands/
+     * hubDevices 同式：authStack + withBearer 直调 REST）。[bytes] 图片字节（服务端魔数判定
+     * jpeg/png/webp/gif 白名单、≤20MB 帽；[mime] 仅作 part Content-Type 声明，服务端不信任）；
+     * [fileName]/[width]/[height] 可选展示元数据（fileName 永不进服务端存储路径，防穿越）。
+     * onDone 非 null = 上传成功（mediaId 随 hubSendWithAttachments 提交；草稿挂 chip 用）；
+     * null = 通道不可用（未登录/网络不可达/4xx 5xx——HUB-BIZ-004 类型/大小拒绝等），error =
+     * 人读失败原因，调用方须显式呈现失败 + 可重试，不静默。
+     */
+    fun hubUploadMedia(
+        conversationId: String,
+        bytes: ByteArray,
+        mime: String,
+        fileName: String?,
+        width: Int?,
+        height: Int?,
+        onDone: (upload: UiMediaUpload?, error: String?) -> Unit,
+    ) {
+        scope.launch {
+            val r = runCatching { hubClient?.uploadMedia(conversationId, bytes, mime, fileName, width, height) }
+            val upload = r.getOrNull()
+            if (upload != null) {
+                onDone(
+                    UiMediaUpload(
+                        mediaId = upload.mediaId, mimeType = upload.mimeType, sizeBytes = upload.sizeBytes,
+                        width = upload.width, height = upload.height,
+                    ),
+                    null,
+                )
+            } else {
+                onDone(null, describeError(r.exceptionOrNull()))
+            }
+        }
+    }
+
+    /**
+     * 媒体内容拉取（端点 #24 Bearer 分支，v1.2.0 additive；与 [hubUploadMedia] 同式直调，
+     * **纯读不走幂等队列**）。Swift 消息行媒体加载器的唯一取数通道——凭据纪律（HubStore.swift
+     * 头注释）：Token 只在 KMP TokenManager 内、Swift 层不持有，故 loader 不自行拼 URL 带
+     * Bearer 头，而经本桥取字节。onDone bytes 非 null = 成功（原始字节，不落盘持久化）；
+     * null = 通道不可用（未登录/网络不可达/404 HUB-BIZ-002/401 刷新失败等），error = 人读
+     * 失败原因，调用方显式呈失败态 + 可重试，不静默。
+     */
+    fun hubFetchMedia(mediaId: String, onDone: (bytes: ByteArray?, error: String?) -> Unit) {
+        scope.launch {
+            val r = runCatching { hubClient?.fetchMediaContent(mediaId) }
+            val bytes = r.getOrNull()
+            if (bytes != null) {
+                onDone(bytes, null)
+            } else {
+                onDone(null, describeError(r.exceptionOrNull()))
+            }
+        }
     }
 
     /**

@@ -26,6 +26,13 @@
 --   session.updated 身份（label/hasActiveRun/化身）、run.started 活跃翻转、tool.*/run.status 捕获
 --   一律只认自学习行——同 agent 的 channel/TG 会话与任务会话由此不混入主线卡（app 主会话隔离，
 --   2026-11-06 聚合轮 allowlist 收口的客户端对位）；session.removed 只对自学习行级联删卡。
+-- v9（2026-11-09 additive，多模态 v1，契约 v1.2.0，设计稿 docs/multimodal-design-20261108.md §6）：
+--   hubMessages 增 attachments（消息行媒体附件引用，JSON 文本列、可空 = 无附件）。事件路径
+--   message.created 载荷 attachments 与快照/历史路径 MessageRow.attachments 同形
+--   （MessageAttachment[]，source=hub 行 mediaId 必带、source=external 行 url 必带），落库
+--   统一编码为 JSON 文本（坏 JSON 丢弃降级空清单，不炸行）；乐观行随发送落同列供本地即时渲染
+--   （回执提升 promoteLocalEcho 不触本列，本地行附件保留）；流式 delta 占位行恒 NULL。
+--   列编解码口径见 projection 包 encodeAttachments/decodeAttachments。
 -- v1.1 关键契约事实（08 §8.1/§8.5）：REST ConversationRow 撤 sessionKey/sessionId/lifecycleRevision，
 -- 事件信封按域带 sessionKey（eventlog 强制校验：message/session/tool/approval/run 域必带、
 -- gateway/read 域不带）——两域无交集字段。因此：
@@ -90,7 +97,8 @@ CREATE TABLE hubMessages (
     uiState TEXT,                           -- 仅用户行：sending/delivered/read/failed
     commandId TEXT,
     idempotencyKey TEXT,
-    ts TEXT
+    ts TEXT,
+    attachments TEXT                        -- v9：消息行媒体附件引用（MessageAttachment[] JSON 文本，可空 = 无附件；编解码见 projection.encodeAttachments/decodeAttachments）
 );
 CREATE INDEX hubMessages_byConv ON hubMessages(conversationId, seq);
 CREATE INDEX hubMessages_byIdem ON hubMessages(idempotencyKey);
@@ -349,8 +357,8 @@ WHERE conversationId = :conversationId;
 
 upsertMessage:
 INSERT OR REPLACE INTO hubMessages
-(messageId, conversationId, seq, role, content, state, uiState, commandId, idempotencyKey, ts, reason)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+(messageId, conversationId, seq, role, content, state, uiState, commandId, idempotencyKey, ts, reason, attachments)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- delta 追加（replace=false）：流式行内容拼接
 appendMessageContent:

@@ -28,6 +28,14 @@ private data class DataMessageCreated(
     val sourceMessageSeq: Long = 0,
     val commandId: String? = null,
     val idempotencyKey: String? = null,
+    /**
+     * v1.2.0 additive（多模态 v1，设计稿 §3 事件面）：行级媒体附件（MessageAttachment[] 同形，
+     * source=hub 行 mediaId 必带、source=external 行 url 必带）。载荷为开放对象 additive 键
+     * （08 §10.1），此处以原始 JsonElement 承载、onMessageCreated 内再解码——**坏形状降级空清单
+     * 而不整帧丢弃**：attachments 是展示面，解码失败不应让消息正文一起丢失（与本文件「宽松
+     * 解析、缺键降级」纪律同源）。老桥/老 Hub 载荷无此字段即 null。
+     */
+    val attachments: JsonElement? = null,
 )
 
 @Serializable
@@ -223,6 +231,7 @@ class DefaultEventProjector(
                         commandId = m.commandId,
                         idempotencyKey = m.idempotencyKey,
                         ts = m.timestamp,
+                        attachments = encodeAttachments(m.attachments.orEmpty()), // v9：快照行附件 → JSON 列（老行缺省空清单落 NULL）
                     )
                 }
                 snapshot.readCursors[c.conversationId]?.let { up ->
@@ -343,6 +352,7 @@ class DefaultEventProjector(
                 commandId = null,
                 idempotencyKey = null,
                 ts = envelope.ts,
+                attachments = null, // 流式占位行无附件语义；权威 created 行落定时同键覆盖
             )
             if (d.replace != true) {
                 db.hubQueries.appendMessageContent(d.deltaText, d.messageId)
@@ -358,6 +368,10 @@ class DefaultEventProjector(
 
     private fun onMessageCreated(envelope: EventEnvelope) {
         val d = decode(DataMessageCreated.serializer(), envelope.data) ?: return skip()
+        // v9 多模态：载荷 attachments（开放对象 additive 原始 JsonElement）独立解码——坏形状
+        // 降级空清单、不整帧丢弃（附件是展示面，解码失败不得连坐消息正文；DTO 注释）。
+        // 空清单落列 NULL（与存量无附件行同形，encodeAttachments）。
+        val attachments = decodeAttachmentsElement(d.attachments)
         // 只认自学习映射（v7 分域，注释同 onMessageDelta）：同 agent 的 channel/任务会话消息
         // 不得写入主线卡时间线、不得推未读（app 主会话隔离）
         val convId = resolveConversation(envelope, d.idempotencyKey, allowTwoHop = false) ?: return skip()
@@ -409,6 +423,7 @@ class DefaultEventProjector(
             commandId = d.commandId,
             idempotencyKey = d.idempotencyKey,
             ts = envelope.ts,
+            attachments = encodeAttachments(attachments), // v9：事件路径附件落列；promoteLocalEcho 分支不触列，本地乐观行附件保留
         )
         if (isUser) {
             // 发送方乐观行翻转（05 §3.9 义务 4）：幂等键命中的本地行 sending → delivered

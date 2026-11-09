@@ -105,11 +105,13 @@ class MessageCreatedSeqFallbackTest {
             messageId = "opti-delivered", conversationId = CONV, seq = Long.MAX_VALUE,
             role = "user", content = "先发", state = "final", reason = null,
             uiState = "delivered", commandId = null, idempotencyKey = "idem-1", ts = T0,
+            attachments = null,
         )
         db.hubQueries.upsertMessage(
             messageId = "opti-sending", conversationId = CONV, seq = Long.MAX_VALUE,
             role = "user", content = "后发", state = "final", reason = null,
             uiState = "sending", commandId = null, idempotencyKey = "idem-2", ts = T0,
+            attachments = null,
         )
 
         p.applyEvent(ev(E1, createdData("srv-echo-1", "user", "先发")))
@@ -131,6 +133,7 @@ class MessageCreatedSeqFallbackTest {
             messageId = "opti-1", conversationId = CONV, seq = Long.MAX_VALUE,
             role = "user", content = "测试", state = "final", reason = null,
             uiState = "sending", commandId = null, idempotencyKey = "idem-1", ts = T0,
+            attachments = null,
         )
 
         p.applyEvent(ev(E1, createdData("srv-echo-1", "user", "测试", idempotencyKey = "idem-1")))

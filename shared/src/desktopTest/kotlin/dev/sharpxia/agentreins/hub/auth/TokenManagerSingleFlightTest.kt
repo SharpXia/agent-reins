@@ -12,6 +12,7 @@ import dev.sharpxia.agentreins.hub.projection.RenameConversationRequest
 import dev.sharpxia.agentreins.hub.projection.ConversationsPage
 import dev.sharpxia.agentreins.hub.projection.EventsPage
 import dev.sharpxia.agentreins.hub.projection.GatewaysPage
+import dev.sharpxia.agentreins.hub.projection.MediaUpload
 import dev.sharpxia.agentreins.hub.projection.MessagesPage
 import dev.sharpxia.agentreins.hub.projection.ReadCursorRequest
 import dev.sharpxia.agentreins.hub.projection.SendMessageRequest
@@ -79,6 +80,9 @@ class TokenManagerSingleFlightTest {
         override suspend fun conversations(limit: Int?, cursor: String?): ConversationsPage = unused()
         override suspend fun messages(conversationId: String, before: Long?, limit: Int?): MessagesPage = unused()
         override suspend fun sendMessage(conversationId: String, req: SendMessageRequest): CommandReceipt = unused()
+        override suspend fun uploadMedia(conversationId: String, bytes: ByteArray, mime: String, fileName: String?, width: Int?, height: Int?): MediaUpload = unused()
+        override suspend fun commands(conversationId: String) = unused()
+        override suspend fun models(conversationId: String) = unused()
         override suspend fun createConversation(gatewayId: String, agentId: String, req: CreateConversationRequest): CommandReceipt = unused()
         override suspend fun compactConversation(conversationId: String): CommandReceipt = unused()
         override suspend fun agentStatus(gatewayId: String, agentId: String): AgentStatusResponse = unused()

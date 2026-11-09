@@ -1,5 +1,6 @@
 package dev.sharpxia.agentreins.hub.command
 
+import dev.sharpxia.agentreins.hub.projection.AttachmentRef
 import dev.sharpxia.agentreins.hub.projection.CommandReceipt
 
 /**
@@ -12,8 +13,10 @@ interface CommandClient {
     /**
      * 发送消息：内部生成幂等键（永不更换），同步插乐观行（uiState=sending）+ PENDING_LOCAL 队列，
      * 提交成功返回 receipt（PERSISTED）；确定性拒绝返回 null（队列条目 FAILED + 错误码）。
+     * v1.2.0 additive：[attachments] 随载荷提交（≤4 项 mediaId 引用，端点 #23 上传产物）；
+     * 纯文本路径缺省空清单，线上载荷与 v1.1 同形（SendMessageRequest 空清单不编码）。
      */
-    suspend fun sendMessage(conversationId: String, text: String): CommandReceipt?
+    suspend fun sendMessage(conversationId: String, text: String, attachments: List<AttachmentRef> = emptyList()): CommandReceipt?
 
     /** 已读上报（会话完整渲染后调用；readUpTo = 已渲染最大 message seq）。 */
     suspend fun markRead(conversationId: String, readUpTo: Long)

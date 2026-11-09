@@ -14,7 +14,10 @@ import dev.sharpxia.agentreins.hub.projection.ConversationRow
 import dev.sharpxia.agentreins.hub.projection.DefaultEventProjector
 import dev.sharpxia.agentreins.hub.projection.EventEnvelope
 import dev.sharpxia.agentreins.hub.projection.EventProjector
+import dev.sharpxia.agentreins.hub.projection.MediaUpload
 import dev.sharpxia.agentreins.hub.projection.SnapshotResponse
+import dev.sharpxia.agentreins.hub.projection.decodeAttachments
+import dev.sharpxia.agentreins.hub.projection.encodeAttachments
 import dev.sharpxia.agentreins.hub.db.createHubDriver
 import dev.sharpxia.agentreins.hub.db.openHubDatabase
 import dev.sharpxia.agentreins.hub.sync.DbEventCursorStore
@@ -56,6 +59,24 @@ data class UiConversation(
     val activeRunId: String? = null,
 )
 
+/**
+ * UI 消息附件行（v1.2.0 多模态 v1，设计稿 §6）：hubMessages.attachments 列的解码投影——
+ * source=hub 行 [mediaId] 必带（经端点 #24 Bearer 拉取渲染，客户端用自定义 loader 带请求头，
+ * 原生 AsyncImage 无法携带 Authorization 头）；source=external 行 [url] 必带（agent 外发
+ * URL 原样，http 降级链接 chip）。桥面 DTO 纪律：字段均为 String/Long/Int/Boolean/可空 String。
+ */
+data class UiAttachment(
+    /** hub / external（契约 MessageAttachment.source 闭集；未知值原样透出由 UI 兜底）。 */
+    val source: String,
+    val mediaId: String?,
+    val url: String?,
+    val mimeType: String?,
+    val fileName: String?,
+    val sizeBytes: Long?,
+    val width: Int?,
+    val height: Int?,
+)
+
 /** UI 消息行：state ∈ final/streaming/failed；uiState 仅用户行（sending/delivered/read/failed）。 */
 data class UiMessage(
     val messageId: String,
@@ -71,6 +92,12 @@ data class UiMessage(
      * state_contention/unknown）；仅 failed 行可携带，未分类失败为 null（不虚构）。
      */
     val errorKind: String? = null,
+    /**
+     * 媒体附件（v1.2.0 additive，多模态 v1）：事件/快照/历史三路径与本地乐观行四路共列
+     * （hubMessages.attachments，JSON 文本）；坏 JSON 降级空清单不炸行（decodeAttachments）。
+     * 无附件行为空清单。
+     */
+    val attachments: List<UiAttachment> = emptyList(),
 )
 
 /**
@@ -102,6 +129,20 @@ data class UiApproval(
     /** 有界载荷摘要（DataApprovalRequested.payloadSummary，原样透出）。 */
     val payloadSummary: String,
     val updatedAt: String,
+)
+
+/**
+ * UI 上传结果（v1.2.0 多模态 v1，端点 #23 MediaUploadResponse 投影，iOS 桥 [AgentBridge]
+ * hubUploadMedia 回调面）：mediaId 是后续 message.send attachments 引用的唯一句柄——草稿
+ * 阶段按本值挂附件 chip，发送时随 [SendMessageRequest.attachments.mediaId] 提交。
+ * mimeType 为服务端魔数嗅探值（非请求声明值）；width/height 为请求回显，未提供为 null。
+ */
+data class UiMediaUpload(
+    val mediaId: String,
+    val mimeType: String,
+    val sizeBytes: Long,
+    val width: Int?,
+    val height: Int?,
 )
 
 /** 网关下的 Agent 只读行（GatewaySummary.agents 的 AgentRef 镜像，wp-11 透出 agentsJson）。 */
@@ -346,6 +387,13 @@ class DefaultHubClient(
                 UiMessage(
                     messageId = it.messageId, seq = it.seq, role = it.role, content = it.content,
                     state = it.state, uiState = it.uiState, ts = it.ts, errorKind = it.reason,
+                    // v9：attachments 列解码为结构化行（坏 JSON 容缺空清单，不炸行）
+                    attachments = decodeAttachments(it.attachments).map { a ->
+                        UiAttachment(
+                            source = a.source, mediaId = a.mediaId, url = a.url, mimeType = a.mimeType,
+                            fileName = a.fileName, sizeBytes = a.sizeBytes, width = a.width, height = a.height,
+                        )
+                    },
                 )
             }
         }
@@ -438,6 +486,7 @@ class DefaultHubClient(
                     commandId = m.commandId,
                     idempotencyKey = m.idempotencyKey,
                     ts = m.timestamp,
+                    attachments = encodeAttachments(m.attachments.orEmpty()), // v9：历史行附件透传落列
                 )
             }
         }
@@ -506,6 +555,39 @@ class DefaultHubClient(
     }
 
     // ── v1.1 新端点门面（#16/#17/#18/#19；不走幂等队列，直调） ──────────────
+
+    /**
+     * 媒体上传门面（端点 #23，v1.2.0 additive 多模态 v1；**纯上传不走幂等队列**——上传是
+     * REST 一次性资源创建，无 CommandReceipt 可追；失败由调用方提示重选/重传，上传成功后
+     * mediaId 随 message.send 的 SendMessageRequest.attachments 提交，消息本体仍走幂等队列）。
+     * [bytes] 为图片字节（服务端以魔数判定类型白名单与 ≤20MB 帽，[mime] 仅作 part 声明）；
+     * [fileName]/[width]/[height] 为可选展示元数据（服务端对象键由 ULID+嗅探扩展名构成，
+     * fileName 永不进存储路径）。返回 [MediaUpload]（mediaId + 服务端嗅探 mime/size 回显）；
+     * 未登录抛 IllegalStateException，网络/契约错误按 HubException 冒泡给调用方呈现。
+     */
+    suspend fun uploadMedia(
+        conversationId: String,
+        bytes: ByteArray,
+        mime: String,
+        fileName: String? = null,
+        width: Int? = null,
+        height: Int? = null,
+    ): MediaUpload {
+        val stack = runtime.authStack ?: throw IllegalStateException("未登录")
+        return stack.auth.withBearer { stack.api.uploadMedia(conversationId, bytes, mime, fileName, width, height) }
+    }
+
+    /**
+     * 媒体内容拉取门面（端点 #24，v1.2.0 additive 多模态 v1；**纯读不走幂等队列**——与
+     * uploadMedia 同式直调）。客户端渲染面 Bearer 分支（设计稿 §2.4）：Token 刷新/重试由
+     * TokenManager.withBearer 承担；调用方（桥 → Swift 媒体加载器）对失败显式呈失败态 +
+     * 可重试，不静默。字节仅在渲染窗口内存持有，不落盘缓存（与 artifacts「不缓存不持久化
+     * 下载字节」语义同源——客户端 NSCache 只存解码后 UIImage，进程级自然回收）。
+     */
+    suspend fun fetchMediaContent(mediaId: String): ByteArray {
+        val stack = runtime.authStack ?: throw IllegalStateException("未登录")
+        return stack.auth.withBearer { stack.api.fetchMediaContent(mediaId) }
+    }
 
     /**
      * 新开会话（openclaw 原生指令；幂等键 Hub 生成，HubModels.kt CreateConversationRequest）。

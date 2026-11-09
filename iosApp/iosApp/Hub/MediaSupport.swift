@@ -333,12 +333,17 @@ struct ExternalLinkChip: View {
 }
 
 /// 消息行附件横排（≤9 项，v1.2.1 契约上限；气泡内 VStack 之下一行）。
+/// v1.4 查看器：可内联渲染的图片块点按上抛 onOpen（参数 = 附件序；HubMessageRow 侧经
+/// pagesAndIndexMap 映射进查看器页序）。点按挂在整块容器上——失败态的重试手势更深，
+/// 仍优先命中重试，不被查看器入口劫持。
 struct MessageAttachmentsRow: View {
     let attachments: [UiAttachment]
+    var onOpen: ((Int) -> Void)? = nil
 
     var body: some View {
-        ForEach(Array(attachments.enumerated()), id: \.offset) { _, a in
+        ForEach(Array(attachments.enumerated()), id: \.offset) { idx, a in
             MessageAttachmentView(attachment: a)
+                .onTapGesture { onOpen?(idx) }
         }
     }
 }

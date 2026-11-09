@@ -15,9 +15,13 @@ struct MarkdownView: View {
     /// （对位桌面 jsonCardPayloadOrNull 的 streaming 闸——半流前缀可瞬时合法如 `[]`/`{}`，
     /// 出卡后随载荷继续流入解析失效即回落，「闪卡-消失」比晚一拍出卡更伤）。
     var streaming: Bool = false
+    /// v1.4 查看器（入口 b）：Markdown 图片块点按回调——参数 = 本消息全部可内联渲染的
+    /// https 图块 URL 序（页集）+ 被点图块序。nil = 不接查看器（点按无动作）。
+    var onOpenImage: (([URL], Int) -> Void)? = nil
 
     var body: some View {
-        LiteMarkdownBody(content: content, streaming: streaming).equatable()
+        LiteMarkdownBody(content: content, streaming: streaming, onOpenImage: onOpenImage)
+            .equatable()
     }
 }
 
@@ -228,6 +232,10 @@ private struct LiteMarkdownBody: View, Equatable {
     let content: String
     /// 流式行闸：true = 跳过 JSON 卡嗅探（仅 final 嗅探，防半流瞬时合法前缀闪卡）。
     var streaming: Bool = false
+    /// v1.4 查看器（入口 b）回调穿线：图片块点按上抛。不参与 ==——闭包身份不入相等性，
+    /// 内容未变的行不因回调换实例而重渲（回调语义由捕获方 HubMessageRow/HubChatView 的
+    /// @State 引用稳定性保证，同 onDelete 既有模式）。
+    var onOpenImage: (([URL], Int) -> Void)? = nil
 
     static func == (lhs: LiteMarkdownBody, rhs: LiteMarkdownBody) -> Bool {
         lhs.content == rhs.content && lhs.streaming == rhs.streaming
@@ -248,9 +256,17 @@ private struct LiteMarkdownBody: View, Equatable {
                 if blocks.count == 1, case let .text(s) = blocks[0].kind {
                     Text(s)
                 } else {
+                    // v1.4 查看器：页集 = 本消息全部可内联渲染（https）的图块 URL，按块序；
+                    // http 图块呈链接 chip 无查看入口，不进页集。
+                    let imagePages = blocks.compactMap { block -> URL? in
+                        if case let .image(url) = block.kind,
+                           url.scheme?.lowercased() == "https" { return url }
+                        return nil
+                    }
                     VStack(alignment: .leading, spacing: 10) {
                         ForEach(blocks) { block in
-                            LiteBlockView(block: block)
+                            LiteBlockView(block: block, imagePages: imagePages,
+                                          onOpenImage: onOpenImage)
                         }
                     }
                 }
@@ -266,6 +282,9 @@ private struct LiteMarkdownBody: View, Equatable {
 private struct LiteBlockView: View {
     @Environment(\.inkColors) private var c
     let block: LiteBlock
+    /// v1.4 查看器：本消息 https 图块页集（LiteMarkdownBody 预算好传下）+ 点按回调。
+    var imagePages: [URL] = []
+    var onOpenImage: (([URL], Int) -> Void)? = nil
 
     var body: some View {
         switch block.kind {
@@ -305,8 +324,15 @@ private struct LiteBlockView: View {
             // v1.2.0 多模态（设计稿 §2.2 双口径）：https 内联渲染（占位 + 失败重试见
             // RemoteImageView）；http（含 agent 局域网地址）降级链接 chip——ATS 默认拦
             // http、客户端直连 agent 局域网地址在蜂窝网不可达，不做特例。
+            // v1.4 查看器（入口 b）：点图块开全屏查看（页集含同消息全部 https 图块）；
+            // 占位/失败态未加载照常可开（查看器页自行加载，命中同一 loader 缓存）。
             if url.scheme?.lowercased() == "https" {
                 RemoteImageView(url: url)
+                    .onTapGesture {
+                        guard let onOpenImage,
+                              let idx = imagePages.firstIndex(of: url) else { return }
+                        onOpenImage(imagePages, idx)
+                    }
             } else {
                 ExternalLinkChip(url: url)
             }

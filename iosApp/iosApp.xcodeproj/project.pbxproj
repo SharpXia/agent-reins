@@ -28,6 +28,7 @@
 		1A6FBB000000000000000017 /* NotificationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000017 /* NotificationCoordinator.swift */; };
 		1A6FBB000000000000000018 /* MediaSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000018 /* MediaSupport.swift */; };
 		1A6FBB000000000000000019 /* MessageSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000019 /* MessageSummary.swift */; };
+		1A6FBB00000000000000001A /* ImageViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA00000000000000001A /* ImageViewer.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -48,6 +49,7 @@
 		1A6FAA000000000000000017 /* NotificationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationCoordinator.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000018 /* MediaSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaSupport.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000019 /* MessageSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageSummary.swift; sourceTree = "<group>"; };
+		1A6FAA00000000000000001A /* ImageViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageViewer.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000003 /* InkTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InkTheme.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000004 /* Format.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Format.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000005 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
@@ -138,6 +140,7 @@
 			children = (
 				1A6FAA000000000000000016 /* HubViews.swift */,
 				1A6FAA000000000000000018 /* MediaSupport.swift */,
+				1A6FAA00000000000000001A /* ImageViewer.swift */,
 			);
 			path = Hub;
 			sourceTree = "<group>";
@@ -334,6 +337,7 @@
 				1A6FBB000000000000000016 /* HubViews.swift in Sources */,
 				1A6FBB000000000000000018 /* MediaSupport.swift in Sources */,
 				1A6FBB000000000000000019 /* MessageSummary.swift in Sources */,
+				1A6FBB00000000000000001A /* ImageViewer.swift in Sources */,
 				1A6FBB000000000000000003 /* InkTheme.swift in Sources */,
 				1A6FBB000000000000000004 /* Format.swift in Sources */,
 				1A6FBB000000000000000005 /* Components.swift in Sources */,

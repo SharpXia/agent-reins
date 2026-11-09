@@ -394,6 +394,10 @@ struct HubChatView: View {
     /// 「最后可见项不是底部哨兵」），≤ 容差即隐藏。b6 的 max(贴底容差, 末行实测高度)+迟滞
     /// 组合按用户口径整体退场（lastRowHeight 上报链同撤）。
     @State private var showJumpToBottom = false
+    /// v1.4 查看器：全屏图片查看器载荷（页集 + 初始页）。三入口统一打开面：消息行附件、
+    /// Markdown 图块、composer pending 缩略图（openPendingPreview）。瞬态 UI 挂视图层，
+    /// 不进 store。
+    @State private var imageViewer: ImageViewerPayload?
     @Environment(\.inkColors) private var ink
     let conv: UiConversation
 
@@ -652,7 +656,8 @@ struct HubChatView: View {
                         HubMessageRow(
                             m: m,
                             cardHit: interactiveCard?.messageId == m.messageId ? interactiveCard : nil,
-                            onDelete: { pendingDeleteMessage = m }
+                            onDelete: { pendingDeleteMessage = m },
+                            onOpenImages: { pages, idx in openViewer(pages, index: idx) }
                         ).id(m.messageId)
                             // b8：末行视口位置探针（用户口径「last visible 是最底下的 item」——
                             // 判定基准=最后一条消息行，不是垫行）。全部行挂观察、仅末行写入
@@ -1040,6 +1045,13 @@ struct HubChatView: View {
         // VStack：空态（时间线被占位替换）与时间线两态都活着。
         .onAppear { hub.markReadUpTo(maxRenderedSeq) }
         .onChange(of: maxRenderedSeq) { _, latest in hub.markReadUpTo(latest) }
+        // v1.4 查看器：全屏图片查看器（黑底/捏合/平移/双击/下拉关闭/翻页，见 ImageViewer.swift）。
+        // item 驱动：载荷 Identifiable，置 nil 即收（下拉关闭与右上按钮同走 openViewer 的 binding）。
+        .fullScreenCover(item: $imageViewer) { payload in
+            ImageViewerView(pages: payload.pages, initialIndex: payload.index) {
+                imageViewer = nil
+            }
+        }
     }
 
     private func title(_ c: UiConversation) -> String {
@@ -1091,14 +1103,38 @@ struct HubChatView: View {
         hub.addPickedImages(conversationId: conv.conversationId, items: fresh)
     }
 
-    /// pending 附件查看器接入点（v1.3 发送轮暴露）：点缩略图回调，参数 = 草稿序 index
-    ///（数据面 = hub.draft(for:).attachments）。
+    /// v1.4 查看器统一打开面：页集非空才弹（空集不动作——附件全为降级 chip/失败态时
+    /// 无可看内容）；初始页钳界。
+    private func openViewer(_ pages: [ImageViewerPage], index: Int) {
+        guard !pages.isEmpty else { return }
+        imageViewer = ImageViewerPayload(pages: pages, index: min(max(index, 0), pages.count - 1))
+    }
+
+    /// pending 附件查看器接入点（v1.3 发送轮暴露，本轮实装）：点缩略图回调，参数 = 草稿序
+    /// index（数据面 = hub.draft(for:).attachments）。
     ///
-    /// TODO(查看器接线)：下一位施工员在此打开全屏 pending 预览查看器（sheet / fullScreenCover，
-    /// 初始页 = index，左右滑动遍历 pending 附件，可含 ✕ 撤除与发送前确认）。本轮只暴露
-    /// 入口不实现查看器——点按暂为 no-op。
+    /// 页集口径：槽位已就绪（mediaId）→ hub 页（与消息发出后的查看口径一致，命中
+    /// HubMediaLoader 缓存）；上传中未得 mediaId 但有 chip 预览 → 本地位图页（inline）。
+    /// 失败态槽（点按已被 chip 拦为重试，正常不会进来）与两者皆缺的槽位不进页集；
+    /// 被点槽序映射进过滤后页序，映射不到时退到首页。
     private func openPendingPreview(_ index: Int) {
-        // TODO(查看器接线): 打开全屏查看器（初始页 index）
+        let slots = hub.draft(for: conv.conversationId).attachments
+        var pages: [ImageViewerPage] = []
+        var tapped = 0
+        for (i, slot) in slots.enumerated() {
+            let page: ImageViewerPage?
+            if let upload = slot.upload, MediaIdCheck.isUlid(upload.mediaId) {
+                page = .hub(upload.mediaId, fileName: slot.fileName)
+            } else if let preview = slot.preview {
+                page = .inline(preview, id: "draft:\(slot.id)")
+            } else {
+                page = nil
+            }
+            guard let page else { continue }
+            if i == index { tapped = pages.count }
+            pages.append(page)
+        }
+        openViewer(pages, index: tapped)
     }
 }
 
@@ -1552,6 +1588,9 @@ private final class ScrollProbeBox {
     /// #3（2026-11-07 UX 轮）：删除入口回调——二次确认弹层挂在会话页（pendingDeleteMessage），
     /// 行内只负责发起，不自带弹层（LazyVStack 行级弹层生命周期不可靠）。
     let onDelete: () -> Void
+    /// v1.4 查看器打开回调（会话页 imageViewer binding 承担）：页集 + 被点页序。入口 a/b
+    /// 共用——附件图片块（含 Markdown 图块）点按上抛，查看器本体在 ImageViewer.swift。
+    let onOpenImages: ([ImageViewerPage], Int) -> Void
     @State private var hub = HubStore.shared
     @Environment(\.inkColors) private var ink
 
@@ -1610,7 +1649,13 @@ private final class ScrollProbeBox {
                             }
                         } else if m.state == "streaming" {
                             // wp-7 可选增强：流式行 typewriter 渐进揭示——数据 2s 一块、渲染逐字放出
-                            StreamingTypewriter(content: m.content)
+                            // v1.4 查看器：流式期已成块的 ![...](url) 图块同样可点开查看（入口 b）
+                            StreamingTypewriter(
+                                content: m.content,
+                                onOpenImage: { urls, idx in
+                                    onOpenImages(urls.map { ImageViewerPage.remote($0) }, idx)
+                                },
+                            )
                         } else if m.content.isEmpty && m.attachments.isEmpty {
                             // wp-8③：final/failed 空正文助手行渲染占位文案，不再出现空气泡
                             //（勘察确认投影层零过滤：空 content 行照常入库，防线只能在渲染侧）。
@@ -1621,7 +1666,13 @@ private final class ScrollProbeBox {
                                 .foregroundStyle(.secondary)
                         } else {
                             // 助手内容走自研轻量 Markdown 渲染器（0.4.8 滑动性能专项资产，P4 接入 Hub 面）
-                            MarkdownView(content: m.content)
+                            // v1.4 查看器：Markdown 图片块点开查看（入口 b；页集 = 同消息全部 https 图块，可左右翻页）
+                            MarkdownView(
+                                content: m.content,
+                                onOpenImage: { urls, idx in
+                                    onOpenImages(urls.map { ImageViewerPage.remote($0) }, idx)
+                                },
+                            )
                         }
                     }
                     .padding(.horizontal, 12).padding(.vertical, 8)
@@ -1643,9 +1694,18 @@ private final class ScrollProbeBox {
                     // v1.2.0 多模态：行级媒体附件（user 行 = 上传引用回显，source=hub 走 #24
                     // Bearer 自定义 loader；assistant 行 = Bridge 规范化的外发产物引用，
                     // source=external）。纯图消息（空正文+附件）由此渲染，不再落占位文本。
+                    // v1.4 查看器：图片块点开查看（入口 a；页集 = 可内联渲染的附件，可左右翻页）。
                     if !m.attachments.isEmpty {
-                        MessageAttachmentsRow(attachments: m.attachments)
-                            .padding(.horizontal, 6)
+                        let (viewerPages, pageIndexMap) =
+                            ImageViewerPage.pagesAndIndexMap(forAttachments: m.attachments)
+                        MessageAttachmentsRow(
+                            attachments: m.attachments,
+                            onOpen: { idx in
+                                guard let pageIdx = pageIndexMap[idx] else { return }
+                                onOpenImages(viewerPages, pageIdx)
+                            },
+                        )
+                        .padding(.horizontal, 6)
                     }
                     // 消息时间（桌面 MessageRow formatTs 同族 parity，2026-11-06）：气泡下
                     // caption2 弱化行——用户行与状态徽标同行（桌面同款），解析失败/缺省省略。
@@ -2053,6 +2113,8 @@ private struct PagedChoiceGrid<Item, ID: Hashable, Card: View>: View {
 /// - 行收敛 final 时外层分支切回 MarkdownView 整段渲染，剩余积压一次性补齐。
 private struct StreamingTypewriter: View {
     let content: String
+    /// v1.4 查看器（入口 b）回调穿线：流式期已成块的 https 图块点按上抛（nil = 不接）。
+    var onOpenImage: (([URL], Int) -> Void)? = nil
     /// 已揭示字符数；nil = 未初始化（挂载即贴齐现内容）。
     @State private var revealedCount: Int? = nil
     /// 上一帧内容（区分 append 前缀增长与改写跳变）。
@@ -2063,7 +2125,8 @@ private struct StreamingTypewriter: View {
     var body: some View {
         // streaming=true：typewriter 逐字前缀行跳过 JSON 卡嗅探（仅 final 嗅探，对位桌面
         // jsonCardPayloadOrNull 的 streaming 闸——[]/{} 这类瞬时合法前缀不闪卡）。
-        MarkdownView(content: String(content.prefix(revealedCount ?? content.count)), streaming: true)
+        MarkdownView(content: String(content.prefix(revealedCount ?? content.count)),
+                     streaming: true, onOpenImage: onOpenImage)
             .onAppear {
                 if revealedCount == nil { revealedCount = content.count; lastSeen = content }
             }

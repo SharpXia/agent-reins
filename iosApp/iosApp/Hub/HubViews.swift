@@ -71,7 +71,85 @@ struct HubRootView: View {
                     hub.send(text)
                 }
             }
+            // Dev 历史回灌走查探针：AGENTREINS_DEV_EARLIER=1 时对当前打开会话循环调
+            // requestEarlierAuto()（与上滑近顶自动翻页同一 store 入口），串行走完翻页链直至
+            // exhausted/无会话，供「存量库只有尾页→顶部插入」升级路径的自动化复现与回归
+            // 走查（真机触摸手感仍需真机复验——本探针只覆盖数据链与插入/恢复链）。触发
+            // 时机与视图几何门不同（无 userDrivenScroll），插入与恢复管线完全同一份。
+            if ProcessInfo.processInfo.environment["AGENTREINS_DEV_EARLIER"] == "1" {
+                await devEarlierWalk(hub)
+            }
         }
+    }
+}
+
+/// Dev 观测文件日志（Documents/dev-earlier.log，容器直写通道，与 scrollbench-result 同模式）
+/// ——无 GUI 的自动化环境 stdout 不可靠，容器文件是唯一稳定观测面。
+private func devWalkFileLog(_ line: String) {
+    print(line)
+    guard let logPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent("dev-earlier.log") else { return }
+    if let handle = try? FileHandle(forWritingTo: logPath) {
+        handle.seekToEndOfFile()
+        handle.write(Data((line + "\n").utf8))
+        handle.closeFile()
+    } else {
+        try? (line + "\n").write(to: logPath, atomically: true, encoding: .utf8)
+    }
+}
+
+/// Dev 历史回灌走查（AGENTREINS_DEV_EARLIER=1）：独立函数承载防 body 超时（body 体量已贴
+/// type-check 上限）。逐 tick 空转等待会话打开，随后串行 requestEarlierAuto 走完翻页链。
+private func devEarlierWalk(_ hub: HubStore) async {
+    devWalkFileLog("walk start")
+    for _ in 0..<200 {
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        guard hub.isLoggedIn, hub.selected != nil else { continue }
+        guard !hub.earlierExhausted else { break }
+        let count = hub.messages.count
+        let firstSeq = hub.messages.first?.seq ?? -1
+        let lastSeq = hub.messages.last?.seq ?? -1
+        devWalkFileLog("tick count=\(count) canLoad=\(hub.canLoadEarlier) loading=\(hub.loadingEarlier) firstSeq=\(firstSeq) lastSeq=\(lastSeq)")
+        hub.requestEarlierAuto()
+    }
+    let count = hub.messages.count
+    let firstSeq = hub.messages.first?.seq ?? -1
+    devWalkFileLog("end exhausted=\(hub.earlierExhausted) count=\(count) firstSeq=\(firstSeq)")
+    await devScrollProbe()
+}
+
+/// Dev 滚动锁死探针（随 DEV_EARLIER 走查执行）：走查结束后抓取聊天时间线 UIScrollView，
+/// 逐帧向下驱动 contentOffset 并记录几何——「视口锁死」判定面：若 contentSize 不随物化
+/// 增长、offset 钳在 maxOffset 且视口停在旧内容（无法下滚回最新），即锁死实锤。
+private func devScrollProbe() async {
+    try? await Task.sleep(nanoseconds: 2_000_000_000)
+    var targets: [UIScrollView] = []
+    let windows = UIApplication.shared.connectedScenes
+        .compactMap { $0 as? UIWindowScene }
+        .flatMap(\.windows)
+    func walk(_ view: UIView) {
+        if let sv = view as? UIScrollView, sv.window != nil, !sv.isHidden, sv.bounds.height > 200 {
+            targets.append(sv)
+        }
+        for sub in view.subviews { walk(sub) }
+    }
+    for window in windows where !window.isHidden { walk(window) }
+    guard let sv = targets.max(by: { $0.contentSize.height < $1.contentSize.height }) else {
+        devWalkFileLog("[scrollprobe] no scrollview found")
+        return
+    }
+    func geo(_ tag: String) {
+        let minY = -sv.adjustedContentInset.top
+        let maxY = max(minY, sv.contentSize.height - sv.bounds.height + sv.adjustedContentInset.bottom)
+        devWalkFileLog(String(format: "[scrollprobe] %@ offset=%.0f contentH=%.0f maxOffset=%.0f clamped=%@", tag, sv.contentOffset.y, sv.contentSize.height, maxY, String(sv.contentOffset.y >= maxY - 1)))
+    }
+    geo("start")
+    for step in 1...24 {
+        let minY = -sv.adjustedContentInset.top
+        let maxY = max(minY, sv.contentSize.height - sv.bounds.height + sv.adjustedContentInset.bottom)
+        sv.contentOffset.y = min(maxY, sv.contentOffset.y + 600)
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        geo("down\(step)")
+        if sv.contentOffset.y >= maxY - 1, step > 6 { break }
     }
 }
 
@@ -360,7 +438,10 @@ struct HubChatView: View {
     @State private var renameDraft = ""
     @State private var compacting = false
     /// wp-7①：底部锚定态（初始锚定；只被用户驱动的滚动翻转，见 setAtBottom）。
-    @State private var atBottom = true
+    /// Dev 走查豁免（AGENTREINS_DEV_ATBOTTOM=0）：初始即「用户已上滑离底」态——自动化
+    /// 环境无触摸手势翻转不了本态，置 0 模拟真实用户翻历史时的锚定态（贴底跟随让路，
+    /// restore 滚动成为唯一程序化滚动），复现「上滑翻页→插入→恢复视口」完整用户路径。
+    @State private var atBottom = ProcessInfo.processInfo.environment["AGENTREINS_DEV_ATBOTTOM"] != "0"
     /// b8：底部哨兵视口位置（非观测盒，0.4.6 纪律：逐帧值不进 @State）——
     /// 贴底/按钮判定的唯一几何信号。offset 公式（contentHeight−containerSize）与真实
     /// 可滚上限差一个恒定底部安全区偏移（实测恒 ~117pt、containerSize 不含 safeAreaInset
@@ -384,6 +465,12 @@ struct HubChatView: View {
     /// 修正推进——ScrollPosition 系 API 在本视图实测整体失效，勿再迁移），落底（8pt 口径，
     /// b8）即清；用户重新抓取列表（tracking）取消。
     @State private var bottomJumpActive = false
+    /// wp-12 翻页恢复重放（mini_x 升级路径修复轮）：翻页行顶部插入后，单次 scrollTo(anchor)
+    /// 恒落 LazyVStack 估算点且物化修正后无校正（b8 同族教训，向上插入同理）——改为预算帧
+    /// 逐帧重放 scrollTo(anchor, .top)，随物化修正推进直至预算耗尽。用户手指在场的帧跳过
+    ///（不与手势争视口、预算不消耗），松手后的帧继续校正——修复拖动中 restore 被吞。
+    @State private var restoreReplayId: String?
+    @State private var restoreReplayFrames = 0
     /// #3（2026-11-07 UX 轮）：待删除确认的本地消息（长按菜单入口 → 会话页二次确认弹层）。
     @State private var pendingDeleteMessage: UiMessage?
     /// v1.3 发送链：PhotosPicker 绑定项（视图本地瞬态；onChange 消费 = 只增入列，草稿槽
@@ -409,8 +496,12 @@ struct HubChatView: View {
     private static let scrollSpace = "hub.chat.scroll"
     /// 上滑自动翻页触发距离（pt，2026-11-10 加载更早修复轮）：滚动位置距内容顶 < 此值即
     /// 触发 requestEarlierAuto（TG 式近顶回灌）；串行节流在 HubStore.loadEarlier 守卫内收敛
-    /// （loadingEarlier 互斥 / exhausted 锁存 / autoEarlierBlocked 失败阻断）。
+    ///（loadingEarlier 互斥 / exhausted 锁存 / autoEarlierBlocked 失败阻断）。mini_x 升级
+    /// 路径修复轮起本值同时是链式续拉（HubStore.autoEarlierChainProbe）的近顶判据。
     private static let earlierAutoProximity: CGFloat = 400
+    /// 翻页恢复重放预算（非用户驱动的几何帧数，mini_x 升级路径修复轮）：≈一次物化收敛
+    /// 窗口；耗尽即停，下一页恢复重新武装，不相互串扰。
+    private static let restoreReplayBudget = 16
 
     /// wp-8②：当前会话实时行——conv 是导航时刻快照，hasActiveRun/activeRunId 随 run.* 事件
     /// 后续翻转，Stop 按钮态一律从会话列表现值取，不得用快照（会话列表 Flow 持续推送）。
@@ -718,6 +809,17 @@ struct HubChatView: View {
                     }
                     return
                 }
+                // 翻页恢复重放（restoreReplayId 注）：预算帧内逐帧 scrollTo(anchor, .top)
+                // 随物化修正推进；用户手指在场的帧跳过（预算不消耗），松手后的帧继续校正。
+                // 重放期间不吃贴底判定（视口在历史区，贴底语义让路）。
+                if let anchorId = restoreReplayId {
+                    if !userDrivenScroll {
+                        proxy.scrollTo(anchorId, anchor: .top)
+                        restoreReplayFrames -= 1
+                        if restoreReplayFrames <= 0 { restoreReplayId = nil }
+                    }
+                    return
+                }
                 // 流式 append 与程序化跟随滚动（animating）不改锚定态：内容增长会把
                 // 哨兵推到视口下方，若据此解锚，下一帧起跟随永久停摆。
                 guard userDrivenScroll else { return }
@@ -751,9 +853,12 @@ struct HubChatView: View {
             .onChange(of: hub.messages.count) { _, _ in
                 // wp-12：翻页行合入列表（顶部插入）后滚回触发前最老一行，保住阅读位置——
                 // 不滚回则视口内容整体下移（读取位置丢失）。锚由 HubStore.loadEarlier 武装、
-                // 仅在成功回执后消费（在途新尾消息到达不触发）。
+                // 仅在成功回执后消费（在途新尾消息到达不触发）。mini_x 升级路径修复轮：单次
+                // scrollTo 换预算帧重放（restoreReplayId 注）——估算落点随物化逐帧校正。
                 if let anchor = hub.takeRestoreScrollTarget() {
-                    proxy.scrollTo(anchor, anchor: .top)
+                    restoreReplayId = anchor
+                    restoreReplayFrames = Self.restoreReplayBudget
+                    debugLogRestoreLanding(anchor: anchor)
                 }
             }
             .onChange(of: tailSignature) { _, _ in
@@ -784,8 +889,22 @@ struct HubChatView: View {
                 // b8 进页锚定：置钉底在途逐帧重放收敛（单次 scrollTo 恒落 LazyVStack 估算
                 // 点且物化修正后无校正——用户 b7 真机报「进入会话不能自动滑到底部」；重放
                 // 每次都是全新命令、随物化修正推进，末行进入视口底 8pt 内即清）。
+                // Dev 走查豁免（ATBOTTOM=0，见 atBottom 注）：跳过进页钉底，模拟用户上滑后
+                // 的「历史阅读中」状态。
+                if ProcessInfo.processInfo.environment["AGENTREINS_DEV_ATBOTTOM"] == "0" { return }
                 bottomJumpActive = true
                 proxy.scrollTo("bottom", anchor: .bottom)
+            }
+            // 链式续拉近顶探针注入（HubStore.autoEarlierChainProbe 注）：读滚动探针盒判
+            // 「视口仍近顶」；onDisappear 置 nil 即链收敛。盒为非观测类，闭包直读安全。
+            .onAppear {
+                hub.autoEarlierChainProbe = { [weak probeBox] in
+                    guard let probe = probeBox?.latest else { return false }
+                    return probe.distanceToTop < Self.earlierAutoProximity
+                }
+            }
+            .onDisappear {
+                hub.autoEarlierChainProbe = nil
             }
             // #4（2026-11-06 UX 轮）：键盘收起双通道——滑动列表渐进收起（interactively，
             // 系统键盘伴随）；点时间线空白处一次性收起（tap 不与长按菜单/按钮冲突）。
@@ -1104,6 +1223,18 @@ struct HubChatView: View {
     private func setAtBottom(sentinelY y: CGFloat) {
         let nowAtBottom = y <= viewportHeight + Self.bottomSlack
         if nowAtBottom != atBottom { atBottom = nowAtBottom }
+    }
+
+    /// 诊断：restore 落点几何（2026-11-11 mini_x 升级路径修复轮引入）。LazyVStack 估算误差
+    /// 的观测面——restore scrollTo 触发瞬间的滚动探针快照（滚动未 settle 时 offset 为触发前
+    /// 值，仅作参照）。独立函数承载防 builder 表达式超时（body 体量已贴 type-check 上限）。
+    private func debugLogRestoreLanding(anchor: String) {
+        #if DEBUG
+        guard let probe = probeBox.latest else { return }
+        let firstSeq = hub.messages.first?.seq ?? -1
+        let count = hub.messages.count
+        devWalkFileLog("[paging] restore anchor=\(anchor.prefix(12)) count=\(count) offset=\(probe.offsetY) contentH=\(probe.contentHeight) containerH=\(probe.containerHeight) firstSeq=\(firstSeq)")
+        #endif
     }
 
     /// wp-7①：尾部签名——行数 + 尾行身份/状态/内容量与首尾切片，O(1) 构造

@@ -1013,6 +1013,9 @@ final class HubStore {
         canLoadEarlier = false
         emptyBackfillTried = false
         reportedReadUpTo = 0
+        // 链式续拉随会话期作废（在途任务取消；探针闭包由视图 onDisappear 自清）
+        autoEarlierChainTask?.cancel()
+        autoEarlierChainTask = nil
     }
 
     /// 乐观行占位 seq（DefaultCommandClient message.send 插行 seq=Long.MAX_VALUE，message.created
@@ -1052,6 +1055,31 @@ final class HubStore {
     /// 互斥 / exhausted 锁存 / 失败阻断 / canLoadEarlier 判据），滚动中逐帧重复触发为幂等空转。
     func requestEarlierAuto() {
         loadEarlier(auto: true)
+    }
+
+    // ---------- wp-12 链式续拉（mini_x 升级路径修复轮，2026-11-11） ----------
+
+    /// 自动链近顶探针（视图注入）：fire 时询问「视口是否仍近顶」。nil 或 false = 链即收敛。
+    /// 心跳隐形带（生产 mini_x 实测 seq 带 ~97% 行被显示过滤）整页落地零可见增量——不产生
+    /// messages.count 变化、rubber-band 顶点停驻也不产生滚动帧，用户侧感知即「拉不出」；
+    /// 本探针让链在「页落地且仍近顶」时自动续拉下一页，用户离开近顶即收敛（防失控连翻）。
+    var autoEarlierChainProbe: (() -> Bool)?
+
+    /// 在途续拉任务（同会话期串行；resetPagingState 取消）。
+    private var autoEarlierChainTask: Task<Void, Never>?
+
+    /// 自动页落地后续拉（仅 auto 且未翻到头时）：短延迟后重查探针再触发——延迟是让本页
+    /// 的恢复重放与物化先收敛，避免同帧连发。手动按钮落地不进本链（手动是显式单步语义，
+    /// 防误触按钮即失控连翻）；自动链内的页落地递归续拉直至 exhausted/blocked/离开近顶。
+    private func armAutoEarlierChain() {
+        autoEarlierChainTask?.cancel()
+        autoEarlierChainTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard !Task.isCancelled else { return }
+            guard let self else { return }
+            guard let probe = self.autoEarlierChainProbe, probe() else { return }
+            self.requestEarlierAuto()
+        }
     }
 
     /// 加载更早（wp-12）：按 oldestSeq 翻页（REST #8 before=游标，行经 upsertMessage 合并进
@@ -1101,6 +1129,9 @@ final class HubStore {
                 self.restoreArmed = false
             } else {
                 self.restoreArmed = true
+                // 链式续拉（autoEarlierChainProbe 注）：auto 页落地且未翻到头即武装——
+                // fire 时重查探针，用户已离开近顶/会话已切即空转收敛。
+                if auto { self.armAutoEarlierChain() }
             }
             self.loadEarlierError = nil
             self.refreshCanLoadEarlier()
@@ -1108,13 +1139,17 @@ final class HubStore {
     }
 
     /// 翻页落地滚动恢复（会话页在 messages 行数变化时调用）：返回触发前最老一行 id 供滚回
-    /// （锚行必须已在合并后列表中）；未在途/行已随化身更替消失时返回 nil 并清锚。
+    /// （锚行必须已在合并后列表中）；未在途返回 nil 并清锚。mini_x 升级路径修复轮：锚行已
+    /// 随化身更替/重整消失时**回退锚定当前首行**（插入行合入其上方，视口不失位）——原口径
+    /// 直接放弃恢复，插入后视口整体下移反而丢阅读位置。
     func takeRestoreScrollTarget() -> String? {
-        guard restoreArmed, let anchor = restoreAnchorMessageId else { return nil }
+        guard restoreArmed else { return nil }
+        let anchor = restoreAnchorMessageId
         restoreAnchorMessageId = nil
         restoreArmed = false
-        guard messages.contains(where: { $0.messageId == anchor }) else { return nil }
-        return anchor
+        guard let anchor else { return nil } // 时间线空（尾页整带被过滤）时无锚：落地不滚回
+        if messages.contains(where: { $0.messageId == anchor }) { return anchor }
+        return messages.first?.messageId
     }
 
     // ---------- v1.1 新端点（openclaw 原生指令） ----------

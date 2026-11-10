@@ -29,7 +29,11 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
     /// 登录态建立时请求一次授权。系统只在首次未决定时弹窗；已拒绝后再调用即时返回、不弹窗
     /// （无重复骚扰）。结果不落地本类状态——派发前实时查 getNotificationSettings（用户可随时
     /// 在系统设置里翻转，实时查是唯一可靠口径）。
+    /// Dev 探针豁免（AGENTREINS_DEV_NONOTIFY=1）：无 GUI 的自动化走查环境没有系统弹窗交互
+    /// 通道，弹一次授权框会遮住后续截图与表单——置位即整段跳过（与其他 AGENTREINS_DEV_*
+    /// 同族，仅自动化环境消费）。
     func requestAuthorizationIfNeeded() {
+        if ProcessInfo.processInfo.environment["AGENTREINS_DEV_NONOTIFY"] == "1" { return }
         let center = UNUserNotificationCenter.current()
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }

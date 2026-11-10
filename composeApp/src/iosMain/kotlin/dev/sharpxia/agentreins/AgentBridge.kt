@@ -437,11 +437,15 @@ class AgentBridge {
     /**
      * 历史翻页（wp-12）：向上翻取更早历史消息（REST #8 `?before=<seq>` 向上翻页），行按
      * messageId upsert 合并进投影库——observeMessages Flow 即推送合并后 seq 升序全序列，
-     * 调用方无需二次拼装。onDone page null = 请求未成功（未登录/网络不可达/化身更替竞态丢弃，
+     * 调用方无需二次拼装。[before] 传 nil = 会话期首翻（或页未带 oldestSeq）：由
+     * DefaultHubClient.loadEarlierMessages 按 DB 最老已载行 seq 原始口径（含被显示过滤的行）
+     * 解析游标；传值低于本地下沿（会话期快照重建 stale 游标）同样回落（2026-11-10 加载更早
+     * 修复轮：游标口径自 UI 层下沉数据源头，防整页被过滤的心跳带触发游标重置死循环）。
+     * onDone page null = 请求未成功（未登录/网络不可达/本地无游标可依/化身更替竞态丢弃，
      * 见 DefaultHubClient.loadEarlierMessages）——调用方呈现可重试降级态，不静默；非 null 时
      * hasMore 为服务端权威（「加载更早」按钮可见性唯一依据，翻到头即 false）。
      */
-    fun hubLoadEarlier(conversationId: String, before: Long, onDone: (UiMessagesPage?) -> Unit) {
+    fun hubLoadEarlier(conversationId: String, before: Long?, onDone: (UiMessagesPage?) -> Unit) {
         scope.launch {
             onDone(runCatching { hubClient?.loadEarlierMessages(conversationId, before) }.getOrNull())
         }

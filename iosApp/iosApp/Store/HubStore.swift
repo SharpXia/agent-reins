@@ -151,12 +151,17 @@ final class HubStore {
     /// 翻页失败降级态（REST 未成功/通道不可用）：顶部横幅 + 可重试，不静默（wp-9 同纪律）。
     private(set) var loadEarlierError: String?
 
-    /// 翻页游标（按 oldestSeq 翻页，08 §4.3 keyset）：最近一次成功页的 oldestSeq；nil = 回落
-    /// 当前最老已载行 seq（首翻或页未带 oldestSeq）。会话切换/登出重置。
-    /// 会话期中途快照重建（HUB-SYNC-001/002 → engine.rebuild → applySnapshot 清行只回灌尾页）
-    /// 会使旧游标失效——loadEarlier 取 before 前检测游标倒退（< 最老已载行 seq）即弃用回落，
-    /// 防以旧游标取数跳过重建后尾页首行之下的缺口带（wp-12 快照重建防护）。
+    /// 翻页游标（按 oldestSeq 翻页，08 §4.3 keyset）：最近一次成功页的 oldestSeq；nil = 首翻
+    /// （或页未带 oldestSeq）——由 Kotlin 侧按 DB 最老已载行 seq 原始口径（含被显示过滤的行）
+    /// 解析游标与 stale 回落（2026-11-10 加载更早修复轮：游标口径自本层下沉数据源头。旧实现
+    /// 在此层用「显示首行 seq」当游标下沿做倒退检测，整页被过滤的心跳带落库后显示下沿不动，
+    /// 游标被判倒退重置 → 同带反复重取，「加载更早」永远拉不进更早历史）。会话切换/登出重置。
     private var earlierCursor: Int64?
+
+    /// 上滑自动翻页阻断（2026-11-10 加载更早修复轮）：自动触发的一页请求失败（nil 回执）即
+    /// 停止后续自动触发（防断网期滚动逐帧空转重试 + 触发限流），手动「加载更早」按钮保留为
+    /// 重试兜底——任一次翻页成功即解锁。随会话切换/登出重置。
+    private var autoEarlierBlocked = false
 
     /// 翻页落地滚动恢复锚（触发翻页时记当前最老一行 messageId；行合入列表后由会话页滚动到
     /// 该行，保住阅读位置）。restoreArmed = 已取得成功回执、等待列表落地后消费。
@@ -467,7 +472,21 @@ final class HubStore {
             self.lastMessagesFlushAt = .now
             self.messages = latest
             self.refreshCanLoadEarlier()
+            self.maybeBackfillEmptyTimeline()
         }
+    }
+
+    /// 空时间线自动回灌（2026-11-10 加载更早修复轮「进会话首屏不空」）：快照尾页整带被显示
+    /// 过滤（心跳带）时时间线空但库内有缺口——首帧判定即自动翻一页（TG 式接管，防「暂无
+    /// 消息」误导 + 空屏无入口）。每会话期至多自动试一次（emptyBackfillTried，resetPagingState
+    /// 重置）；回灌落地行合入后 messages 非空，UI 分支翻转为时间线（新 ScrollView onAppear
+    /// 自然锚底）。若首回灌页仍整带被过滤，空态下的「加载更早」按钮保留为手动兜底。
+    private var emptyBackfillTried = false
+
+    private func maybeBackfillEmptyTimeline() {
+        guard !emptyBackfillTried, selected != nil, messages.isEmpty, canLoadEarlier else { return }
+        emptyBackfillTried = true
+        requestEarlierAuto()
     }
 
     /// 切换会话/登出时清空合帧在途态：代际自增作废旧 flush，清空后首帧快照零延迟直通。
@@ -986,11 +1005,13 @@ final class HubStore {
     private func resetPagingState() {
         earlierExhausted = false
         earlierCursor = nil
+        autoEarlierBlocked = false
         loadingEarlier = false
         loadEarlierError = nil
         restoreAnchorMessageId = nil
         restoreArmed = false
         canLoadEarlier = false
+        emptyBackfillTried = false
         reportedReadUpTo = 0
     }
 
@@ -1003,10 +1024,13 @@ final class HubStore {
     /// 消息事件推进）> 已载**真实 final 行数**」乐观判定（wp-12 修正：分母不再用 messages.count
     /// ——合成行（role=""，压缩/重置标记）与乐观行（占位 seq）计入 count 会虚高分母，合成行
     /// 密集会话首翻前少出按钮；真实 final 行数只数 state="final" 的服务端行）——快照尾页 50 行
-    /// + 长会话（>50 行）即出按钮，首翻后由服务端 hasMore 接管（loadEarlier 回执）。列表未落地
-    /// （空）时不出口：翻页游标取自最老已载行，空列表无游标可依（尾页由快照承担）。
+    /// + 长会话（>50 行）即出按钮，首翻后由服务端 hasMore 接管（loadEarlier 回执）。
+    /// 2026-11-10 加载更早修复轮：撤「messages 非空」守卫——快照尾页整页被显示过滤（心跳带）
+    /// 时时间线为空但库内有行，入口仍须可出（游标由 Kotlin 按 DB 最老已载行原始口径解析，
+    /// 不再依赖显示首行）；库内无行时 Kotlin 返回 null 呈降级态，optimistic 判据 lastSeq>0
+    /// 对真空会话（lastSeq=0）恒 false 不出按钮。
     private func refreshCanLoadEarlier() {
-        guard !earlierExhausted, let c = selected, !messages.isEmpty else {
+        guard !earlierExhausted, let c = selected else {
             canLoadEarlier = false
             return
         }
@@ -1023,41 +1047,54 @@ final class HubStore {
         }.count
     }
 
+    /// 上滑近顶自动翻页触发（2026-11-10 加载更早修复轮，TG 式体验）：会话页滚动近顶时由
+    /// HubChatView 滚动几何回调调用。串行节流全在 [loadEarlier] 守卫内收敛（loadingEarlier
+    /// 互斥 / exhausted 锁存 / 失败阻断 / canLoadEarlier 判据），滚动中逐帧重复触发为幂等空转。
+    func requestEarlierAuto() {
+        loadEarlier(auto: true)
+    }
+
     /// 加载更早（wp-12）：按 oldestSeq 翻页（REST #8 before=游标，行经 upsertMessage 合并进
     /// 投影库，observeMessages Flow 自动推送合并后 seq 升序全序列）。游标 = 最近成功页的
-    /// oldestSeq，回落当前最老已载行 seq；成功后服务端 hasMore 接管按钮可见性，翻到头锁存隐藏。
-    /// 失败（回执 nil）显式降级态可重试，不静默。限流纪律：一次一请求（loadingEarlier 互斥）。
-    func loadEarlier() {
+    /// oldestSeq（即新 DB 下沿）；nil = 首翻，由 Kotlin 按 DB 最老已载行 seq **原始口径**
+    /// （含被显示过滤的行）解析，stale 游标（会话期快照重建）同样在 Kotlin 侧回落——显示
+    /// 首行不再参与游标判定（2026-11-10 加载更早修复轮：口径自本层下沉数据源头，旧显示口径
+    /// 在整页被过滤的心跳带处游标重置、同带反复重取，「加载更早」拉不进更早历史）。成功后
+    /// 服务端 hasMore 接管按钮可见性，翻到头锁存隐藏。失败（回执 nil）显式降级态可重试，
+    /// 不静默；[auto] 触发失败另置 autoEarlierBlocked 停自动链，手动按钮重试成功即解锁。
+    /// 限流纪律：一次一请求（loadingEarlier 互斥）。
+    func loadEarlier(auto: Bool = false) {
         guard let c = selected, canLoadEarlier, !loadingEarlier, !earlierExhausted else { return }
-        let oldestLoaded = messages.first?.seq
-        // 游标倒退检测（wp-12 快照重建防护）：投影库可在会话期中途整体重建（HUB-SYNC-001/002 →
-        // DefaultSyncEngine.rebuild → applySnapshot 清行只回灌快照尾页），earlierCursor 仍持重建前
-        // 旧值、低于重建后最老已载行 seq——以旧游标取数将整段跳过尾页首行之下的缺口带，时间线
-        // 以「完整历史」呈现静默缺洞（重开会话才自愈）。检测到倒退即弃用旧游标，回落最老已载行
-        // seq 从已载下沿继续向上补齐。化身更替清行后按钮随空列表隐藏（refreshCanLoadEarlier 守卫），
-        // 不依赖此防护，命中场景即会话期重建路径。
-        if let cursor = earlierCursor, let oldestLoaded, cursor < oldestLoaded {
-            earlierCursor = nil
-        }
-        let before = earlierCursor ?? oldestLoaded
-        guard let before, before >= 1 else { return }
+        guard !auto || !autoEarlierBlocked else { return }
+        #if DEBUG
+        print("[paging] loadEarlier(auto=\(auto)) dispatch: cursor=\(String(describing: earlierCursor)) oldestDisplayed=\(messages.first?.seq ?? -1)")
+        #endif
         loadingEarlier = true
         loadEarlierError = nil
-        // 阅读位置恢复锚 = 触发前最老一行（新页将合入其上方，落地后滚回该行，视口不跳）。
+        // 阅读位置恢复锚 = 触发前最老一行（新页将合入其上方，落地后滚回该行，视口不跳）；
+        // 时间线空（尾页整带被过滤）时无锚，落地不滚回（新显示行随 Flow 自然出现）。
         restoreAnchorMessageId = messages.first?.messageId
         restoreArmed = false
+        // before=nil 交由 Kotlin 按 DB 最老已载行原始口径解析；Int64 → KotlinLong? 装箱
+        // （ObjC 互携可空 Long?，与 AttachmentRef.sizeBytes 同式，见 attachmentRef 注）。
+        let before = earlierCursor.map { KotlinLong(longLong: $0) }
         bridge.hubLoadEarlier(conversationId: c.conversationId, before: before) { [weak self] page in
             guard let self else { return }
             self.loadingEarlier = false
             guard let page else {
+                if auto { self.autoEarlierBlocked = true }
                 self.restoreAnchorMessageId = nil
                 self.restoreArmed = false
                 self.loadEarlierError = "加载更早失败（网络或服务不可达），可重试"
                 return
             }
-            // 游标链推进（按 oldestSeq 翻页）；空页无法推进 = 终止（防同游标循环重试）。
+            // 游标链推进（服务端 oldestSeq = 新 DB 下沿）；空页无法推进 = 终止（防同游标循环重试）。
             // Kotlin Long? 经 ObjC 互携为 KotlinLong?，此处取 int64Value 归一为 Int64。
             self.earlierCursor = page.oldestSeq?.int64Value
+            self.autoEarlierBlocked = false
+            #if DEBUG
+            print("[paging] loadEarlier done(auto=\(auto)): count=\(page.count) hasMore=\(page.hasMore) oldestSeq=\(page.oldestSeq?.int64Value ?? -1) latching=\(page.count == 0 || !page.hasMore)")
+            #endif
             if page.count == 0 || !page.hasMore {
                 self.earlierExhausted = true
                 self.restoreAnchorMessageId = nil

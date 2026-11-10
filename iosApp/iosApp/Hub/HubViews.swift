@@ -407,6 +407,10 @@ struct HubChatView: View {
     private static let jumpShowTolerance: CGFloat = 8
     /// b8：滚动坐标系名（哨兵探针与视口测量的同一参照系）。
     private static let scrollSpace = "hub.chat.scroll"
+    /// 上滑自动翻页触发距离（pt，2026-11-10 加载更早修复轮）：滚动位置距内容顶 < 此值即
+    /// 触发 requestEarlierAuto（TG 式近顶回灌）；串行节流在 HubStore.loadEarlier 守卫内收敛
+    /// （loadingEarlier 互斥 / exhausted 锁存 / autoEarlierBlocked 失败阻断）。
+    private static let earlierAutoProximity: CGFloat = 400
 
     /// wp-8②：当前会话实时行——conv 是导航时刻快照，hasActiveRun/activeRunId 随 run.* 事件
     /// 后续翻转，Stop 按钮态一律从会话列表现值取，不得用快照（会话列表 Flow 持续推送）。
@@ -689,9 +693,19 @@ struct HubChatView: View {
                             contentHeight: geo.contentSize.height,
                             containerHeight: geo.containerSize.height,
                             boundsHeight: geo.bounds.height,
+                            insetTop: geo.contentInsets.top,
                             insetBottom: geo.contentInsets.bottom)
             } action: { _, new in
                 probeBox.latest = new
+                // 2026-11-10 加载更早修复轮：上滑近顶自动翻页（TG 式）——仅用户手势驱动的
+                // 滚动帧触发（userDrivenScroll；程序化钉底/翻页恢复滚动不吃触发，防失控连翻），
+                // 距顶 < earlierAutoProximity 即请求；幂等：串行节流全在 HubStore.loadEarlier
+                // 守卫内收敛（loadingEarlier 互斥/exhausted 锁存/autoEarlierBlocked 失败阻断），
+                // 逐帧重复触发为空转。翻页落地后视口锚回触发前最老行（新页在其上方），继续
+                // 上滑越过的行数攒满一页距顶即再触发——连续回灌由用户滚动节奏驱动。
+                if userDrivenScroll, new.distanceToTop < Self.earlierAutoProximity {
+                    hub.requestEarlierAuto()
+                }
                 // 贴底/按钮判定统一走哨兵几何信号（sentinelBox.viewportY，见其声明注释）；
                 // offset 公式因参照系偏移不可用，仅存档 probe 供键盘瞬移等消费。
                 // 钉底在途：逐帧 scrollTo 重放收敛（进页锚定/键盘 resize 共用），哨兵
@@ -838,8 +852,33 @@ struct HubChatView: View {
             // wp-12：时间线空态占位（桌面 ConversationScreen「暂无消息」同型，空态纪律
             // 对齐会话列表空态）——空列表（打开瞬态/真空会话）整块替换时间线呈居中占位，
             // 首批快照落地即被时间线替换（ScrollView 重建，onAppear 锚底照走）。
+            // 2026-11-10 加载更早修复轮「进会话首屏不空」：库内有缺口（canLoadEarlier）或
+            // 回灌在途时，空态下挂回灌指示行（首帧由 HubStore.maybeBackfillEmptyTimeline
+            // 自动翻一页，按钮兜底；回灌落地行合入即翻转为时间线并锚底）——防「快照尾页整带
+            // 被显示过滤」时误导为真空会话且无入口；真空会话（lastSeq=0）保持纯空态。
             if hub.messages.isEmpty {
-                timelineEmptyState
+                VStack(spacing: 12) {
+                    timelineEmptyState
+                    if hub.loadingEarlier {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("正在回灌历史…").font(.caption).foregroundStyle(.secondary)
+                        }
+                    } else if hub.canLoadEarlier {
+                        Button {
+                            hub.loadEarlier()
+                        } label: {
+                            Label("加载更早", systemImage: "chevron.up")
+                                .font(.caption.weight(.medium))
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("加载更早")
+                    } else if let err = hub.loadEarlierError {
+                        Label { Text(err) } icon: { Image(systemName: "exclamationmark.triangle") }
+                            .font(.caption)
+                            .foregroundStyle(.red.opacity(0.85))
+                    }
+                }
             } else {
                 timeline
             }
@@ -1564,12 +1603,17 @@ private struct ScrollProbe: Equatable {
     let contentHeight: CGFloat
     let containerHeight: CGFloat
     let boundsHeight: CGFloat
+    let insetTop: CGFloat
     let insetBottom: CGFloat
 
     /// b8 修正：可滚上限按 UIKit bounds（含 safeAreaInset composer 区）——SwiftUI 的
     /// containerSize 不含该区（实测 668 vs 785），旧公式恒虚报 ~117pt：按钮常显、
     /// 钉底收敛的 8pt 判定永不被满足（逐帧重放空转）。
     var maxOffset: CGFloat { contentHeight - boundsHeight + insetBottom }
+
+    /// 距内容顶距离（pt，2026-11-10 加载更早修复轮）：offsetY 以 -insetTop 为顶（UIKit
+    /// contentOffset 语义），归一后 0 = 贴顶。自动翻页触发的唯一几何判据。
+    var distanceToTop: CGFloat { offsetY + insetTop }
 }
 
 /// wp-7①：滚动几何暂存盒（引用类型 + 非观测）——逐帧写入不触发 body 重渲，

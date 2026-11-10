@@ -446,23 +446,42 @@ class DefaultHubClient(
      * 追加既有行、created 同键覆盖收敛，互不冲突——翻页只增行、不推进 cursor、不参与水位过滤，
      * 05 §3.11）。合并完成后 observeMessages Flow 自动推送 seq 升序全序列，UI 无需二次拼装。
      *
-     * 返回 null = 通道不可用（未登录/无存储）、REST 未成功或化身更替竞态丢弃（见下）——调用方
-     * 呈现可重试降级态，不静默。成功时 [UiMessagesPage.hasMore] 为服务端权威（翻到头即 false，
-     * 按钮随之隐藏）。
+     * 返回 null = 通道不可用（未登录/无存储）、本地无游标可依（库内无任何已载行且 [before] 为
+     * null）、REST 未成功或化身更替竞态丢弃（见下）——调用方呈现可重试降级态，不静默。成功时
+     * [UiMessagesPage.hasMore] 为服务端权威（翻到头即 false，按钮随之隐藏）。
+     *
+     * 游标口径（2026-11-10 加载更早修复轮，真机 0.5.7「加载更早拉不出来」根因）：一律以
+     * **本地最老已载行 seq 原始口径**（[selectOldestLoadedSeq]，MIN(seq)，含被 selectMessages
+     * 显示过滤的心跳/合成行）为基准——服务端翻页按原始 seq keyset，显示过滤只作用 UI 面。
+     * 此前两端 UI 层用「显示首行 seq」当游标下沿：整页被过滤的心跳带落库后显示下沿不动，
+     * 游标被判「倒退」重置回落显示首行 → 同带反复重取，永远翻不进更早历史（mini_x 主线卡
+     * seq 225..264 整带 48 行全为「无回复」心跳，模拟器 6 连触发同带重取实证）。
+     * - [before] = null（会话期首翻）：直接取 MIN(seq) 当 before；
+     * - [before] < MIN(seq)（会话期快照重建 HUB-SYNC-001/002：行清空只回灌尾页，旧游标成
+     *   stale 低于新下沿）：同样回落 MIN(seq)，从已载下沿续翻，防以旧游标取数跳过重建后
+     *   尾页首行之下的缺口带（wp-12 快照重建防护语义自 UI 层下沉到数据源头）；
+     * - 其余（[before] >= MIN(seq)）：按调用方游标取数（UI 层每页以服务端 oldestSeq 推进，
+     *   恒等于新下沿）。
      *
      * 化身围栏（05 §3.10）：取数前后各读一次 lifecycleRevision——翻页行携带取数时刻化身的 seq
      * 口径，取数途中化身更替（session.updated revision 变化，投影清行 + seq 重计）则整页丢弃，
      * 防旧化身行以旧 seq 复活；调用方重试即以新化身重新取数。
      */
-    suspend fun loadEarlierMessages(conversationId: String, before: Long, limit: Int = messagesPageSize): UiMessagesPage? {
+    suspend fun loadEarlierMessages(conversationId: String, before: Long?, limit: Int = messagesPageSize): UiMessagesPage? {
         val db = db ?: return null
-        if (before < 1) return null // 契约 Before minimum: 1（08 §4.3）
         val convBefore = db.hubQueries.selectConversation(conversationId).executeAsOneOrNull() ?: return null
+        val oldestLoadedSeq = db.hubQueries.selectOldestLoadedSeq(conversationId).executeAsOneOrNull()?.oldestSeq
+        val effectiveBefore = when {
+            oldestLoadedSeq == null -> before
+            before == null || before < oldestLoadedSeq -> oldestLoadedSeq
+            else -> before
+        }
+        if (effectiveBefore == null || effectiveBefore < 1) return null // 契约 Before minimum: 1（08 §4.3）
         val page = try {
-            messagesApiOverride?.messages(conversationId, before, limit.coerceIn(1, 200)) ?: run {
+            messagesApiOverride?.messages(conversationId, effectiveBefore, limit.coerceIn(1, 200)) ?: run {
                 val stack = runtime.authStack ?: return null
                 stack.auth.withBearer {
-                    stack.api.messages(conversationId, before = before, limit = limit.coerceIn(1, 200))
+                    stack.api.messages(conversationId, before = effectiveBefore, limit = limit.coerceIn(1, 200))
                 }
             }
         } catch (e: CancellationException) {

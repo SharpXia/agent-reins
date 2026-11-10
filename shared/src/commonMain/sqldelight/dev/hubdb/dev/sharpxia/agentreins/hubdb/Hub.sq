@@ -428,6 +428,13 @@ WHERE conversationId = ? AND role = 'user' AND seq = 9223372036854775807
 selectMessage:
 SELECT * FROM hubMessages WHERE messageId = ?;
 
+-- 本地最老已载行 seq（2026-11-10 加载更早修复轮）：翻页游标的权威下沿——**原始口径**，
+-- 含被 selectMessages 显示过滤的心跳/合成行（服务端翻页按原始 seq keyset，显示过滤只作用
+-- UI 面；用显示首行当游标会在整页被过滤的心跳带处游标重置、同带反复重取，「加载更早」
+-- 拉不进更早历史）。空会话为 NULL。
+selectOldestLoadedSeq:
+SELECT MIN(seq) AS oldestSeq FROM hubMessages WHERE conversationId = ?;
+
 -- 无信息量行显示过滤（2026-11-06 UX 轮 #3；时间线/未读/翻页三查询同规则）：
 -- ① assistant 空正文与「无回复」——OpenClaw 心跳模板的协议性无事答复（30 分钟一次，
 --    main 会话实测 129 行「无回复」+46 行空正文，模型原文非系统合成）；

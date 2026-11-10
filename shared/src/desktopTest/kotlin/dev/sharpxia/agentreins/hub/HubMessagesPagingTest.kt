@@ -175,6 +175,61 @@ class HubMessagesPagingTest {
         assertEquals(20, db.hubQueries.selectMessages(CONV).executeAsList().size)
     }
 
+    // ── ⑤ 游标口径兜底（2026-11-10 加载更早修复轮，真机 0.5.7 死循环根因回归） ──
+    //
+    // 根因：旧实现两端 UI 层以「显示首行 seq」当游标下沿 + 倒退检测——快照尾页之下的整带
+    // 被显示过滤的心跳/空正文行落库后显示下沿不动，cursor(=页 oldestSeq) < 显示首行被判
+    // 「倒退」重置回落显示首行 → 同带反复重取，永远翻不进更早历史（mini_x 主线卡实测：
+    // 显示下沿 275，seq 221..274 全带被过滤，首个「加载更早」整页不可见 → 38 连触发同带
+    // 重取，DB 行数/MIN(seq) 冻结）。修复：游标口径下沉数据源头——DB MIN(seq) 原始口径
+    // （含被显示过滤的行），UI 层 before 传 nil 或 stale 低值都在此回落。
+
+    @Test
+    fun cursorFallbackUsesOldestLoadedSeqIncludingFilteredRows() = runTest {
+        val db = newDb()
+        val client = newClient(db)
+        val stub = PagingStubApi()
+        client.messagesApiOverride = stub
+        DefaultEventProjector(db).applySnapshot(fixtureSnapshot()) // 尾页 seq 51..60，MIN=51
+
+        // 心跳行 seq 46（content=无回复，被 selectMessages 显示过滤）落库 → 原始 MIN(seq)=46
+        db.hubQueries.upsertMessage(
+            messageId = "01JMSG0000000000000000HRTB1", conversationId = CONV, seq = 46L,
+            role = "assistant", content = "无回复", state = "final", reason = null,
+            uiState = null, commandId = null, idempotencyKey = null, ts = T0, attachments = "[]",
+        )
+        assertEquals(
+            10, db.hubQueries.selectMessages(CONV).executeAsList().size, // 51..60 显示行，46 被滤不计
+        )
+
+        // ① before=nil（会话期首翻）→ 取 DB MIN(seq)=46 原始口径（显示首行 51，心跳 46 含入）
+        val p1 = client.loadEarlierMessages(CONV, before = null)
+        assertNotNull(p1)
+        assertEquals(46L, stub.lastBefore) // 页回执后 41..50 合并，下沿推进为 41
+
+        // ② stale 低游标（会话期快照重建后旧游标 30 < 新下沿 41）→ 回落新下沿 41
+        client.loadEarlierMessages(CONV, before = 30L)
+        assertEquals(41L, stub.lastBefore)
+
+        // ③ 不低于下沿的游标（页 oldestSeq 口径）原样下发，不被下沿改写
+        client.loadEarlierMessages(CONV, before = 45L)
+        assertEquals(45L, stub.lastBefore)
+    }
+
+    @Test
+    fun nullBeforeWithoutLoadedRowsReturnsNull() = runTest {
+        val db = newDb()
+        val p = DefaultEventProjector(db)
+        p.applySnapshot(fixtureSnapshot())
+        db.hubQueries.clearMessages() // 会话行存在但库内无任何已载行
+        val client = newClient(db)
+        val stub = PagingStubApi()
+        client.messagesApiOverride = stub
+        // 库内无行且 before=nil → 无游标可依 → null（UI 呈降级态，不发请求）
+        assertNull(client.loadEarlierMessages(CONV, before = null))
+        assertNull(stub.lastConversationId)
+    }
+
     // ── fixture ──────────────────────────────────────────────────────────────
 
     /** 快照：长会话尾页（seq 51..60 共 10 行，lastSeq=60）——>50 行会话的翻页前置形态。 */

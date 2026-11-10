@@ -12,6 +12,11 @@ struct DraftAttachment: Identifiable {
     let id: UUID
     /// PhotosPickerItem.itemIdentifier（撤选去重用；nil = 非 picker 来源）。
     let pickerItemIdentifier: String?
+    /// 无相册权限兜底去重键（mini_x 升级路径修复轮）：PHPicker 的 assetIdentifier 只在
+    /// App 获得相册权限时回填——未授权装机上 itemIdentifier 恒 nil，旧口径整批静默丢弃
+    /// （选图零反应根因）。identifier 为 nil 的槽位记 PhotosPickerItem.hashValue 兜底
+    /// （同进程内稳定；跨进程随机化无碍——草稿槽本身不跨进程存活）。
+    let pickerItemHash: Int?
     /// chip 预览缩略图（512px 解码）。
     var preview: UIImage?
     /// 展示元数据文件名（仅随 AttachmentRef 回显；服务端永不进存储路径）。
@@ -604,15 +609,22 @@ final class HubStore {
 
     /// PhotosPicker 选中项入列（追加语义，再次打开选择器可续选；槽位满 9 后静默忽略溢出，
     /// 选择器侧 maxSelectionCount 同口径兜底）。同 identifier 去重（onChange 对同批选中重放）。
+    /// mini_x 升级路径修复轮：无相册权限时 itemIdentifier 恒 nil（PHPicker assetIdentifier
+    /// 只在授权后回填）——旧口径把 nil identifier 整批 continue，选图零反应（真机 0.5.8 实测
+    /// 根因）；identifier 为 nil 的项改以 PhotosPickerItem 哈希兜底去重入列，不再静默丢弃。
     @MainActor
     func addPickedImages(conversationId: String, items: [PhotosPickerItem]) {
         var d = draft(for: conversationId)
-        let known = Set(d.attachments.compactMap(\.pickerItemIdentifier))
+        let knownIds = Set(d.attachments.compactMap(\.pickerItemIdentifier))
+        let knownHashes = Set(d.attachments.compactMap(\.pickerItemHash))
         for item in items {
-            guard let pid = item.itemIdentifier, !known.contains(pid),
-                  d.attachments.count < Self.maxDraftAttachments else { continue }
+            if let pid = item.itemIdentifier, knownIds.contains(pid) { continue }
+            if item.itemIdentifier == nil, knownHashes.contains(item.hashValue) { continue }
+            guard d.attachments.count < Self.maxDraftAttachments else { continue }
             let slot = DraftAttachment(
-                id: UUID(), pickerItemIdentifier: pid, preview: nil,
+                id: UUID(), pickerItemIdentifier: item.itemIdentifier,
+                pickerItemHash: item.itemIdentifier == nil ? item.hashValue : nil,
+                preview: nil,
                 fileName: Self.draftFileName(), upload: nil, error: nil, uploading: true, sourceData: nil,
             )
             d.attachments.append(slot)

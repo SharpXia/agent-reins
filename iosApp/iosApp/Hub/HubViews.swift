@@ -1257,17 +1257,20 @@ struct HubChatView: View {
         }
     }
 
-    /// PhotosPicker 选中变化消费：**只增入列**（同 identifier 去重，onChange 对同批选中重放）。
+    /// PhotosPicker 选中变化消费：**只增入列**（同 identifier 去重，onChange 对同批选中重放；
+    /// 无 identifier 的项按 item 哈希兜底去重——见 HubStore.addPickedImages 注，未授权装机
+    /// 上 itemIdentifier 恒 nil，旧口径整批丢弃 = 选图零反应根因）。
     /// 与旧版差异：不再按「选中集差集」撤槽——pending 槽本体在 store 可存活层，视图重建后
     /// pickedItems 归零，若按差集撤除会把未发送的 pending 图一并抹掉（验收④「pending 图与
     /// 文本不得丢失」）；槽位撤除唯一通道 = 预览区 ✕ 按钮（同步撤 picker 选中，见 body 内
     /// onRemove），系统选择器内的取消勾选不影响已入列槽位。
     @MainActor
     private func consumePickedItems(_ items: [PhotosPickerItem]) {
-        let known = Set(hub.draft(for: conv.conversationId).attachments.compactMap(\.pickerItemIdentifier))
+        let knownIds = Set(hub.draft(for: conv.conversationId).attachments.compactMap(\.pickerItemIdentifier))
+        let knownHashes = Set(hub.draft(for: conv.conversationId).attachments.compactMap(\.pickerItemHash))
         let fresh = items.filter { item in
-            guard let pid = item.itemIdentifier else { return false }
-            return !known.contains(pid)
+            if let pid = item.itemIdentifier { return !knownIds.contains(pid) }
+            return !knownHashes.contains(item.hashValue)
         }
         guard !fresh.isEmpty else { return }
         hub.addPickedImages(conversationId: conv.conversationId, items: fresh)

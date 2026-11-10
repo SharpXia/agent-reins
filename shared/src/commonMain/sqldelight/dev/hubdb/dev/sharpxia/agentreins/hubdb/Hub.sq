@@ -425,6 +425,20 @@ DELETE FROM hubMessages
 WHERE conversationId = ? AND role = 'user' AND seq = 9223372036854775807
   AND uiState = 'delivered' AND messageId != ?;
 
+-- 回显附件兜底（v9.1，2026-11-10 真机 418 修复轮）：hub 侧 artifacts.message_id 绑定
+-- 修复之前，网关回显 user 行的事件富化恒无附件（孤儿附件行读取面按 message_id 聚合
+-- 查不到）——权威建行直接落空清单即「乐观行带图 → 回声落库图消失」。本查询取同会话
+-- 乐观行（seq=Long.MAX 占位序、附件非空）的引用清单供投影层兜底落列；正文等值优先、
+-- 其次 ts 最新（多图连发正文可区分时精确对位；纯图连发空正文取最新，已知边角如实
+-- 缺席——服务端权威修复上线后投影层不再走本查询）。仅取列，不改行；清除仍由
+-- deleteDeliveredOptimisticExcept 负责（单一职责）。
+selectEchoCarryAttachments:
+SELECT attachments FROM hubMessages
+WHERE conversationId = ? AND role = 'user' AND seq = 9223372036854775807
+  AND attachments IS NOT NULL
+ORDER BY (content = ?) DESC, ts DESC
+LIMIT 1;
+
 selectMessage:
 SELECT * FROM hubMessages WHERE messageId = ?;
 

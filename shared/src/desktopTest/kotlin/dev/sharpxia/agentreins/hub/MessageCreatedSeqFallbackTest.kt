@@ -6,7 +6,10 @@ import dev.sharpxia.agentreins.hub.projection.ConversationRow
 import dev.sharpxia.agentreins.hub.projection.DefaultEventProjector
 import dev.sharpxia.agentreins.hub.projection.EventEnvelope
 import dev.sharpxia.agentreins.hub.projection.GatewaySummary
+import dev.sharpxia.agentreins.hub.projection.MessageAttachment
 import dev.sharpxia.agentreins.hub.projection.SnapshotResponse
+import dev.sharpxia.agentreins.hub.projection.decodeAttachments
+import dev.sharpxia.agentreins.hub.projection.encodeAttachments
 import dev.sharpxia.agentreins.hubdb.HubDatabase
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -47,13 +50,25 @@ class MessageCreatedSeqFallbackTest {
         content: String,
         seq: Long? = null,
         idempotencyKey: String? = null,
+        attachments: kotlinx.serialization.json.JsonArray? = null,
     ): kotlinx.serialization.json.JsonObject = buildJsonObject {
         put("messageId", messageId)
         put("role", role)
         put("content", content)
         if (seq != null) put("sourceMessageSeq", seq)
         if (idempotencyKey != null) put("idempotencyKey", idempotencyKey)
+        if (attachments != null) put("attachments", attachments)
     }
+
+    /** hub 面单附件引用 JSON（v9 契约 MessageAttachment 形态，source=hub mediaId 必带）。 */
+    private fun hubAttachmentJson(mediaId: String): kotlinx.serialization.json.JsonArray =
+        kotlinx.serialization.json.buildJsonArray {
+            add(buildJsonObject {
+                put("source", "hub")
+                put("mediaId", mediaId)
+                put("mimeType", "image/jpeg")
+            })
+        }
 
     private fun seedConvKey(db: HubDatabase) {
         // 自学习映射直连（对位 command.acked 通道②学习成果）
@@ -144,6 +159,61 @@ class MessageCreatedSeqFallbackTest {
         assertEquals(3L, list.single().seq)
         assertEquals("delivered", list.single().uiState)
         assertEquals("idem-1", list.single().idempotencyKey) // promoteLocalEcho 不清幂等键列（对账留痕）
+    }
+
+    /**
+     * ⑤（v9.1，2026-11-10 真机 418 修复回归）：乐观行带附件 + 回显不带幂等键且服务端
+     * 空附件清单（hub 侧 artifacts.message_id 绑定修复前的事件富化形态）→ 权威行继承
+     * 乐观行附件引用（图片不因回声落库而消失），乐观行照常清除（无双气泡）。
+     */
+    @Test
+    fun echoWithoutIdemKeyCarriesOptimisticAttachmentsWhenServerEmpty() {
+        val db = newDb()
+        val p = DefaultEventProjector(db)
+        p.applySnapshot(fixtureSnapshot(lastSeq = 0L))
+        seedConvKey(db)
+        val optimisticJson = encodeAttachments(
+            listOf(MessageAttachment(source = "hub", mediaId = "01MEDIAOPTI00000000000000", mimeType = "image/jpeg")),
+        )
+        db.hubQueries.upsertMessage(
+            messageId = "opti-img", conversationId = CONV, seq = Long.MAX_VALUE,
+            role = "user", content = "看看这张图", state = "final", reason = null,
+            uiState = "delivered", commandId = null, idempotencyKey = "idem-img", ts = T0,
+            attachments = optimisticJson,
+        )
+
+        p.applyEvent(ev(E1, createdData("srv-echo-1", "user", "看看这张图")))
+
+        val list = rows(db)
+        assertEquals(1, list.size, "回声收敛后仅权威行（乐观行清除，无双气泡）")
+        val row = list.single()
+        assertEquals("srv-echo-1", row.messageId)
+        assertEquals(optimisticJson, row.attachments, "服务端空清单 → 乐观行附件引用兜底落列")
+        assertEquals(listOf("01MEDIAOPTI00000000000000"), decodeAttachments(row.attachments).mapNotNull { it.mediaId })
+    }
+
+    /** ⑥ 服务端附件非空 = 权威覆盖（幂等；不与本地乐观行清单合并或残留）。 */
+    @Test
+    fun serverAttachmentsWinWhenPresent() {
+        val db = newDb()
+        val p = DefaultEventProjector(db)
+        p.applySnapshot(fixtureSnapshot(lastSeq = 0L))
+        seedConvKey(db)
+        db.hubQueries.upsertMessage(
+            messageId = "opti-img", conversationId = CONV, seq = Long.MAX_VALUE,
+            role = "user", content = "看看这张图", state = "final", reason = null,
+            uiState = "delivered", commandId = null, idempotencyKey = "idem-img", ts = T0,
+            attachments = encodeAttachments(
+                listOf(MessageAttachment(source = "hub", mediaId = "01MEDIALOCAL0000000000000")),
+            ),
+        )
+
+        val serverJson = hubAttachmentJson("01MEDIASERVER000000000000")
+        p.applyEvent(ev(E1, createdData("srv-echo-1", "user", "看看这张图", attachments = serverJson)))
+
+        val row = rows(db).single()
+        assertEquals(listOf("01MEDIASERVER000000000000"), decodeAttachments(row.attachments).mapNotNull { it.mediaId },
+            "服务端非空清单权威覆盖，不取本地兜底")
     }
 
     private fun fixtureSnapshot(lastSeq: Long) = SnapshotResponse(

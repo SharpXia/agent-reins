@@ -411,6 +411,19 @@ class DefaultEventProjector(
             // 下占位行即本行（被 ≠ 排除），随后 INSERT OR REPLACE 同键覆盖收敛，防御性保留。
             db.hubQueries.deleteStreamingPlaceholdersExcept(convId, d.messageId)
         }
+        // v9.1 附件兜底（2026-11-10 真机 418 修复轮）：hub 侧 artifacts.message_id 绑定修复
+        // 之前，网关回显 user 行的事件富化恒无附件（孤儿附件行按 message_id 聚合查不到）——
+        // 权威建行直接落空清单即「乐观行带图 → 回声落库图消失」。服务端空清单时取同会话
+        // 乐观行（seq=Long.MAX 哨兵）的上传引用兜底落列；服务端非空 = 权威覆盖（幂等，
+        // hub 修复上线后服务端清单恒非空，本查询自然短路）。正文等值优先、其次 ts 最新
+        //（多图连发正文可区分时精确对位；纯图连发空正文取最新，已知边角见 Hub.sq 查询注）。
+        val carriedAttachments = if (isUser && attachments.isEmpty()) {
+            decodeAttachments(
+                db.hubQueries.selectEchoCarryAttachments(convId, d.content).executeAsOneOrNull(),
+            )
+        } else {
+            emptyList()
+        }
         db.hubQueries.upsertMessage(
             messageId = d.messageId,
             conversationId = convId,
@@ -423,7 +436,9 @@ class DefaultEventProjector(
             commandId = d.commandId,
             idempotencyKey = d.idempotencyKey,
             ts = envelope.ts,
-            attachments = encodeAttachments(attachments), // v9：事件路径附件落列；promoteLocalEcho 分支不触列，本地乐观行附件保留
+            // v9：事件路径附件落列；promoteLocalEcho 分支不触列，本地乐观行附件保留。
+            // v9.1：服务端空清单 + 本地乐观行带图 → 以乐观行引用兜底（回声后图片不消失）。
+            attachments = encodeAttachments(carriedAttachments.ifEmpty { attachments }),
         )
         if (isUser) {
             // 发送方乐观行翻转（05 §3.9 义务 4）：幂等键命中的本地行 sending → delivered

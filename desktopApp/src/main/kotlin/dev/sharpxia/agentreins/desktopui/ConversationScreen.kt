@@ -268,6 +268,10 @@ internal fun ConversationScreen(
     // wp-8②：实时行——conversationId 是打开时刻的句柄，hasActiveRun/activeRunId 随 run.* 事件
     // 后续翻转，Stop 按钮态一律从会话列表现值取，不得用打开时刻快照（会话列表 Flow 持续推送）。
     val liveConv = conversations.firstOrNull { it.conversationId == conversationId }
+    // 多网关轮（v1.3.0，设计稿 §3.2）：会话页头部网关名 caption（会话行网关名同构延伸）——
+    // hub.gateways 按 gatewayId 查名，空名/未知回退 gatewayId 尾段（gatewayNameFor 口径）；
+    // 归属未学习（liveConv = null）时省略不占位，不编造。
+    val gateways by client.observeGateways().collectAsState(initial = emptyList())
     val isRunActive = liveConv?.hasActiveRun == true
     // Stop 可执行 = 活跃 run 且 activeRunId 已习得（wp-5 v4 投影）。映射未学习场景（null——
     // DefaultEventProjector.setRun 在 resolveConversation 失败时直接 return，不落库）置灰为
@@ -624,17 +628,28 @@ internal fun ConversationScreen(
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // 头部：会话名（投影 label）
+        // 头部：会话名（投影 label）+ 网关名 caption（多网关轮 §3.2，归属未学习省略）
         Surface(color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    text = label.ifBlank { "（未命名会话）" },
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.weight(1f),
-                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = label.ifBlank { "（未命名会话）" },
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    val gatewayId = liveConv?.gatewayId.orEmpty()
+                    if (gatewayId.isNotEmpty()) {
+                        Text(
+                            text = gatewayNameFor(gateways, gatewayId),
+                            fontSize = 10.sp,
+                            color = Color(0xFF999999),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
             }
         }
 

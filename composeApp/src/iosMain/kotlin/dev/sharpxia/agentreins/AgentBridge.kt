@@ -539,6 +539,73 @@ class AgentBridge {
         }
     }
 
+    // ---------- 网关供给面管理（v1.3.0 #25/#26/#27，多网关轮；直调 REST 不走幂等队列） ----------
+
+    /**
+     * 注册网关（#25，v1.3.0 additive 多网关轮；与 [hubDevices] 同式：authStack + withBearer
+     * 直调 HubClient 门面）。onDone gatewayId/bridgeToken 非 null = 成功：bridgeToken 为一次性
+     * 明文（服务端只存 SHA-256 摘要、无法再次查看），调用方仅存会话内存、复制给 Bridge 设备
+     * env 用完即弃（**不持久化纪律**，契约 #25 description / HubClient.createGateway 注释）。
+     * null = 未成功（未登录/网络不可达/Hub FAILED），error = 人读失败原因，调用方显式呈现 +
+     * 可重试，不静默。#25 名称不判重、无幂等键——重试安全由调用方按钮防重（提交中禁用）保证。
+     * 成功后触发一次 refreshGateways 回拉，让新网关行尽快入列（Bridge 未拨出前为离线空目录）。
+     */
+    fun hubCreateGateway(
+        name: String,
+        onDone: (gatewayId: String?, bridgeToken: String?, error: String?) -> Unit,
+    ) {
+        scope.launch {
+            val r = runCatching {
+                hubClient?.createGateway(name) ?: throw HubException.notLoggedIn()
+            }
+            val created = r.getOrNull()
+            if (created != null) {
+                hubClient?.refreshGateways()
+                onDone(created.gatewayId, created.bridgeToken, null)
+            } else {
+                onDone(null, null, describeError(r.exceptionOrNull()))
+            }
+        }
+    }
+
+    /**
+     * 轮换网关 bridgeToken（#26，v1.3.0 additive；直调同 [hubCreateGateway]）。onDone
+     * bridgeToken 非 null = 成功：新明文一次性下发（旧 Token 进 24h 宽限，宽限期内新旧双活），
+     * 不持久化纪律同 [hubCreateGateway]。null = 未成功（未登录/网络不可达/目标网关已撤销 401
+     * HUB-AUTH-005 语义拒绝/未知或非属主 404 HUB-BIZ-002 防枚举），error = 人读失败原因。
+     */
+    fun hubRotateBridgeToken(gatewayId: String, onDone: (bridgeToken: String?, error: String?) -> Unit) {
+        scope.launch {
+            val r = runCatching {
+                hubClient?.rotateBridgeToken(gatewayId) ?: throw HubException.notLoggedIn()
+            }
+            val issued = r.getOrNull()
+            if (issued != null) {
+                onDone(issued.bridgeToken, null)
+            } else {
+                onDone(null, describeError(r.exceptionOrNull()))
+            }
+        }
+    }
+
+    /**
+     * 撤销网关（#27，v1.3.0 additive，204 终态且对属主幂等；直调同 [hubDevices] 式）。onDone
+     * error null = 撤销已成功：服务端读面按 status='active' 过滤（该网关自此从目录消失）、
+     * 连接即时收口、历史保留只读、命令不再下发。本地投影行以快照整体覆盖收敛（refreshGateways
+     * 行级 upsert 不删行，已由 HubClient.deleteGateway 内部触发），Swift 呈现面自持撤销集即时
+     * 隐藏（HubStore.revokedGatewayIds）。非 null = 未成功（未登录/网络不可达/未知或非属主
+     * 404 HUB-BIZ-002），error = 人读失败原因，调用方显式呈现 + 可重试，不静默。
+     */
+    fun hubDeleteGateway(gatewayId: String, onDone: (error: String?) -> Unit) {
+        scope.launch {
+            val r = runCatching {
+                val c = hubClient ?: throw HubException.notLoggedIn()
+                c.deleteGateway(gatewayId)
+            }
+            if (r.isSuccess) onDone(null) else onDone(describeError(r.exceptionOrNull()))
+        }
+    }
+
     /** 失败原因人读化（契约错误 code+message，其余取 message；与 desktop 同式）。 */
     private fun describeError(e: Throwable?): String =
         (e as? HubException)?.let { "${it.payload.code} ${it.payload.message}" }

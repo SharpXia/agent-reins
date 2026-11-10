@@ -10,14 +10,17 @@ import dev.sharpxia.agentreins.hub.auth.RefreshOk
 import dev.sharpxia.agentreins.hub.auth.RefreshRequest
 import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
 import dev.sharpxia.agentreins.hub.projection.ApprovalDecisionRequest
+import dev.sharpxia.agentreins.hub.projection.BridgeTokenIssuedResponse
 import dev.sharpxia.agentreins.hub.projection.CancelRunRequest
 import dev.sharpxia.agentreins.hub.projection.CommandReceipt
 import dev.sharpxia.agentreins.hub.projection.CommandsList
 import dev.sharpxia.agentreins.hub.projection.ModelsList
 import dev.sharpxia.agentreins.hub.projection.ConversationsPage
 import dev.sharpxia.agentreins.hub.projection.CreateConversationRequest
+import dev.sharpxia.agentreins.hub.projection.CreateGatewayRequest
 import dev.sharpxia.agentreins.hub.projection.EventsPage
 import dev.sharpxia.agentreins.hub.projection.GatewaysPage
+import dev.sharpxia.agentreins.hub.projection.GatewayCreatedResponse
 import dev.sharpxia.agentreins.hub.projection.MediaUpload
 import dev.sharpxia.agentreins.hub.projection.MessagesPage
 import dev.sharpxia.agentreins.hub.projection.ReadCursorRequest
@@ -90,6 +93,34 @@ class DefaultHubApi(
     }
 
     override suspend fun gateways(): GatewaysPage = get("/gateways")
+
+    // ── v1.3.0 网关供给面（#25/#26/#27，多网关轮；bearerDevice 链与 #6 同款 bearer()） ──
+
+    /**
+     * #25（v1.3.0 additive，多网关轮）：注册网关——201 GatewayCreatedResponse，一次性明文
+     * bridgeToken 仅本响应下发一次（服务端只存 SHA-256 摘要）；客户端不持久化（会话内存
+     * 纪律由上层门面承担，本层无状态）。名称不判重无幂等键，重试安全由调用方按钮防重
+     * 保证（契约 #25 description）。
+     */
+    override suspend fun createGateway(req: CreateGatewayRequest): GatewayCreatedResponse =
+        post("/gateways", req)
+
+    /**
+     * #26（v1.3.0 additive，多网关轮）：轮换 bridgeToken——200 BridgeTokenIssuedResponse，
+     * 旧 Token 进 24h 宽限（新旧双活）；并发轮换 last-write-wins。路径参数 gatewayId 为
+     * Hub 签发 ULID（非用户自由文本），直拼与既有路径样板同口径安全。
+     */
+    override suspend fun rotateBridgeToken(gatewayId: String): BridgeTokenIssuedResponse =
+        post("/gateways/$gatewayId/bridge-token", Unit)
+
+    /**
+     * #27（v1.3.0 additive，多网关轮）：撤销网关——204 无响应体（GatewayRevoked），与
+     * deleteDevice 同款不走 decode()；撤销是终态且对属主幂等（重复 DELETE 204）。
+     */
+    override suspend fun deleteGateway(gatewayId: String) {
+        val resp = http.delete(config.baseUrl + "/gateways/" + gatewayId) { bearer() }
+        ensureSuccess(resp)
+    }
 
     override suspend fun conversations(limit: Int?, cursor: String?): ConversationsPage =
         get("/conversations") {

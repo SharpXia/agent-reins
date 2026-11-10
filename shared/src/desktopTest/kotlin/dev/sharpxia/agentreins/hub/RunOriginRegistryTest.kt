@@ -261,6 +261,10 @@ private open class RegisterFakeHubApi(private val receipt: CommandReceipt) : Hub
     override suspend fun cancelRun(runId: String, req: CancelRunRequest) = unused()
     override suspend fun decideApproval(approvalId: String, req: ApprovalDecisionRequest) = unused()
     override suspend fun snapshot() = unused()
+    // v1.3.0 网关供给面 stub（测试 fake 未覆盖管理面，恒不触达）
+    override suspend fun createGateway(req: dev.sharpxia.agentreins.hub.projection.CreateGatewayRequest): dev.sharpxia.agentreins.hub.projection.GatewayCreatedResponse = TODO()
+    override suspend fun rotateBridgeToken(gatewayId: String): dev.sharpxia.agentreins.hub.projection.BridgeTokenIssuedResponse = TODO()
+    override suspend fun deleteGateway(gatewayId: String) = TODO()
     override suspend fun events(cursor: String, limit: Int?) = unused()
 }
 

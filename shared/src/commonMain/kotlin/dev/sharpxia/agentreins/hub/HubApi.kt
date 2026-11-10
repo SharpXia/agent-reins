@@ -10,13 +10,16 @@ import dev.sharpxia.agentreins.hub.auth.RefreshOk
 import dev.sharpxia.agentreins.hub.auth.RefreshRequest
 import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
 import dev.sharpxia.agentreins.hub.projection.ApprovalDecisionRequest
+import dev.sharpxia.agentreins.hub.projection.BridgeTokenIssuedResponse
 import dev.sharpxia.agentreins.hub.projection.CommandReceipt
 import dev.sharpxia.agentreins.hub.projection.CommandsList
 import dev.sharpxia.agentreins.hub.projection.ModelsList
 import dev.sharpxia.agentreins.hub.projection.ConversationsPage
 import dev.sharpxia.agentreins.hub.projection.CreateConversationRequest
+import dev.sharpxia.agentreins.hub.projection.CreateGatewayRequest
 import dev.sharpxia.agentreins.hub.projection.EventsPage
 import dev.sharpxia.agentreins.hub.projection.GatewaysPage
+import dev.sharpxia.agentreins.hub.projection.GatewayCreatedResponse
 import dev.sharpxia.agentreins.hub.projection.MediaUpload
 import dev.sharpxia.agentreins.hub.projection.MessagesPage
 import dev.sharpxia.agentreins.hub.projection.ReadCursorRequest
@@ -26,11 +29,12 @@ import dev.sharpxia.agentreins.hub.projection.SnapshotResponse
 import dev.sharpxia.agentreins.hub.projection.CancelRunRequest
 
 /**
- * Hub REST 客户端（契约 v1.2.0：22 端点 + WSS，tag hub-api-v1.2.0；v1.1 20 端点 + 多模态新增 #23/#24）。
+ * Hub REST 客户端（契约 v1.3.0：27 端点 + WSS，冻结 tag hub-api-v1.3.0；v1.2.0 24 端点 +
+ * 多模态新增 #23/#24；v1.1 20 端点 + #16–#21）。
  *
  * 契约钉版（P0 验收②，docs/plans/hub-migration-plan.md §6-P0；v1.1 迁移见 §8 变更清单）：
- * - REST 契约：`api/hub-api-v1.yaml` — OpenAPI 3.0.3，info.version = **v1.2.0**，`x-hub-api-version: 1`，
- *   冻结 git tag `hub-api-v1.2.0`（AgentReinService 仓；tag 名 ≠ yaml version，AGENTS.md 纪律）
+ * - REST 契约：`api/hub-api-v1.yaml` — OpenAPI 3.0.3，info.version = **v1.3.0**，`x-hub-api-version: 1`，
+ *   冻结 git tag `hub-api-v1.3.0`（AgentReinService 仓；tag 名 ≠ yaml version，AGENTS.md 纪律）
  * - WSS 帧契约：`api/hub-wss-frames-v1.schema.json` — JSON Schema 2020-12，protocolVersion 支持集 = {1}
  * - 版本策略（08 §6.1）：/v1 内仅 additive（新增端点、可选请求字段、响应字段、错误码）；
  *   破坏性变更升 /v2 并行 ≥90 天（v1.1 为前端未开工期的破坏性修订特例，不经 /v2）。客户端义务
@@ -39,6 +43,12 @@ import dev.sharpxia.agentreins.hub.projection.CancelRunRequest
  *   错误形状见 [HubErrorPayload]；命令类端点共用 202 + CommandReceipt（ADR-07：进度只经事件流）
  * - 端点 #21（v1.1 additive，2026-11-07）：GET /v1/conversations/{conversationId}/commands
  *   （动态斜杠命令目录）——additive 新增端点，不升版、不重钉 tag；调用方按 08 §1.1 忽略未知字段
+ * - 端点 #25/#26/#27（v1.3.0 additive，多网关轮 2026-11-11，设计稿
+ *   docs/multi-gateway-design-20261110.md §2.1）：网关供给面 onboarding——POST /v1/gateways
+ *   （注册，一次性明文 bridgeToken）/ POST /v1/gateways/{gatewayId}/bridge-token（轮换，24h 宽限
+ *   新旧双活）/ DELETE /v1/gateways/{gatewayId}（撤销终态，204 幂等）。全部 bearerDevice（与
+ *   GET /v1/gateways 同链）；客户端义务：bridgeToken 不持久化（仅会话内存，复制给设备 env
+ *   用完即弃）；错误码零新增（复用 HUB-BIZ-001/002 与既有认证族）
  */
 interface HubApi {
     // ── 认证（#1 / #2，公开端点） ─────────────────────────────────────────
@@ -67,6 +77,35 @@ interface HubApi {
     // ── 网关（#6，08 §4.1【MVP 必需】） ──────────────────────────────────
     /** 网关与 Agent 列表；无分页。冷启动优先用快照自带 gateways 数组，此端点用于校准/刷新。 */
     suspend fun gateways(): GatewaysPage
+
+    // ── 网关供给面（#25 / #26 / #27，v1.3.0 additive 多网关轮；全部 bearerDevice 与 #6 同链） ──
+
+    /**
+     * 注册网关（#25，v1.3.0 additive）：为当前用户注册一台新 Gateway，201 返回一次性明文
+     * bridgeToken（仅本响应下发一次，服务端只存 SHA-256 摘要、无法再次查看）。客户端义务：
+     * **不持久化 bridgeToken**——管理面展示后仅存会话内存，复制给 Bridge 设备 env 用完即弃
+     * （契约 #25 description；08 §2.4 设备 refreshToken 注册同款纪律）。
+     * 名称不判重、无幂等键：重复提交产生多个网关各持独立 Token；重试安全由调用方按钮防重
+     * （提交中禁用）保证，服务端不提供服务端幂等。400 = name 空/超长（HUB-BIZ-001）。
+     */
+    suspend fun createGateway(req: CreateGatewayRequest): GatewayCreatedResponse
+
+    /**
+     * 轮换网关 bridgeToken（#26，v1.3.0 additive）：为指定 Gateway 重新签发，200 返回新明文
+     * （一次性，持久化纪律同 #25）；旧 Token 进 24h 宽限期（宽限期内新旧双活）。并发轮换
+     * last-write-wins（服务端直 UPDATE 无版本锁，以最后一次签发为准）；目标网关已撤销
+     * （status='revoked'）时 401 HUB-AUTH-005 语义拒绝；「未知/非属主」404 HUB-BIZ-002 防枚举。
+     */
+    suspend fun rotateBridgeToken(gatewayId: String): BridgeTokenIssuedResponse
+
+    /**
+     * 撤销网关（#27，v1.3.0 additive）：置为撤销终态——gateways.status='revoked'、Hub 主动
+     * 收口该网关全部活跃 Bridge 连接、目录与 AgentStatus 即时消失（读面按 status='active'
+     * 过滤）、历史 sessions/messages/agents 不级联删除保留只读。204 无响应体（与 deleteDevice
+     * 同款 no-body）。撤销是终态且对属主幂等（对已撤销网关再次 DELETE 直接 204）；
+     * 「非属主/不存在」404 HUB-BIZ-002 防枚举——幂等语义只对属主生效。
+     */
+    suspend fun deleteGateway(gatewayId: String)
 
     // ── 会话与消息（#7 / #8 / #9 / #10，Bearer） ─────────────────────────
     /** 会话列表：不透明 keyset 分页（最近活跃降序），limit 默认 50 / 上限 200；cursor 原样回传、禁止自构。 */

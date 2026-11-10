@@ -34,6 +34,125 @@ struct ConversationDraft {
     var attachments: [DraftAttachment] = []
 }
 
+// ── 多网关轮：agent 分组本地偏好（设计稿 multi-gateway-design-20261110 r3 §4.2 数据模型 / §4.3
+//    UI 面的原生实现；承载裁定 §4.1：本地承载、投影库外偏好、跨登出保留，与静音集同形态） ──
+
+/// 分组行（§4.2 groups 项）：组用稳定 UUID——改名不动成员；删组 = 解散（成员回「未分组」，
+/// 不级联删任何投影）。
+struct AgentGroup: Identifiable, Codable, Equatable {
+    let id: String
+    var name: String
+    let createdAt: String // RFC3339
+}
+
+/// 组员行（§4.2 members 项）：**键 = (gatewayId, agentId) 二元组**——agentId 只在网关内唯一
+/// （agents_native_uq），跨网关同名 agentId 是不同实体（ADR-14），组员资格绝不能只挂 agentId。
+/// 跨网关混组是一等能力：一个组可同时含 A 网关与 B 网关的 agent。
+struct AgentGroupMember: Codable, Equatable {
+    let gatewayId: String
+    let agentId: String
+    let groupId: String
+}
+
+/// 持久化 blob（§4.2：单 JSON，key = UserDefaults["agentGroups.v1"]）。version 为演进预留位。
+struct AgentGroupsBlob: Codable {
+    var version: Int
+    var groups: [AgentGroup]
+    var members: [AgentGroupMember]
+}
+
+/// agent 分组偏好（§4.3：HubStore.swift 增 AgentGroupStore，UserDefaults 读写 + @Observable
+/// 响应式）。桌面端（java.util.prefs）各自持久、互不同步；数据形状一处定义（§4.2），两端
+/// 解析各自实现。读侧不校验成员是否仍存在于目录——组员资格独立于目录存活，呈现层与
+/// hub.gateways 取交集（已下线/未出现的 agent 不渲染，不编造）。
+@Observable
+final class AgentGroupStore {
+    private(set) var groups: [AgentGroup] = []
+    /// 组员 canonical 形态（§4.2 members 数组原样持有；读侧按 (gatewayId, agentId) 索引）。
+    private(set) var members: [AgentGroupMember] = []
+
+    private let defaults: UserDefaults
+    private static let storageKey = "agentGroups.v1"
+    /// 已读出的持久化版本（nil = 无存档或存档不可解；未知未来版本拒绝读写，避免旧端写坏新数据）。
+    private var knownVersion: Int?
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        load()
+    }
+
+    /// (gatewayId, agentId) 二元组键（HubStore.entryKey 同形式，`|` 分隔）。
+    static func pairKey(gatewayId: String, agentId: String) -> String { "\(gatewayId)|\(agentId)" }
+
+    /// 该 agent 的组 id（nil = 未分组）。
+    func groupId(gatewayId: String, agentId: String) -> String? {
+        let key = Self.pairKey(gatewayId: gatewayId, agentId: agentId)
+        return members.first {
+            Self.pairKey(gatewayId: $0.gatewayId, agentId: $0.agentId) == key
+        }?.groupId
+    }
+
+    /// 新建组，返回组 id（稳定 UUID，改名不动成员）。
+    @discardableResult
+    func createGroup(named name: String) -> String {
+        let id = UUID().uuidString
+        groups.append(AgentGroup(id: id, name: name, createdAt: ISO8601DateFormatter().string(from: Date())))
+        persist()
+        return id
+    }
+
+    /// 改名（只动 groups 行，members 原样）。
+    func renameGroup(id: String, to name: String) {
+        guard let i = groups.firstIndex(where: { $0.id == id }) else { return }
+        groups[i].name = name
+        persist()
+    }
+
+    /// 解散组（成员回「未分组」，不级联删任何投影）。
+    func dissolveGroup(id: String) {
+        groups.removeAll { $0.id == id }
+        members.removeAll { $0.groupId == id }
+        persist()
+    }
+
+    /// 加入分组（重复加入同一二元组 = 覆盖换组）。
+    func assign(gatewayId: String, agentId: String, toGroup groupId: String) {
+        let key = Self.pairKey(gatewayId: gatewayId, agentId: agentId)
+        members.removeAll {
+            Self.pairKey(gatewayId: $0.gatewayId, agentId: $0.agentId) == key
+        }
+        members.append(AgentGroupMember(gatewayId: gatewayId, agentId: agentId, groupId: groupId))
+        persist()
+    }
+
+    /// 移出分组（未分组成员为 no-op）。
+    func removeMember(gatewayId: String, agentId: String) {
+        let key = Self.pairKey(gatewayId: gatewayId, agentId: agentId)
+        members.removeAll {
+            Self.pairKey(gatewayId: $0.gatewayId, agentId: $0.agentId) == key
+        }
+        persist()
+    }
+
+    // 持久化：整 blob 重写（个人规模组/成员个位~十位量级，无增量需求）。
+    private func persist() {
+        guard knownVersion == 1 else { return } // 未知版本存档保护：只读不写
+        let blob = AgentGroupsBlob(version: 1, groups: groups, members: members)
+        if let data = try? JSONEncoder().encode(blob) {
+            defaults.set(data, forKey: Self.storageKey)
+        }
+    }
+
+    private func load() {
+        guard let data = defaults.data(forKey: Self.storageKey),
+              let blob = try? JSONDecoder().decode(AgentGroupsBlob.self, from: data) else { return }
+        guard blob.version == 1 else { return } // 未知未来版本：整档不读不写
+        knownVersion = 1
+        groups = blob.groups
+        members = blob.members
+    }
+}
+
 /// Hub 账号态与数据面（P4 定稿）：自持 AgentBridge（shared/hub 的唯一 Swift 入口），订阅
 /// hubObserve；baseUrl 为非敏感配置存 UserDefaults，口令只经登录请求体、refreshToken 由
 /// KMP 侧落 Keychain，Swift 层不持有任何凭据。
@@ -90,6 +209,21 @@ final class HubStore {
     /// 新建会话已提交成功（PERSISTED 回执已得）：入口页呈「已提交」等待态——卡片出现以校准
     /// 收敛为准（成功即触发一次校准，秒级；兜底 R4 周期），行在卡出现后自动翻成置灰。
     private(set) var createdConversationFor: Set<String> = []
+
+    // ---------- 多网关轮：agent 分组偏好 + 网关供给面管理（v1.3.0 #25/#26/#27） ----------
+
+    /// agent 分组偏好（设计稿 §4.3；AgentGroupStore 自身 @Observable，视图直接订阅）。
+    /// 本地承载跨登出保留（§4.1：投影库可整库丢弃重建，偏好走「投影库外」先例 = 静音集）。
+    let agentGroups = AgentGroupStore()
+
+    /// 已撤销网关（本会话期 UI 隐藏集）：#27 成功后服务端读面即按 status='active' 过滤，但本地
+    /// 投影行要等下次快照整体覆盖才收敛（refreshGateways 是行级 upsert 不删行）——呈现面在此
+    /// 即时隐藏，快照收敛后集合内容与库面自然一致；登出清空（分组偏好不受登出影响）。
+    private(set) var revokedGatewayIds: Set<String> = []
+
+    /// 网关管理动作在途（键 = "create" 或 gatewayId；按钮禁用防重复提交——#25 名称不判重
+    /// 无幂等键，重复提交产生多个网关各持独立 Token）。
+    private(set) var gatewayActionInFlight: Set<String> = []
 
     /// #2'（2026-11-07 二轮，x总改版）：thinking 帧在途判定——当前打开会话最新阶段帧
     /// phase=thinking（run 终态投影清行，帧存在即在途）。数据链：Gateway thinking 流 →
@@ -321,10 +455,12 @@ final class HubStore {
     }
 
     /// 订阅网关清单（wp-11：与 watchConversations 同模式，纯投影库面、随库变更推送）。
+    /// 多网关轮：呈现清单滤除已撤销网关（revokedGatewayIds——本地投影行要等快照整体覆盖
+    /// 才收敛，见该字段注释）。
     func watchGateways() {
         bridge.hubWatchGateways { [weak self] list in
             guard let self else { return }
-            self.gateways = list
+            self.gateways = list.filter { !self.revokedGatewayIds.contains($0.gatewayId) }
             // 收敛清理：已兜底成卡的 (gatewayId, agentId) 移出「已提交」瞬态（行翻置灰由主线卡判据接管）
             let cardKeys = Set(self.conversations.map { Self.entryKey(gatewayId: $0.gatewayId, agentId: $0.agentId) })
             self.createdConversationFor.formIntersection(cardKeys)
@@ -370,6 +506,87 @@ final class HubStore {
                 self.createdConversationFor.insert(key)
             }
         }
+    }
+
+    // ---------- 多网关轮：网关供给面管理动作（#25/#26/#27，v1.3.0；桥回调式，与 hubDevices 同式） ----------
+
+    /// 注册网关（#25）：一次性明文 bridgeToken 只经回调交付调用方（网关管理 sheet 会话内存
+    /// 持有，**不落任何持久化**——不持久化纪律见 AgentBridge.hubCreateGateway 注释）。
+    /// onDone gatewayId/bridgeToken 非 nil = 成功（调用方切一次性凭据展示）；nil = 未成功，
+    /// error = 人读失败原因，调用方显式呈现 + 可重试，不静默。
+    func createGateway(name: String, onDone: @escaping (_ gatewayId: String?, _ bridgeToken: String?, _ error: String?) -> Void) {
+        let key = "create"
+        guard !gatewayActionInFlight.contains(key) else { return }
+        gatewayActionInFlight.insert(key)
+        bridge.hubCreateGateway(name: name) { [weak self] gatewayId, bridgeToken, error in
+            guard let self else { return }
+            self.gatewayActionInFlight.remove(key)
+            onDone(gatewayId, bridgeToken, error)
+        }
+    }
+
+    /// 轮换网关 bridgeToken（#26）：新明文一次性经回调交付（不持久化，同 #25 纪律）；旧 Token
+    /// 24h 宽限。onDone bridgeToken nil = 未成功，error = 人读失败原因。
+    func rotateBridgeToken(gatewayId: String, onDone: @escaping (_ bridgeToken: String?, _ error: String?) -> Void) {
+        guard !gatewayActionInFlight.contains(gatewayId) else { return }
+        gatewayActionInFlight.insert(gatewayId)
+        bridge.hubRotateBridgeToken(gatewayId: gatewayId) { [weak self] bridgeToken, error in
+            guard let self else { return }
+            self.gatewayActionInFlight.remove(gatewayId)
+            onDone(bridgeToken, error)
+        }
+    }
+
+    /// 撤销网关（#27，终态且对属主幂等）：成功即入 revokedGatewayIds 呈现隐藏集 + 就地清出
+    /// gateways 清单（目录行以快照整体覆盖收敛，见 revokedGatewayIds 注释）。onDone error
+    /// nil = 已成功；非 nil = 未成功，error = 人读失败原因，调用方显式呈现 + 可重试，不静默。
+    func revokeGateway(gatewayId: String, onDone: @escaping (_ error: String?) -> Void) {
+        guard !gatewayActionInFlight.contains(gatewayId) else { return }
+        gatewayActionInFlight.insert(gatewayId)
+        bridge.hubDeleteGateway(gatewayId: gatewayId) { [weak self] error in
+            guard let self else { return }
+            self.gatewayActionInFlight.remove(gatewayId)
+            if error == nil {
+                self.revokedGatewayIds.insert(gatewayId)
+                self.gateways.removeAll { $0.gatewayId == gatewayId }
+            }
+            onDone(error)
+        }
+    }
+
+    // ---------- 多网关轮：分组解析与网关显示名（GatewaysView / NewConversationSheet 共用） ----------
+
+    /// 网关显示名（会话行 caption 数据面，设计稿 §3.2）：hub.gateways 按 gatewayId 查名；
+    /// 空名回退 gatewayId 尾段（末 8 位——Hub 侧 gatewayId 为 ULID 无分隔段，取 suffix(8)
+    /// 作可区分短名；未知 gatewayId 同口径）。
+    func gatewayDisplayName(_ gatewayId: String) -> String {
+        if let name = gateways.first(where: { $0.gatewayId == gatewayId })?.name, !name.isEmpty {
+            return name
+        }
+        return String(gatewayId.suffix(8))
+    }
+
+    /// 分组成员解析（组 id → 当前目录中的 (gateway, agent) 对）：组员资格独立于目录存活，
+    /// 呈现与 hub.gateways 取交集——已下线/未出现的 agent 不渲染，不编造。
+    func groupAgents(groupId: String) -> [(gateway: UiGateway, agent: UiAgentRef)] {
+        var out: [(gateway: UiGateway, agent: UiAgentRef)] = []
+        for gw in gateways {
+            for a in gw.agents where agentGroups.groupId(gatewayId: gw.gatewayId, agentId: a.agentId) == groupId {
+                out.append((gw, a))
+            }
+        }
+        return out
+    }
+
+    /// 未分组成员解析（同上口径，组员资格为 nil 的 agent）。
+    func ungroupedAgents() -> [(gateway: UiGateway, agent: UiAgentRef)] {
+        var out: [(gateway: UiGateway, agent: UiAgentRef)] = []
+        for gw in gateways {
+            for a in gw.agents where agentGroups.groupId(gatewayId: gw.gatewayId, agentId: a.agentId) == nil {
+                out.append((gw, a))
+            }
+        }
+        return out
     }
 
     /// 审批决定（wp-9）：approve=批准 / reject=拒绝，走幂等队列 approval.decide（新意图新键）。
@@ -1340,6 +1557,9 @@ final class HubStore {
         devicesCache = nil
         devicesError = nil
         revokeFailure = nil
+        // 多网关轮：撤销网关呈现隐藏集随登出清空（分组 agentGroups 为本地偏好，跨登出保留）。
+        revokedGatewayIds = []
+        gatewayActionInFlight = []
         // #21：动态命令目录随登出清空（重登后从空缓存 bootstrap，下次 "/" 起手重拉）
         commandsCache = [:]
         commandsFetchedAt = [:]

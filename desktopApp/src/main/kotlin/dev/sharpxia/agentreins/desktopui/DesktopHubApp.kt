@@ -69,6 +69,10 @@ internal fun DesktopHubApp(windowPrefs: DesktopWindowPreferences? = null) {
     // 不可用时降级为纯内存态，不崩）。lambda 注入 = 协调器决策时实时读取，右键/设置页
     // 改动即时生效，无重建协调器。
     val mutePrefs = remember { DesktopMutePreferences() }
+    // 多网关轮（v1.3.0，设计稿 §4.3）：agent 分组本地偏好（java.util.prefs，§4.2 JSON，
+    // 与 iOS UserDefaults 各自持久互不同步；登出 wipeLocalData 不触碰——投影库外偏好）。
+    // 同一实例喂 GatewaysPanel（分组三段式）与组员资格呈现，写随读刷。
+    val agentGroups = remember { DesktopAgentGroupStore() }
     val coordinator = remember(hubDb) {
         DesktopNotificationCoordinator(
             conversationKeyResolver = { gatewayId, sessionKey ->
@@ -120,7 +124,7 @@ internal fun DesktopHubApp(windowPrefs: DesktopWindowPreferences? = null) {
     MaterialTheme {
         when {
             authState is HubAuthState.LoggedIn -> {
-                HubShell(client, authState as HubAuthState.LoggedIn, coordinator, mutePrefs, windowPrefs)
+                HubShell(client, authState as HubAuthState.LoggedIn, coordinator, mutePrefs, windowPrefs, agentGroups)
             }
             authState is HubAuthState.NeedsLogin ||
                 (authState is HubAuthState.Idle && restoreAttempted) || submitting -> {
@@ -166,6 +170,7 @@ private fun HubShell(
     coordinator: DesktopNotificationCoordinator,
     mutePrefs: DesktopMutePreferences,
     windowPrefs: DesktopWindowPreferences?,
+    agentGroups: DesktopAgentGroupStore,
 ) {
     val conversations by client.observeConversations().collectAsState(initial = emptyList())
     // wp-10：待审批单点订阅 + 决策瞬态（壳层持有跨面板存活；行离场 approval.resolved 时收敛清理）
@@ -269,8 +274,9 @@ private fun HubShell(
                             minimizeToTrayOnClose = minimizeToTrayOnClose,
                             onMinimizeToTrayOnClose = ::setMinimizeToTrayOnClose.takeIf { windowPrefs != null },
                         )
-                        // wp-11：网关与 Agent 独立页（observeGateways 零消费 → 结构化清单呈现）
-                        HubPane.Gateways -> GatewaysPanel(client)
+                        // wp-11：网关与 Agent 独立页（observeGateways 零消费 → 结构化清单呈现）；
+                        // 多网关轮：三段式分组（agentGroups 本地偏好 + AgentRefRow 新建会话 action）
+                        HubPane.Gateways -> GatewaysPanel(client, agentGroups)
                         HubPane.Conversations -> {
                             val selected = selectedId?.let { id -> conversations.firstOrNull { it.conversationId == id } }
                             if (selected != null) {

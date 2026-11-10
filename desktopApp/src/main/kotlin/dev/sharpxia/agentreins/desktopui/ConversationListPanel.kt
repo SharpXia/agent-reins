@@ -45,6 +45,7 @@ import androidx.compose.ui.input.pointer.PointerButton
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -76,6 +77,9 @@ import kotlinx.coroutines.launch
  *   R4 周期兜底）。入口经 shared 门面自动携带 mainSession=true（wp-2 落地于
  *   DefaultCommandClient.createConversation，服务端组装 sessionKey=agent:<agentId>:main，
  *   客户端永不拼键，ADR-14）。
+ * 多网关轮（v1.3.0，设计稿 §3.2）：会话行标题下加一行 caption 网关名（hub.gateways 按
+ * gatewayId 查名，空名/未知回退 gatewayId 尾段——[gatewayNameFor]，iOS HubConversationRow
+ * caption 同构），多网关混排列表的归属歧义就此消除。
  */
 @Composable
 internal fun ConversationListPanel(
@@ -87,6 +91,8 @@ internal fun ConversationListPanel(
     mutedIds: Set<String> = emptySet(),
     onToggleMute: (conversationId: String, muted: Boolean) -> Unit = { _, _ -> },
 ) {
+    // 多网关轮（§3.2）：会话行网关名 caption 数据面（hub.gateways 快照/事件/回拉三路同源）
+    val gateways by client.observeGateways().collectAsState(initial = emptyList())
     // wp-7 会话操作瞬态（面板级持有，跨卡片/弹窗存活；提交协程挂面板 scope——弹窗中途关闭
     // 不取消在途请求，结果仍经事件流回流投影，UI 态写已离场快照无副作用）
     val scope = rememberCoroutineScope()
@@ -202,6 +208,7 @@ internal fun ConversationListPanel(
                             selected = conv.conversationId == selectedId,
                             muted = conv.conversationId in mutedIds,
                             compacting = conv.conversationId in compactingIds,
+                            gatewayName = gatewayNameFor(gateways, conv.gatewayId),
                             onToggleMute = onToggleMute,
                             onRename = { renameTarget = it },
                             onCompact = { compactNow(it) },
@@ -248,6 +255,7 @@ private fun ConversationCard(
     selected: Boolean,
     muted: Boolean,
     compacting: Boolean,
+    gatewayName: String,
     onToggleMute: (conversationId: String, muted: Boolean) -> Unit,
     onRename: (UiConversation) -> Unit,
     onCompact: (UiConversation) -> Unit,
@@ -309,6 +317,15 @@ private fun ConversationCard(
                     UnreadBadge(conv.unread)
                 }
             }
+            // 多网关轮（§3.2）：标题下网关名 caption——多网关混排列表的归属歧义就此消除；
+            // hub.gateways 按 gatewayId 查名，空名/未知回退 gatewayId 尾段（gatewayNameFor 口径）
+            Text(
+                text = gatewayName,
+                fontSize = 10.sp,
+                color = Color(0xFF999999),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = conv.preview.ifBlank { " " },

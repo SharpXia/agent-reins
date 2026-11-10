@@ -22,6 +22,42 @@ data class GatewaySummary(
 @Serializable
 data class GatewaysPage(val gateways: List<GatewaySummary> = emptyList())
 
+// ── 网关供给面（#25/#26/#27，v1.3.0 additive 多网关轮，设计稿 docs/multi-gateway-design-20261110.md §2.1） ──
+
+/**
+ * 网关注册请求（#25，v1.3.0 契约 CreateGatewayRequest：required=[name]）。
+ * [name] 必填非空、≤64 字符（服务端 400 HUB-BIZ-001 裁决；客户端表单预校验只为 UX，
+ * 不替代服务端校验）。名称不判重——同名多台网关合法；无幂等键，重复提交产生多个网关
+ * 各持独立 Token，重试安全由调用方按钮防重（提交中禁用）保证。
+ */
+@Serializable
+data class CreateGatewayRequest(val name: String)
+
+/**
+ * 注册网关响应（#25，v1.3.0 契约 GatewayCreatedResponse：required=[gatewayId, name, bridgeToken]）。
+ * [bridgeToken] 为一次性明文：仅本响应下发一次，服务端只存 SHA-256 摘要、无法再次查看。
+ * **客户端义务（契约 bridgeToken description）：不持久化**——不落投影库/凭据仓/偏好，
+ * 管理面展示后仅存会话内存，复制给 Bridge 设备 env 用完即弃（08 §2.4 设备 refreshToken
+ * 同款纪律）。
+ */
+@Serializable
+data class GatewayCreatedResponse(
+    /** 新网关 Hub ULID（Bridge env BRIDGE_GATEWAY_ID 取值）。 */
+    val gatewayId: String,
+    /** 回显的网关显示名。 */
+    val name: String,
+    /** 一次性明文 bridgeToken（Bridge env BRIDGE_TOKEN 取值）；不持久化纪律见类注释。 */
+    val bridgeToken: String,
+)
+
+/**
+ * 轮换 bridgeToken 响应（#26，v1.3.0 契约 BridgeTokenIssuedResponse：required=[bridgeToken]）。
+ * 旧 Token 进 24h 宽限期（宽限期内新旧双活）；并发轮换 last-write-wins——以最后一次签发为准，
+ * 更早轮换产生的明文即时失效。持久化纪律同 [GatewayCreatedResponse.bridgeToken]。
+ */
+@Serializable
+data class BridgeTokenIssuedResponse(val bridgeToken: String)
+
 /**
  * 会话行（契约 v1.1.0：required 10 字段）。化身不出 REST 面（02 R7）：sessionId/sessionKey/
  * lifecycleRevision 已撤，化身更替经事件流 session.updated 的 lifecycleRevision 感知；
@@ -130,7 +166,8 @@ data class EventEnvelope(
     companion object {
         // 事件类型（06 §3 注册表镜像，唯一注册清单；新类型只增不改义）。
         // artifact 域已核准预留、本期不实现。run.status 为 wp-15 additive（2026-11-06），
-        // 21 类基础上第 22 类——老客户端走 else 忽略分支语义不变（06 §12.2）。
+        // 21 类基础上第 22 类；gateway.agents_changed 为多网关轮 additive v1.3.0（2026-11-11），
+        // 22 类基础上第 23 类——老客户端走 else 忽略分支语义不变（06 §12.2）。
         const val MESSAGE_DELTA = "message.delta"
         const val MESSAGE_CREATED = "message.created"
         const val MESSAGE_REPLACED = "message.replaced"
@@ -148,6 +185,15 @@ data class EventEnvelope(
         const val SESSION_REMOVED = "session.removed"
         const val GATEWAY_ONLINE = "gateway.online"
         const val GATEWAY_OFFLINE = "gateway.offline"
+        /**
+         * v1.3.0 additive（多网关轮，06 §3.5）：agent 首见边沿通知——触发 = agents 行 active
+         * 首见边沿（首版触发粒度仅此一种，agent 移除等其余 roster 变更不触发，验收不得按
+         * 「agent 上下线实时感知」口径）。gateway 域（信封镜像 gateway.offline：无 sessionKey/
+         * runId、seq 可省），data 只带 {gatewayId}、不携带 roster 全量——agent 清单权威 =
+         * GET /v1/gateways 与快照（GatewaySummary.agents 同源同形），客户端收到后防抖回拉；
+         * 事件是刷新提示不是权威，丢失由快照/校准自愈。
+         */
+        const val GATEWAY_AGENTS_CHANGED = "gateway.agents_changed"
         const val APPROVAL_REQUESTED = "approval.requested"
         const val APPROVAL_RESOLVED = "approval.resolved"
         const val COMMAND_ACKED = "command.acked"

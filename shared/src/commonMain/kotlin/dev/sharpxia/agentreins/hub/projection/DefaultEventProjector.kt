@@ -180,6 +180,15 @@ class DefaultEventProjector(
         isLenient = true
         explicitNulls = false
     },
+    /**
+     * 出投影层回调（v1.3.0 additive，多网关轮设计稿 §3.1/§3.2）：GATEWAY_AGENTS_CHANGED
+     * （agent 首见边沿）投影事务**提交成功后**触发，入参 = 载荷 gatewayId——事务失败/回滚
+     * 不触发（服务端 ApplyTx 后逐边沿回调同形态）。事件只带 {gatewayId} 无投影写面，回调
+     * 是本分支唯一动作；回调方（DefaultHubClient.refreshGateways）必须非阻塞（接 2s 防抖
+     * 回拉 GET /v1/gateways，行级 upsert 回投影库）。缺省 null = 零行为变化（既有装配与
+     * 全部测试不受影响）；老服务端不发本类型，缺省走 else 忽略分支语义不变（06 §12.2）。
+     */
+    private val onGatewayAgentsChanged: ((gatewayId: String) -> Unit)? = null,
 ) : EventProjector {
 
     val stats = ProjectionStats()
@@ -275,6 +284,10 @@ class DefaultEventProjector(
     // ── 事件应用（05 §3.11 表；载荷解析失败/目标行缺失 → 忽略内容，游标由调用方照常推进） ──
 
     override fun applyEvent(envelope: EventEnvelope) {
+        // v1.3.0（gateway.agents_changed 边沿出投影层）：本事件无投影写面（data 只带
+        // {gatewayId}，roster 权威在 REST 快照面）——分支内只记账，事务提交成功后经
+        // [onGatewayAgentsChanged] 出投影层（回滚不触发；缺省回调 null 时无任何动作）。
+        var gatewayAgentsEdge: String? = null
         db.transaction {
             when (envelope.type) {
                 EventEnvelope.MESSAGE_DELTA -> onMessageDelta(envelope)
@@ -310,6 +323,13 @@ class DefaultEventProjector(
                         )
                     }
                 }
+                // v1.3.0 additive（gateway 域扩，分支形状镜像上方 online/offline）：agent 首见
+                // 边沿通知——data 只带 {gatewayId}、不携带 roster 全量（06 §3.5），投影库零写入；
+                // roster 权威 = GET /v1/gateways / 快照，由出投影层回调（缺省 null）驱动防抖回拉。
+                // gatewayId 缺省 = 毒帧按忽略处理（不出回调），游标照常推进（调用方义务）。
+                EventEnvelope.GATEWAY_AGENTS_CHANGED ->
+                    gatewayAgentsEdge = envelope.data.jsonObject["gatewayId"]?.toString()?.trim('"')
+                        ?.takeIf { it.isNotEmpty() }
                 EventEnvelope.APPROVAL_REQUESTED -> onApprovalRequested(envelope)
                 EventEnvelope.APPROVAL_RESOLVED -> onApprovalResolved(envelope)
                 EventEnvelope.COMMAND_ACKED -> onCommandAcked(envelope)
@@ -318,6 +338,8 @@ class DefaultEventProjector(
                 else -> Unit // 未注册类型：忽略内容，照常推进游标（06 §12.2 义务 2）
             }
         }
+        // 事务提交成功后才出投影层回调（设计稿 §3.1 出站装配形态：终态返回、已落库之后触发）
+        gatewayAgentsEdge?.let { gw -> onGatewayAgentsChanged?.invoke(gw) }
         stats.eventsApplied++
     }
 

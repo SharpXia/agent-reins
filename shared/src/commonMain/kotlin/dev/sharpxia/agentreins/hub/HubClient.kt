@@ -9,11 +9,14 @@ import dev.sharpxia.agentreins.hub.command.CommandClient
 import dev.sharpxia.agentreins.hub.command.DefaultCommandClient
 import dev.sharpxia.agentreins.hub.projection.AgentRef
 import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
+import dev.sharpxia.agentreins.hub.projection.BridgeTokenIssuedResponse
 import dev.sharpxia.agentreins.hub.projection.CommandReceipt
 import dev.sharpxia.agentreins.hub.projection.ConversationRow
+import dev.sharpxia.agentreins.hub.projection.CreateGatewayRequest
 import dev.sharpxia.agentreins.hub.projection.DefaultEventProjector
 import dev.sharpxia.agentreins.hub.projection.EventEnvelope
 import dev.sharpxia.agentreins.hub.projection.EventProjector
+import dev.sharpxia.agentreins.hub.projection.GatewayCreatedResponse
 import dev.sharpxia.agentreins.hub.projection.MediaUpload
 import dev.sharpxia.agentreins.hub.projection.SnapshotResponse
 import dev.sharpxia.agentreins.hub.projection.decodeAttachments
@@ -27,6 +30,8 @@ import dev.sharpxia.agentreins.hub.sync.SyncPhase
 import dev.sharpxia.agentreins.hubdb.HubDatabase
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -242,6 +247,17 @@ class DefaultHubClient(
     private var scheduler: DefaultSyncScheduler? = null
 
     /**
+     * refreshGateways 防抖窗（v1.3.0，设计稿 §3.2）：gateway.agents_changed 边沿可爆发
+     * （新设备接入批量 roster、投影重放），2s 窗内多边沿合并为一次回拉（尾沿防抖——窗内
+     * 新边沿重置计时，以最后一枚边沿为准启动回拉）。服务端 catchUp 重放阶段已调暗回调
+     * （§3.1 处置），客户端 2s 防抖是本设计的第二重保险。
+     */
+    private val gatewayRefreshDebounceMs = 2_000L
+
+    /** 在途防抖窗 Job（refreshGateways 重入即重置；stop 登出随同步栈一并取消）。 */
+    private var refreshGatewaysJob: Job? = null
+
+    /**
      * wp-10 连接相位观察面（additive，纯观察不参与控制）：稳定 StateFlow 实例——scheduler
      * 每次 start/stop 重建（DefaultSyncScheduler 自持流会换实例），组装时把本流作 phaseSink
      * 注入 [DefaultSyncScheduler]，UI collect 永不换源。语义见 [SyncPhase]：Linked = 已连接
@@ -257,7 +273,9 @@ class DefaultHubClient(
         if (scheduler != null || db == null) return
         val registry = RunOriginRegistry()
         runOriginRegistry = registry
-        val baseProjection = DefaultEventProjector(db)
+        // v1.3.0（多网关轮设计稿 §3.2）：gateway.agents_changed 边沿 → 出投影层回调 →
+        // 2s 防抖回拉 GET /v1/gateways 行级 upsert（新 agent 免等快照/R4 校准即上卡）。
+        val baseProjection = DefaultEventProjector(db, onGatewayAgentsChanged = { refreshGateways() })
         // wp-4：eventTap 组合面——登记喂帧（run.started → RunOriginRegistry，恒开）在用户
         // eventTap（通知协调器）之前；两者都只见已应用且过幂等/水位裁决的事件。
         val userTap = eventTap
@@ -307,6 +325,8 @@ class DefaultHubClient(
     }
 
     fun stop() {
+        refreshGatewaysJob?.cancel() // v1.3.0：登出随同步栈一并取消在途防抖回拉（防 wipe 后复活行）
+        refreshGatewaysJob = null
         scheduler?.stop()
         scheduler = null
         phaseState.value = SyncPhase.Catching // wp-10：同步栈停转后复位，不留旧相位
@@ -544,6 +564,55 @@ class DefaultHubClient(
         commands?.markRead(conversationId, readUpTo)
     }
 
+    // ── v1.3.0：gateway.agents_changed 防抖回拉（多网关轮设计稿 §3.1/§3.2） ──────────
+
+    /**
+     * 网关目录回拉调度（2s 防抖，尾沿合并）：gateway.agents_changed 只带 {gatewayId} 不带
+     * roster（06 §3.5）——agent 清单权威 = REST #6 GET /v1/gateways（GatewaySummary.agents
+     * 与快照同源同形，双份转换漂移禁令），本方法把边沿爆发合并为一次回拉后落库
+     * [pullGatewaysIntoProjection]。也供 UI 直调做手动刷新（同一防抖通道，不会并发双拉）。
+     *
+     * 失败静默降级（runCatching 吞掉、不阻断调用方协程）：事件是加速器不是权威（06 §3.5
+     * 边界语义），下一枚边沿 / R4 校准 / 快照自愈。未登录 / 无存储为幂等空转；登出
+     * [stop] 取消在途窗。
+     */
+    fun refreshGateways() {
+        if (db == null) return
+        refreshGatewaysJob?.cancel()
+        refreshGatewaysJob = scope.launch {
+            delay(gatewayRefreshDebounceMs)
+            runCatching { pullGatewaysIntoProjection() }
+        }
+    }
+
+    /**
+     * 回拉执行体（[refreshGateways] 唯一落库路径）：withBearer（TokenManager 负责刷新重试）
+     * 拉 GET /v1/gateways → hubGateways **行级 upsert**（INSERT OR REPLACE 逐行，不 clear
+     * 表——与 applySnapshot 的「先清后灌」整体覆盖铁律区分：本路径是目录对账不是重建，
+     * 既有行逐行被响应权威值覆盖，无行则插入）。agentsJson 编码沿用 [observeGateways]
+     * 同族 Json 配置的解析降级链（坏载荷降级空数组，网关行本体不丢）。
+     */
+    private suspend fun pullGatewaysIntoProjection() {
+        val db = db ?: return
+        val stack = runtime.authStack ?: return
+        val page = stack.auth.withBearer { stack.api.gateways() }
+        db.hubQueries.transaction {
+            page.gateways.forEach { g ->
+                db.hubQueries.insertGateway(
+                    gatewayId = g.gatewayId,
+                    name = g.name,
+                    online = if (g.online) 1L else 0L,
+                    lastSeenAt = g.lastSeenAt,
+                    agentsJson = encodeAgentsJson(g.agents),
+                )
+            }
+        }
+    }
+
+    /** agentsJson 落库编码（降级链：编码失败回退 '[]'，网关行本体不丢——与读取面降级对称）。 */
+    private fun encodeAgentsJson(agents: List<AgentRef>): String =
+        runCatching { agentsJson.encodeToString(AGENT_REF_LIST, agents) }.getOrDefault("[]")
+
     /**
      * 待审批列表订阅（wp-9 审批卡数据源）：hubApprovals 中 status=pending 的行，按 updatedAt 升序。
      * approval.resolved 事件把行翻成 approved/rejected 后自动离场——卡片收敛即由本 Flow 驱动，
@@ -647,6 +716,47 @@ class DefaultHubClient(
     suspend fun reportApnsToken(token: String) {
         val stack = runtime.authStack ?: throw IllegalStateException("未登录")
         return stack.auth.withBearer { stack.api.registerApnsToken(ApnsTokenRequest(token)) }
+    }
+
+    // ── v1.3.0 网关供给面管理门面（#25/#26/#27，多网关轮；纯 REST 直调不走幂等队列） ──
+
+    /**
+     * 注册网关（#25，v1.3.0 additive 多网关轮）：返回一次性明文 bridgeToken。**不持久化纪律
+     * （契约 #25 description / 设计稿 §2.1 客户端义务）**：本门面不落投影库/凭据仓/偏好，
+     * 明文仅经返回值交付调用方——管理面（网关管理 sheet）持有仅会话内存，复制给 Bridge
+     * 设备 env（BRIDGE_GATEWAY_ID / BRIDGE_TOKEN）用完即弃，sheet 关闭即丢失（服务端只存
+     * SHA-256 摘要、无法再次查看）。名称不判重、无幂等键：重复提交产生多个网关各持独立
+     * Token，重试安全由调用方按钮防重（提交中禁用）保证。失败按 HubException 冒泡呈现，
+     * 不静默；未登录抛 IllegalStateException（与 uploadMedia 同式）。
+     */
+    suspend fun createGateway(name: String): GatewayCreatedResponse {
+        val stack = runtime.authStack ?: throw IllegalStateException("未登录")
+        return stack.auth.withBearer { stack.api.createGateway(CreateGatewayRequest(name)) }
+    }
+
+    /**
+     * 轮换网关 bridgeToken（#26，v1.3.0 additive）：旧 Token 进 24h 宽限（宽限期内新旧双活）；
+     * 新明文一次性下发的持久化纪律同 [createGateway]（不落盘，仅返回值交付）。并发轮换
+     * last-write-wins（以最后一次签发为准）；目标网关已撤销（status='revoked'）时 401
+     * HUB-AUTH-005 语义拒绝；「未知/非属主」404 HUB-BIZ-002 防枚举。
+     */
+    suspend fun rotateBridgeToken(gatewayId: String): BridgeTokenIssuedResponse {
+        val stack = runtime.authStack ?: throw IllegalStateException("未登录")
+        return stack.auth.withBearer { stack.api.rotateBridgeToken(gatewayId) }
+    }
+
+    /**
+     * 撤销网关（#27，v1.3.0 additive，204 终态且对属主幂等）：撤销后服务端读面按
+     * status='active' 过滤——该网关自此从 GET /v1/gateways 消失；本门面成功后触发一次
+     * [refreshGateways] 回拉对账。已知边界：refreshGateways 是行级 upsert 不删行，被撤销
+     * 网关的本地投影行留存至下次快照整体覆盖收敛（Hub.sq 无行级删除面，快照/校准对账
+     * 铁律内收敛）——UI 呈现面如需即时隐藏在 GatewaysView 轮次处理。失败按 HubException
+     * 冒泡呈现，不静默。
+     */
+    suspend fun deleteGateway(gatewayId: String) {
+        val stack = runtime.authStack ?: throw IllegalStateException("未登录")
+        stack.auth.withBearer { stack.api.deleteGateway(gatewayId) }
+        refreshGateways()
     }
 
     companion object {

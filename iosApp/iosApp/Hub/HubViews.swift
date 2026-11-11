@@ -2161,8 +2161,9 @@ struct PendingApprovalsView: View {
     }
 }
 
-// ── 多网关轮（v1.3.0，设计稿 multi-gateway-design-20261110 r3 §2.3 剧本 1 / §3.2 呈现 /
-//    §4.3 分组 UI）：以下为 sheet(item:) 载体与一次性凭据/管理 sheet 支撑视图 ──
+// ── 多网关轮（v1.3.0，设计稿 multi-gateway-design-20261110 r3 §4.3 分组 UI）sheet(item:) 载体；
+//    控台轮（2026-11-11）：网关供给/轮换/撤销管理面搬服务端控台，对应管理 sheet 与一次性
+//    凭据展示支撑视图已撤，客户端只余分组与只读呈现 ──
 
 /// sheet(item:) 载体：目标 agent（KMP 类非 Identifiable，与 HubRootView 导航纪律同口径）。
 private struct AgentRefKey: Identifiable {
@@ -2171,357 +2172,12 @@ private struct AgentRefKey: Identifiable {
     var id: String { "\(gatewayId)|\(agentId)" }
 }
 
-/// sheet(item:) 载体：目标网关。
-private struct GatewayRef: Identifiable {
-    let gateway: UiGateway
-    var id: String { gateway.gatewayId }
-}
-
 /// 分组行条目（组内/未分组段 ForEach 载体；id = (gatewayId, agentId) 二元组键——组员资格
 /// 绝不能只挂 agentId，§4.2）。
 private struct GroupAgentEntry: Identifiable {
     let gateway: UiGateway
     let agent: UiAgentRef
     var id: String { "\(gateway.gatewayId)|\(agent.agentId)" }
-}
-
-/// 一次性凭据展示行（#25/#26 共用）：label + 等宽值（可选中）+ 复制按钮（2s 反馈）。
-/// 凭据只在本视图内存，不落任何持久化（不持久化纪律，契约 #25 description）。
-private struct OneTimeValueRow: View {
-    let label: String
-    let value: String
-    @State private var copied = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Text(label).font(.footnote).foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    UIPasteboard.general.string = value
-                    copied = true
-                    Task {
-                        try? await Task.sleep(nanoseconds: 2_000_000_000)
-                        copied = false
-                    }
-                } label: {
-                    Label(copied ? "已复制" : "拷贝", systemImage: copied ? "checkmark" : "doc.on.doc")
-                        .font(.caption)
-                }
-                .buttonStyle(.borderless)
-            }
-            Text(value)
-                .font(.caption.monospaced())
-                .lineLimit(2)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-        }
-    }
-}
-
-/// 管理动作失败降级行（添加/轮换/撤销三 sheet 共用：显式呈现 + 可重试，不静默）。
-private struct MgmtErrorRow: View {
-    let message: String
-
-    var body: some View {
-        Label {
-            Text(message)
-        } icon: {
-            Image(systemName: "exclamationmark.triangle.fill")
-        }
-        .font(.footnote)
-        .foregroundStyle(.red.opacity(0.9))
-    }
-}
-
-/// 一次性凭据（#25/#26 展示模型；仅会话内存，不持久化）。
-private struct GatewayCreatedInfo {
-    let gatewayId: String
-    let name: String
-    let bridgeToken: String
-}
-
-/// 网关管理 sheet · 添加网关（§2.3 剧本 1）：#25 名称表单 → 一次性 bridgeToken 展示页。
-/// 一次性凭据（gatewayId + bridgeToken）只在本 sheet @State 会话内存持有，关闭即丢；
-/// 展示页常驻「关闭后不可再看」警示 + 复制按钮。#25 名称不判重、无幂等键——提交中禁用按钮
-/// 防重（重复提交产生多个网关各持独立 Token）。
-private struct AddGatewaySheet: View {
-    @State private var hub = HubStore.shared
-    @Environment(\.dismiss) private var dismiss
-    @State private var name = ""
-    @State private var submitting = false
-    @State private var error: String?
-    /// 创建成功的一次性凭据（nil = 表单态；仅在会话内存，view 销毁即释放）。
-    @State private var created: GatewayCreatedInfo?
-
-    private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
-    /// 契约 #25：name 必填非空、≤64 字符。
-    private var nameValid: Bool { !trimmedName.isEmpty && trimmedName.count <= 64 }
-
-    var body: some View {
-        NavigationStack {
-            if let created {
-                oneTimeCredentialPage(created)
-            } else {
-                formPage
-            }
-        }
-        .presentationDetents([.medium, .large])
-    }
-
-    private var formPage: some View {
-        List {
-            Section {
-                TextField("网关名称（≤64 字符）", text: $name)
-                    .disabled(submitting)
-            } header: {
-                Text("添加网关")
-            } footer: {
-                Text("名称不判重：重复提交会产生多个网关各持独立 Token。创建后把 Bridge Token 配到目标设备 Bridge env 并启动进程。")
-            }
-            if let err = error {
-                Section { MgmtErrorRow(message: err) }
-            }
-            Section {
-                Button {
-                    submit()
-                } label: {
-                    HStack {
-                        Spacer()
-                        if submitting { ProgressView().controlSize(.small) }
-                        Text("创建网关")
-                        Spacer()
-                    }
-                }
-                .disabled(!nameValid || submitting)
-                .accessibilityHint("创建后展示一次性 Bridge Token")
-            }
-        }
-        .navigationTitle("添加网关")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("取消") { dismiss() }
-            }
-        }
-    }
-
-    private func submit() {
-        guard nameValid, !submitting else { return }
-        submitting = true
-        error = nil
-        hub.createGateway(name: trimmedName) { gatewayId, bridgeToken, err in
-            submitting = false
-            if let gatewayId, let bridgeToken {
-                created = GatewayCreatedInfo(gatewayId: gatewayId, name: trimmedName, bridgeToken: bridgeToken)
-            } else {
-                error = err ?? "创建未成功，可重试"
-            }
-        }
-    }
-
-    private func oneTimeCredentialPage(_ info: GatewayCreatedInfo) -> some View {
-        List {
-            Section {
-                OneTimeValueRow(label: "网关 ID（Bridge env：BRIDGE_GATEWAY_ID）", value: info.gatewayId)
-                OneTimeValueRow(label: "Bridge Token（Bridge env：BRIDGE_TOKEN）", value: info.bridgeToken)
-            } header: {
-                Text("网关已创建：\(info.name)")
-            } footer: {
-                Text("把以上两项写入目标设备 Bridge env（连同 BRIDGE_HUB_URL）并启动进程；网关拨出后即出现在清单。")
-            }
-            Section {
-                Label {
-                    Text("一次性明文：关闭后不可再看，服务端只存摘要。请先复制，再关闭本页。")
-                } icon: {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                }
-                .font(.footnote)
-                .foregroundStyle(.orange)
-            }
-        }
-        .navigationTitle("添加网关")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-                Button("完成") { dismiss() }
-            }
-        }
-    }
-}
-
-/// 网关管理 sheet · 轮换 Token（#26）：重新签发 bridgeToken，新明文一次性展示（复制按钮 +
-/// 「关闭后不可再看」警示）；旧 Token 24h 宽限期内新旧双活（并发轮换 last-write-wins，以
-/// 最后一次签发为准）。目标网关已撤销时 401 语义拒绝（HUB-AUTH-005 族）。
-private struct RotateBridgeTokenSheet: View {
-    @State private var hub = HubStore.shared
-    @Environment(\.dismiss) private var dismiss
-    let gateway: UiGateway
-    @State private var submitting = false
-    @State private var error: String?
-    @State private var issuedToken: String?
-
-    var body: some View {
-        NavigationStack {
-            if let issuedToken {
-                issuedPage(issuedToken)
-            } else {
-                confirmPage
-            }
-        }
-        .presentationDetents([.medium])
-    }
-
-    private var confirmPage: some View {
-        List {
-            Section {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(gateway.name.isEmpty ? "网关" : gateway.name).fontWeight(.semibold)
-                    Text(gateway.gatewayId)
-                        .font(.caption2.monospaced()).foregroundStyle(.tertiary)
-                        .lineLimit(1).truncationMode(.middle)
-                }
-            } header: {
-                Text("轮换 Bridge Token")
-            } footer: {
-                Text("签发新明文 Token（一次性展示）；旧 Token 24 小时宽限期内新旧双活，并发轮换以最后一次签发为准。")
-            }
-            if let err = error {
-                Section { MgmtErrorRow(message: err) }
-            }
-            Section {
-                Button {
-                    submit()
-                } label: {
-                    HStack {
-                        Spacer()
-                        if submitting { ProgressView().controlSize(.small) }
-                        Text("轮换并展示新 Token")
-                        Spacer()
-                    }
-                }
-                .disabled(submitting)
-            }
-        }
-        .navigationTitle("轮换 Token")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
-        }
-    }
-
-    private func submit() {
-        guard !submitting else { return }
-        submitting = true
-        error = nil
-        hub.rotateBridgeToken(gatewayId: gateway.gatewayId) { bridgeToken, err in
-            submitting = false
-            if let bridgeToken {
-                issuedToken = bridgeToken
-            } else {
-                error = err ?? "轮换未成功，可重试"
-            }
-        }
-    }
-
-    private func issuedPage(_ token: String) -> some View {
-        List {
-            Section {
-                OneTimeValueRow(label: "新 Bridge Token（Bridge env：BRIDGE_TOKEN）", value: token)
-            } header: {
-                Text("新 Token 已签发")
-            } footer: {
-                Text("把新 Token 写入目标设备 Bridge env 并重启进程即完成换装；旧 Token 宽限 24 小时后失效。")
-            }
-            Section {
-                Label {
-                    Text("一次性明文：关闭后不可再看，服务端只存摘要。请先复制，再关闭本页。")
-                } icon: {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                }
-                .font(.footnote)
-                .foregroundStyle(.orange)
-            }
-        }
-        .navigationTitle("轮换 Token")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } }
-        }
-    }
-}
-
-/// 网关管理 sheet · 撤销（#27 确认层）：明示「历史保留（只读）、命令不再下发」；撤销为终态，
-/// 重复撤销对属主幂等（204）；Hub 即时收口连接、目录消失（本地行以快照整体覆盖收敛，
-/// 呈现面由 revokedGatewayIds 即时隐藏）。未知/非属主仍 404 防枚举。
-private struct RevokeGatewaySheet: View {
-    @State private var hub = HubStore.shared
-    @Environment(\.dismiss) private var dismiss
-    let gateway: UiGateway
-    @State private var submitting = false
-    @State private var error: String?
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(gateway.name.isEmpty ? "网关" : gateway.name).fontWeight(.semibold)
-                        Text(gateway.gatewayId)
-                            .font(.caption2.monospaced()).foregroundStyle(.tertiary)
-                            .lineLimit(1).truncationMode(.middle)
-                    }
-                } header: {
-                    Text("撤销网关")
-                }
-                Section {
-                    Label {
-                        Text("撤销后该网关连接即时收口、命令不再下发；历史会话保留（只读）。此操作为终态，重复撤销无副作用。")
-                    } icon: {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                    }
-                    .font(.footnote)
-                    .foregroundStyle(.orange)
-                }
-                if let err = error {
-                    Section { MgmtErrorRow(message: err) }
-                }
-                Section {
-                    Button(role: .destructive) {
-                        submit()
-                    } label: {
-                        HStack {
-                            Spacer()
-                            if submitting { ProgressView().controlSize(.small) }
-                            Text("撤销网关")
-                            Spacer()
-                        }
-                    }
-                    .disabled(submitting)
-                }
-            }
-            .navigationTitle("撤销网关")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
-            }
-        }
-        .presentationDetents([.medium])
-    }
-
-    private func submit() {
-        guard !submitting else { return }
-        submitting = true
-        error = nil
-        hub.revokeGateway(gatewayId: gateway.gatewayId) { err in
-            submitting = false
-            if let err {
-                error = err
-            } else {
-                dismiss()
-            }
-        }
-    }
 }
 
 /// 「加入分组…」组选择器（§4.3：现有组选择器 + 新建组入口）。目标 agent 当前组打勾；
@@ -2589,19 +2245,15 @@ private struct GroupPickerSheet: View {
 
 /// wp-11：网关与 Agent 清单（设置页「网关」入口落点）；多网关轮改**三段式**——「分组」
 /// （每组一节，节头可改名/解散）+「未分组」+「网关」（网关卡保留原有 online/lastSeenAt 呈现）。
-/// toolbar「+」→ 添加网关 sheet（§2.3 剧本 1）；既有网关卡 contextMenu「轮换 Token」（#26）
-/// 与「撤销」（#27 确认层）；agent 行 contextMenu 加入分组…/移出分组/新建会话（与
-/// NewConversationSheet 行同写路径语义，失败经 createConversationError 显式降级不静默）。
+/// 控台轮（2026-11-11 管理面搬服务端控台）：toolbar「+」/添加网关表单/一次性 bridgeToken 展示/
+/// 轮换 Token/撤销网关管理入口全撤，本页回归只读；保留三段式分组、分组节头改名/解散与
+/// agent 行 contextMenu 加入分组…/移出分组/新建会话（与 NewConversationSheet 行同写路径
+/// 语义，失败经 createConversationError 显式降级不静默）。
 struct GatewaysView: View {
     @State private var hub = HubStore.shared
 
-    @State private var showAddGateway = false
     /// 「加入分组…」目标 agent。
     @State private var groupPickerTarget: AgentRefKey?
-    /// 「轮换 Token」目标网关。
-    @State private var rotateTarget: GatewayRef?
-    /// 「撤销」目标网关（确认层）。
-    @State private var revokeTarget: GatewayRef?
     /// 分组节头改名（alert TextField 载体；nil = 关）。
     @State private var renamingGroupId: String?
     @State private var renameDraft = ""
@@ -2639,25 +2291,8 @@ struct GatewaysView: View {
         }
         .navigationTitle("网关与 Agent")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    showAddGateway = true
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .accessibilityLabel("网关管理")
-            }
-        }
-        .sheet(isPresented: $showAddGateway) { AddGatewaySheet() }
         .sheet(item: $groupPickerTarget) { key in
             GroupPickerSheet(target: key)
-        }
-        .sheet(item: $rotateTarget) { ref in
-            RotateBridgeTokenSheet(gateway: ref.gateway)
-        }
-        .sheet(item: $revokeTarget) { ref in
-            RevokeGatewaySheet(gateway: ref.gateway)
         }
         .alert("分组改名", isPresented: Binding(
             get: { renamingGroupId != nil },
@@ -2753,7 +2388,8 @@ struct GatewaysView: View {
         }
     }
 
-    // ── 网关段：网关卡保留原有呈现（online/lastSeenAt + agent 行）；卡 contextMenu 管理动作 ──
+    // ── 网关段：网关卡只读呈现（online/lastSeenAt + agent 行）——控台轮卡 contextMenu
+    //    管理动作（轮换/撤销）已随管理面搬服务端控台撤除 ──
 
     @ViewBuilder
     private var gatewaySection: some View {
@@ -2786,14 +2422,6 @@ struct GatewaysView: View {
                     }
                 }
                 .padding(.vertical, 2)
-                .contextMenu {
-                    Button {
-                        rotateTarget = GatewayRef(gateway: gw)
-                    } label: { Label("轮换 Token…", systemImage: "arrow.triangle.2.circlepath") }
-                    Button(role: .destructive) {
-                        revokeTarget = GatewayRef(gateway: gw)
-                    } label: { Label("撤销网关…", systemImage: "trash") }
-                }
             }
         } header: {
             Text("网关")
@@ -3013,8 +2641,51 @@ struct HubSettingsView: View {
                 }
             }
             Section("网关") {
-                // wp-11：网关维度入口——快照 gateways + agentsJson（AgentRef 结构化清单）透出；
-                // 在线态由 gateway.online/offline 事件在投影库维护，行随库变更推送。
+                // 控台轮只读卡片「网关与 Agent」（每网关一行：名称/在线态/lastSeen + agent 清单
+                // agentId/label，agent 行首在线小点）：零管理动作——网关供给/轮换/撤销已搬服务端
+                // 控台。在线点数据面 = REST #18（shared HubClient.agentStatus）经 hub 30s TTL 缓存
+                // （fetchCommandsIfNeeded 先例同式），拉不到不显示点、不阻塞行渲染。
+                if hub.gateways.isEmpty {
+                    Text("未接入").font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(hub.gateways, id: \.gatewayId) { gw in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 8) {
+                            Circle().fill(gw.online ? Color.green : Color.secondary)
+                                .frame(width: 8, height: 8)
+                            Text(gw.name.isEmpty ? "网关" : gw.name).fontWeight(.semibold)
+                            Spacer()
+                            Text(gw.online ? "在线" : "离线")
+                                .font(.caption)
+                                .foregroundStyle(gw.online ? Color.green : Color.secondary)
+                        }
+                        if let seen = gw.lastSeenAt, !seen.isEmpty {
+                            Text("最近活跃 \(seen)").font(.caption2).foregroundStyle(.secondary)
+                        }
+                        if gw.agents.isEmpty {
+                            Text("该网关暂无 active Agent").font(.caption).foregroundStyle(.tertiary)
+                        } else {
+                            ForEach(gw.agents, id: \.agentId) { agent in
+                                HStack(spacing: 6) {
+                                    AgentOnlineDot(hub: hub, gatewayId: gw.gatewayId, agentId: agent.agentId)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(agent.label.isEmpty ? agent.agentId : agent.label)
+                                            .font(.callout)
+                                        Text(agent.agentId)
+                                            .font(.caption2.monospaced())
+                                            .foregroundStyle(.tertiary)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+                // wp-11：网关维度入口（GatewaysView 三段式分组唯一入口）——快照 gateways +
+                // agentsJson（AgentRef 结构化清单）透出；在线态由 gateway.online/offline 事件在
+                // 投影库维护，行随库变更推送。
                 NavigationLink {
                     GatewaysView()
                 } label: {
@@ -3085,9 +2756,41 @@ struct HubSettingsView: View {
         }
         .navigationTitle("设置")
         .onAppear { hub.refreshDevices() }
+        .task {
+            // 控台轮卡片在线点新鲜度：设置页在场期间每 30s 一轮（与 HubStore 缓存 TTL 同值——
+            // 新鲜即空转，过期才发请求；失败静默下轮再试）。行级 onAppear 兜底首次渲染触发
+            // （AgentOnlineDot 内），本循环保持长驻期间的点与 #18 投影同步。
+            while !Task.isCancelled {
+                for gw in hub.gateways {
+                    for agent in gw.agents {
+                        hub.fetchAgentStatusIfNeeded(gatewayId: gw.gatewayId, agentId: agent.agentId)
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+            }
+        }
         .confirmationDialog("撤销当前设备并清除本机凭据？", isPresented: $confirmLogout, titleVisibility: .visible) {
             Button("退出登录", role: .destructive) { hub.logout() }
             Button("取消", role: .cancel) {}
         }
+    }
+}
+
+/// 控台轮只读卡片 agent 行在线小点：数据面 = REST #18（shared HubClient.agentStatus）经
+/// HubStore 30s TTL 缓存（fetchCommandsIfNeeded 先例同式）。无缓存（未拉到/拉取失败）不渲染
+/// 点，不阻塞行；gatewayOnline 是 #18 唯一在线信号（agent 无独立在线态，随网关连接收口）。
+private struct AgentOnlineDot: View {
+    let hub: HubStore
+    let gatewayId: String
+    let agentId: String
+
+    var body: some View {
+        Group {
+            if let status = hub.agentStatus(gatewayId: gatewayId, agentId: agentId) {
+                Circle().fill(status.gatewayOnline ? Color.green : Color.secondary)
+                    .frame(width: 7, height: 7)
+            }
+        }
+        .onAppear { hub.fetchAgentStatusIfNeeded(gatewayId: gatewayId, agentId: agentId) }
     }
 }

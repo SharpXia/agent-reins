@@ -210,20 +210,11 @@ final class HubStore {
     /// 收敛为准（成功即触发一次校准，秒级；兜底 R4 周期），行在卡出现后自动翻成置灰。
     private(set) var createdConversationFor: Set<String> = []
 
-    // ---------- 多网关轮：agent 分组偏好 + 网关供给面管理（v1.3.0 #25/#26/#27） ----------
+    // ---------- 多网关轮：agent 分组偏好（控台轮网关供给/轮换/撤销管理动作已搬服务端控台撤除） ----------
 
     /// agent 分组偏好（设计稿 §4.3；AgentGroupStore 自身 @Observable，视图直接订阅）。
     /// 本地承载跨登出保留（§4.1：投影库可整库丢弃重建，偏好走「投影库外」先例 = 静音集）。
     let agentGroups = AgentGroupStore()
-
-    /// 已撤销网关（本会话期 UI 隐藏集）：#27 成功后服务端读面即按 status='active' 过滤，但本地
-    /// 投影行要等下次快照整体覆盖才收敛（refreshGateways 是行级 upsert 不删行）——呈现面在此
-    /// 即时隐藏，快照收敛后集合内容与库面自然一致；登出清空（分组偏好不受登出影响）。
-    private(set) var revokedGatewayIds: Set<String> = []
-
-    /// 网关管理动作在途（键 = "create" 或 gatewayId；按钮禁用防重复提交——#25 名称不判重
-    /// 无幂等键，重复提交产生多个网关各持独立 Token）。
-    private(set) var gatewayActionInFlight: Set<String> = []
 
     /// #2'（2026-11-07 二轮，x总改版）：thinking 帧在途判定——当前打开会话最新阶段帧
     /// phase=thinking（run 终态投影清行，帧存在即在途）。数据链：Gateway thinking 流 →
@@ -361,6 +352,44 @@ final class HubStore {
         }
     }
 
+    // ---------- 控台轮：agent 在线点数据面（REST #18，只读卡片；管理面搬服务端控台后客户端余留读面） ----------
+
+    /// agent 状态缓存（键 = (gatewayId, agentId)，值 = REST #18 回执）。纯内存、随登出清空；
+    /// TTL 30 秒（只读卡片在线点新鲜度口径），过期后下次触发重拉。失败不缓存——行不显示点、
+    /// 不弹错误 UI（与 fetchCommandsIfNeeded 失败纪律同式）。
+    private(set) var agentStatusCache: [String: AgentStatusResponse] = [:]
+
+    /// 缓存拉取时刻（TTL 判定基准；与 agentStatusCache 同键同生命周期）。
+    private var agentStatusFetchedAt: [String: Date] = [:]
+
+    /// 在途去重：同 agent 并发触发只发一次请求（#18 纯投影查询，限流走列表类 60 次/分/设备）。
+    private var agentStatusInFlight: Set<String> = []
+
+    private static let agentStatusCacheTTL: TimeInterval = 30
+
+    /// 读取缓存（nil = 无数据——在线点不渲染）。@Observable 字典读，行随回填自动重渲。
+    func agentStatus(gatewayId: String, agentId: String) -> AgentStatusResponse? {
+        agentStatusCache[Self.entryKey(gatewayId: gatewayId, agentId: agentId)]
+    }
+
+    /// 按需拉取 agent 状态（触发面 = 设置页只读卡片行 onAppear + 卡片 30s 轮循；缓存新鲜即
+    /// 空转、在途去重照常生效）。失败静默吞（不缓存、点不显示），不阻塞 UI——尽力而为增强面。
+    func fetchAgentStatusIfNeeded(gatewayId: String, agentId: String) {
+        guard isLoggedIn else { return }
+        let key = Self.entryKey(gatewayId: gatewayId, agentId: agentId)
+        if let fetchedAt = agentStatusFetchedAt[key],
+           Date().timeIntervalSince(fetchedAt) < Self.agentStatusCacheTTL { return }
+        guard !agentStatusInFlight.contains(key) else { return }
+        agentStatusInFlight.insert(key)
+        bridge.hubAgentStatus(gatewayId: gatewayId, agentId: agentId) { [weak self] status, _ in
+            guard let self else { return }
+            self.agentStatusInFlight.remove(key)
+            guard let status else { return } // 失败不缓存：点不显示，下轮触发重试
+            self.agentStatusCache[key] = status
+            self.agentStatusFetchedAt[key] = Date()
+        }
+    }
+
     /// 草稿以 "/" 起手时按需拉取动态目录（触发面 = composer onChange(of: draft)；缓存新鲜即空转，
     /// 其余输入零干扰不触发）。失败（onResult null）静默吞——维持静态六目录，不弹错误 UI
     /// （尽力而为增强面，与 hubReportApnsToken 同纪律）。
@@ -455,12 +484,12 @@ final class HubStore {
     }
 
     /// 订阅网关清单（wp-11：与 watchConversations 同模式，纯投影库面、随库变更推送）。
-    /// 多网关轮：呈现清单滤除已撤销网关（revokedGatewayIds——本地投影行要等快照整体覆盖
-    /// 才收敛，见该字段注释）。
+    /// 控台轮：客户端不再有撤销动作，旧 revokedGatewayIds 即时隐藏集随之撤除——呈现清单
+    /// 即投影库推送原样（已撤销网关行以服务端读面过滤 + 快照整体覆盖收敛）。
     func watchGateways() {
         bridge.hubWatchGateways { [weak self] list in
             guard let self else { return }
-            self.gateways = list.filter { !self.revokedGatewayIds.contains($0.gatewayId) }
+            self.gateways = list
             // 收敛清理：已兜底成卡的 (gatewayId, agentId) 移出「已提交」瞬态（行翻置灰由主线卡判据接管）
             let cardKeys = Set(self.conversations.map { Self.entryKey(gatewayId: $0.gatewayId, agentId: $0.agentId) })
             self.createdConversationFor.formIntersection(cardKeys)
@@ -505,52 +534,6 @@ final class HubStore {
             } else {
                 self.createdConversationFor.insert(key)
             }
-        }
-    }
-
-    // ---------- 多网关轮：网关供给面管理动作（#25/#26/#27，v1.3.0；桥回调式，与 hubDevices 同式） ----------
-
-    /// 注册网关（#25）：一次性明文 bridgeToken 只经回调交付调用方（网关管理 sheet 会话内存
-    /// 持有，**不落任何持久化**——不持久化纪律见 AgentBridge.hubCreateGateway 注释）。
-    /// onDone gatewayId/bridgeToken 非 nil = 成功（调用方切一次性凭据展示）；nil = 未成功，
-    /// error = 人读失败原因，调用方显式呈现 + 可重试，不静默。
-    func createGateway(name: String, onDone: @escaping (_ gatewayId: String?, _ bridgeToken: String?, _ error: String?) -> Void) {
-        let key = "create"
-        guard !gatewayActionInFlight.contains(key) else { return }
-        gatewayActionInFlight.insert(key)
-        bridge.hubCreateGateway(name: name) { [weak self] gatewayId, bridgeToken, error in
-            guard let self else { return }
-            self.gatewayActionInFlight.remove(key)
-            onDone(gatewayId, bridgeToken, error)
-        }
-    }
-
-    /// 轮换网关 bridgeToken（#26）：新明文一次性经回调交付（不持久化，同 #25 纪律）；旧 Token
-    /// 24h 宽限。onDone bridgeToken nil = 未成功，error = 人读失败原因。
-    func rotateBridgeToken(gatewayId: String, onDone: @escaping (_ bridgeToken: String?, _ error: String?) -> Void) {
-        guard !gatewayActionInFlight.contains(gatewayId) else { return }
-        gatewayActionInFlight.insert(gatewayId)
-        bridge.hubRotateBridgeToken(gatewayId: gatewayId) { [weak self] bridgeToken, error in
-            guard let self else { return }
-            self.gatewayActionInFlight.remove(gatewayId)
-            onDone(bridgeToken, error)
-        }
-    }
-
-    /// 撤销网关（#27，终态且对属主幂等）：成功即入 revokedGatewayIds 呈现隐藏集 + 就地清出
-    /// gateways 清单（目录行以快照整体覆盖收敛，见 revokedGatewayIds 注释）。onDone error
-    /// nil = 已成功；非 nil = 未成功，error = 人读失败原因，调用方显式呈现 + 可重试，不静默。
-    func revokeGateway(gatewayId: String, onDone: @escaping (_ error: String?) -> Void) {
-        guard !gatewayActionInFlight.contains(gatewayId) else { return }
-        gatewayActionInFlight.insert(gatewayId)
-        bridge.hubDeleteGateway(gatewayId: gatewayId) { [weak self] error in
-            guard let self else { return }
-            self.gatewayActionInFlight.remove(gatewayId)
-            if error == nil {
-                self.revokedGatewayIds.insert(gatewayId)
-                self.gateways.removeAll { $0.gatewayId == gatewayId }
-            }
-            onDone(error)
         }
     }
 
@@ -1557,9 +1540,11 @@ final class HubStore {
         devicesCache = nil
         devicesError = nil
         revokeFailure = nil
-        // 多网关轮：撤销网关呈现隐藏集随登出清空（分组 agentGroups 为本地偏好，跨登出保留）。
-        revokedGatewayIds = []
-        gatewayActionInFlight = []
+        // 控台轮：agent 在线点缓存随登出清空（同 #21/#22 缓存纪律；分组 agentGroups 为本地
+        // 偏好，跨登出保留）。
+        agentStatusCache = [:]
+        agentStatusFetchedAt = [:]
+        agentStatusInFlight = []
         // #21：动态命令目录随登出清空（重登后从空缓存 bootstrap，下次 "/" 起手重拉）
         commandsCache = [:]
         commandsFetchedAt = [:]

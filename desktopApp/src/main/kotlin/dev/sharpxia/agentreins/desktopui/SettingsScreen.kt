@@ -1,6 +1,8 @@
 package dev.sharpxia.agentreins.desktopui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -8,8 +10,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -31,12 +35,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.sharpxia.agentreins.hub.DefaultHubClient
 import dev.sharpxia.agentreins.hub.HubAuthState
 import dev.sharpxia.agentreins.hub.HubException
 import dev.sharpxia.agentreins.hub.UiApproval
 import dev.sharpxia.agentreins.hub.UiConversation
+import dev.sharpxia.agentreins.hub.UiGateway
 import dev.sharpxia.agentreins.hub.auth.DeviceInfo
+import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -44,7 +52,10 @@ import kotlinx.coroutines.launch
  * 面）：账号/设备概览
  * + 设备清单管理（撤销他机；清单失败错误态 + 撤销失败显式降级文案可重试，wp-11 设备管理错误态）
  * + 网关与 Agent 入口卡（wp-11：快照计数摘要，点击跳网关独立页——
- * iOS 设置页 Section("网关") NavigationLink parity）+ 待审批清单（wp-9 的 desktop 呈现：全部
+ * iOS 设置页 Section("网关") NavigationLink parity）
+ * + 网关与 Agent 只读卡（控台轮 2026-11-11：每网关一行名称/在线态/lastSeen + agent 清单
+ * label/agentId，agent 行首在线小点走 client.agentStatus（端点 #18）30s TTL 缓存；零管理动作
+ * ——网关供给/轮换/撤销已搬服务端控台，iOS 设置页同款卡片 parity）+ 待审批清单（wp-9 的 desktop 呈现：全部
  * pending 审批含归属未学习行——那里没有会话页可挂，唯一可见处在此；对齐 iOS 设置页「待审批」
  * 入口）+ 通知偏好节（wp-9：总开关 + 已静音会话清单管理，静音为本地偏好跨登出保留，iOS
  * HubStore.mutedConversations 同口径）+ 关闭行为卡（wp-14：关窗最小化到托盘 / 关窗退出，
@@ -182,6 +193,13 @@ internal fun SettingsScreen(
                 gateways = gateways,
                 onOpen = onOpenGateways,
             )
+
+            // 控台轮只读卡片「网关与 Agent」（iOS 设置页「网关」Section 卡片 parity）：每网关
+            // 一行（名称/在线态/lastSeen）+ agent 清单（agentId/label，行首在线小点）。卡片零
+            // 管理动作——网关供给/轮换/撤销已搬服务端控台；在线点数据面 = client.agentStatus
+            // （端点 #18 直调），30s TTL + 在途去重（iOS fetchCommandsIfNeeded 先例同式），
+            // 失败不缓存 → 不显示点，不阻塞 UI。
+            GatewayOverviewCard(gateways = gateways, client = client)
 
             // wp-9：通知偏好节（总开关 + 已静音会话清单管理；静音改右键菜单入口同源，此处为
             // 查看与解除的唯一管理面——iOS 设置页静音清单管理 parity）
@@ -348,6 +366,122 @@ private fun NotificationPreferencesCard(
                     ) {
                         Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f), maxLines = 1)
                         TextButton(onClick = { onUnmute(id) }) { Text("解除静音") }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** #18 在线点缓存 TTL（毫秒；iOS HubStore.agentStatusCacheTTL 同口径，30 秒）。 */
+private const val AgentStatusTtlMs = 30_000L
+
+/** #18 在线点轮循周期（与 TTL 同值：每轮先补拉过期键再睡一周期，新鲜键空转）。 */
+private const val AgentStatusRefreshMs = 30_000L
+
+/**
+ * 控台轮只读「网关与 Agent」卡（iOS HubSettingsView「网关」Section 卡片 parity）：每网关一行
+ * （在线点 + 名称 + 在线/离线 + lastSeen）+ agent 清单（label/agentId + 行首在线小点）。
+ * 在线点数据面 = [DefaultHubClient.agentStatus]（端点 #18 纯投影查询）：30s TTL + 在途去重
+ * （iOS fetchCommandsIfNeeded 缓存先例同式），失败不缓存 → 该行不显示点，绝不阻塞渲染；
+ * gatewayOnline 是 #18 唯一在线信号（agent 无独立在线态，随网关连接收口）。卡片零管理动作。
+ */
+@Composable
+private fun GatewayOverviewCard(
+    gateways: List<UiGateway>,
+    client: DefaultHubClient,
+) {
+    // #18 缓存（键 = conversationEntryKey，即 gatewayId|agentId）：statuses 进组合（变更驱动
+    // 行重渲）；fetchedAt/inFlight 只做 TTL 判定与去重、无渲染依赖，用普通 remember 容器
+    // （仅主线程协程读写，Compose rememberCoroutineScope 默认 Main 派发）。
+    var statuses by remember { mutableStateOf<Map<String, AgentStatusResponse>>(emptyMap()) }
+    val fetchedAt = remember { mutableMapOf<String, Long>() }
+    val inFlight = remember { mutableSetOf<String>() }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(gateways) {
+        while (true) {
+            gateways.forEach { gw ->
+                gw.agents.forEach { agent ->
+                    val key = conversationEntryKey(gw.gatewayId, agent.agentId)
+                    val now = System.currentTimeMillis()
+                    val fetched = fetchedAt[key]
+                    if (key in inFlight || (fetched != null && now - fetched < AgentStatusTtlMs)) {
+                        return@forEach
+                    }
+                    inFlight += key
+                    scope.launch {
+                        val r = runCatching { client.agentStatus(gw.gatewayId, agent.agentId) }
+                        inFlight -= key
+                        r.getOrNull()?.let { status ->
+                            statuses = statuses + (key to status)
+                            fetchedAt[key] = System.currentTimeMillis()
+                        }
+                    }
+                }
+            }
+            delay(AgentStatusRefreshMs)
+        }
+    }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("网关与 Agent", style = MaterialTheme.typography.titleSmall)
+            if (gateways.isEmpty()) {
+                Text("未接入", style = MaterialTheme.typography.bodySmall, color = Color(0xFF999999))
+            }
+            gateways.forEach { gw ->
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .background(
+                                    if (gw.online) Color(0xFF2E9E44) else Color(0xFF999999),
+                                    CircleShape,
+                                ),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            gw.name.ifBlank { "网关" },
+                            style = MaterialTheme.typography.titleSmall,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            if (gw.online) "在线" else "离线",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (gw.online) Color(0xFF2E9E44) else Color(0xFF999999),
+                        )
+                    }
+                    // 最近活跃：lastSeenAt = 快照字段或 gateway.online/offline 事件 ts（信封
+                    // ISO-8601），formatTs 尽力本地化、失败原样透出（GatewayCard 同式）。
+                    gw.lastSeenAt?.takeIf { it.isNotBlank() }?.let { seen ->
+                        Text("最近活跃 ${formatTs(seen)}", fontSize = 11.sp, color = Color(0xFF888888))
+                    }
+                    if (gw.agents.isEmpty()) {
+                        Text("该网关暂无 active Agent", fontSize = 12.sp, color = Color(0xFFAAAAAA))
+                    } else {
+                        gw.agents.forEach { agent ->
+                            // 无缓存（未拉到/拉取失败）不渲染点——「拉不到就不显示点」纪律。
+                            val status = statuses[conversationEntryKey(gw.gatewayId, agent.agentId)]
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (status != null) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(7.dp)
+                                            .background(
+                                                if (status.gatewayOnline) Color(0xFF2E9E44) else Color(0xFF999999),
+                                                CircleShape,
+                                            ),
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                }
+                                Column(Modifier.weight(1f)) {
+                                    Text(agent.label.ifBlank { agent.agentId }, fontSize = 13.sp)
+                                    Text(agent.agentId, fontSize = 10.sp, color = Color(0xFF999999), maxLines = 1)
+                                }
+                            }
+                        }
                     }
                 }
             }

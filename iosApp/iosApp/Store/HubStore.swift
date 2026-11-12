@@ -1126,8 +1126,15 @@ final class HubStore {
     ///（#4 派发门槛；后台由 APNs 承载——「前台=本地/后台=APNs」通道切分不动）。
     /// 断线窗口的回复经重连补投事件触发（cursor 去重后对客户端确属新事件）；bootstrap
     /// 快照积压行不经事件路径，天然不带假阳性。
+    /// 无信息量行闭值过滤（2026-11-12 空行风暴修复轮，镜像服务端 pushAlert apns.go 口径）：
+    /// 长任务期间 OpenClaw 每个模型轮在转录写一条空 assistant 条目（载荷是 tool_use 块、
+    /// 文本为空），session.message 广播→message.created 每条直达本面——空正文无附件行与
+    ///「无回复」心跳行不派发，纯附件行照推（summary 承载「[图片]」家族）。11-06 三面过滤
+    ///（客户端查询/服务端 unread/推送闭值）缺的第四面，v1.3 触发面迁移时遗留的回归。
     private func noteReplyMessage(conversationId: String, content: String, attachmentCount: Int) {
         guard isLoggedIn, !conversationId.isEmpty else { return }
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !(trimmed.isEmpty && attachmentCount == 0), trimmed != "无回复" else { return }
         guard let c = conversations.first(where: { $0.conversationId == conversationId }) else { return }
         guard selected?.conversationId != conversationId else { return }   // 当前打开不提醒（scope 语义）
         guard !mutedConversations.contains(conversationId) else { return } // 按会话静音

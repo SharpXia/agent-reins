@@ -235,7 +235,7 @@ class AgentBridge {
 
     /**
      * assistant final 权威行回调（v1.3 iOS 通知摘要轮；Swift 启动时注册一次，重复调用覆盖旧回调）：
-     * message.created 事件（role≠user）到达即回调 (conversationId, content, attachmentCount)。
+     * message.created 事件（role=assistant）到达即回调 (conversationId, content, attachmentCount)。
      * 动机：回复通知的正文摘要需要消息正文与附件数（剥 markdown / 纯附件「[图片]×N」）——
      * 会话卡片 preview 只是裸 content，纯附件行剥不出附件计数；事件旁路是唯一可得面。
      * conversationId = hubConvKeys 解析（未映射 = 空串，Swift 侧按归属可得性显式降级，不编造）；
@@ -273,12 +273,16 @@ class AgentBridge {
             }
             EventEnvelope.APPROVAL_REQUESTED -> approvalRequestedSink?.invoke(conversationId)
             EventEnvelope.MESSAGE_CREATED -> {
-                // v1.3 通知摘要轮：assistant final 权威行（role≠user）→ 摘要数据面
-                //（content + 附件数；用户行是本端消息回显，不提醒）。载荷解析宽松降级
-                //（缺键/形状漂移 = 空值，与 DefaultEventProjector「宽松解析、缺键降级」同纪律）。
+                // v1.3 通知摘要轮：assistant final 权威行（role=assistant）→ 摘要数据面
+                //（content + 附件数；用户行是本端消息回显，不提醒）。role 收紧为 assistant
+                //（2026-11-12 空行风暴修复轮，服务端 pushAlert apns.go 同口径）：缺 role/
+                // 其他 role fail-closed 不提醒——服务端对 d.Role != "assistant" 一律不推，
+                // 客户端触发面必须镜像，否则桥上行的非 assistant 形态绕过闭值过滤。
+                // 载荷解析宽松降级（缺键/形状漂移 = 空值，与 DefaultEventProjector
+                //「宽松解析、缺键降级」同纪律）。
                 val obj = runCatching { envelope.data.jsonObject }.getOrNull() ?: return
                 val role = (obj["role"] as? JsonPrimitive)?.contentOrNull
-                if (role == "user") return
+                if (role != "assistant") return
                 val content = (obj["content"] as? JsonPrimitive)?.contentOrNull ?: ""
                 val attachmentCount = (obj["attachments"] as? JsonArray)?.size ?: 0
                 replyMessageSink?.invoke(conversationId, content, attachmentCount)

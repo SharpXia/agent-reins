@@ -481,11 +481,18 @@ class DefaultEventProjector(
             conversationId = convId,
         )
         // 本地未读增量（05 §3.7 义务 3，与 Hub 同口径：当前化身 seq>readUpTo 的 assistant final 行；
-        // role="" 合成行不计）
+        // role="" 合成行不计）。2026-11-13 假未读修复轮：增量改 countUnread 重算单源——旧盲目
+        // +1 不带闭值过滤（assistant 空正文/「无回复」行，Hub.sq selectMessages 同规则隐藏），
+        // 行在时间线不可见 → maxRenderedSeq 不推进 → 无 read.updated 回声 → 无重算自愈，
+        // 假未读挂到重进会话（resetPagingState 重发同值游标 → 服务端无条件回声 → 重算清零）。
+        // 重算天然幂等，顺带收敛历史已累积的虚高值。
         if (!isUser && d.role != ROLE_SYNTHETIC) {
             val readUpTo = db.hubQueries.selectReadCursor(convId).executeAsOneOrNull() ?: 0L
             if (seq > readUpTo) {
-                bumpUnread(convId)
+                db.hubQueries.setConversationUnread(
+                    db.hubQueries.countUnread(convId, readUpTo).executeAsOne(),
+                    convId,
+                )
             }
         }
     }
@@ -851,11 +858,6 @@ class DefaultEventProjector(
         val sk = envelope.sessionKey ?: return
         val convId = db.hubQueries.selectCommandByKey(idempotencyKey).executeAsOneOrNull()?.conversationId ?: return
         db.hubQueries.upsertConvKey(envelope.gatewayId, sk, convId)
-    }
-
-    private fun bumpUnread(convId: String) {
-        val conv = db.hubQueries.selectConversation(convId).executeAsOneOrNull() ?: return
-        db.hubQueries.setConversationUnread(conv.unreadCount + 1, convId)
     }
 
     private fun <T> decode(serializer: KSerializer<T>, data: JsonElement): T? =

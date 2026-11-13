@@ -106,13 +106,16 @@ class HubSyncFixtureTest {
         }))
         assertEquals("hi there", db.hubQueries.selectMessage("01JMSG00000000000000000001").executeAsOne().content)
 
-        // message.created：assistant 行 → 未读+1、preview 推进（v1.1 载荷无 openclawId/sessionId）
+        // message.created：assistant 行 → 未读推进、preview 推进（v1.1 载荷无 openclawId/sessionId）。
+        // 2026-11-13 假未读修复轮：增量=countUnread 重算单源（盲目 +1 撤销）——快照携带的
+        // unreadCount=2 与本地行/游标口径（seq>1 无可计行）不一致时按重算收敛为 1（answer），
+        // 与 read.updated 回声重算同语义；闭值行/合成行照旧不计。
         p.applyEvent(ev(nextId(), EventEnvelope.MESSAGE_CREATED, data = buildJsonObject {
             put("messageId", "01JMSG00000000000000000009")
             put("role", "assistant"); put("content", "answer"); put("sourceMessageSeq", 3L)
         }))
         var conv = db.hubQueries.selectConversation(CONV).executeAsOne()
-        assertEquals(3, conv.unreadCount)
+        assertEquals(1, conv.unreadCount)
         assertEquals("answer", conv.lastMessagePreview)
 
         // message.created：role="" 合成行 → 不计未读
@@ -120,7 +123,7 @@ class HubSyncFixtureTest {
             put("messageId", "01JMSG00000000000000000010")
             put("role", ""); put("content", "上下文已压缩"); put("sourceMessageSeq", 4L)
         }))
-        assertEquals(3, db.hubQueries.selectConversation(CONV).executeAsOne().unreadCount)
+        assertEquals(1, db.hubQueries.selectConversation(CONV).executeAsOne().unreadCount)
 
         // message.created：用户行回执 → 乐观行翻 delivered + **映射学习**（未知 sessionKey 经
         // idempotencyKey → 队列条目 conversationId 学到）

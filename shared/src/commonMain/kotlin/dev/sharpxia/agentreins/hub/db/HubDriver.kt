@@ -21,8 +21,12 @@ import dev.sharpxia.agentreins.hubdb.HubDatabase
  *  清 cursor → 冷启动快照全量重取，0.5.4 已损坏设备（详情页空）免重装即恢复。
  *  9 = additive（2026-11-09 多模态 v1，契约 v1.2.0）：hubMessages 增 attachments（消息行媒体附件
  *  引用，MessageAttachment[] JSON 文本列、可空）——版本号与结构同步升（v3 死库教训），投影可弃，
- *  drop 重建后从快照重取。 */
-internal const val HUB_DB_VERSION = 9L
+ *  drop 重建后从快照重取。
+ *  10 = additive（2026-11-16 多主会话轮，契约 v1.4.0，冻结 tag hub-api-v1.4.0）：hubGateways 增
+ *  provider（桥自报供给方标识，GatewaySummary.provider 透传；未知省略行落 ''）——版本号与结构
+ *  同步升（红线：加列与升版同 commit），投影可弃，drop 重建后从快照/回拉重取（O-01 随重取恢复）；
+ *  无新表（HUB_TABLES 与 wipeLocalData 不动）。 */
+internal const val HUB_DB_VERSION = 10L
 
 /** 版本记账行键（hubSyncState；beta-0.5.4 真机死库根因修复——PRAGMA 层归 SQLiter，见 openHubDatabase）。 */
 private const val DB_VERSION_KEY = "db_version"

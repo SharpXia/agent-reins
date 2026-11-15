@@ -1,12 +1,25 @@
 package dev.sharpxia.agentreins.hub
 
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
+import dev.sharpxia.agentreins.hub.auth.ApnsTokenRequest
 import dev.sharpxia.agentreins.hub.auth.CredentialStore
+import dev.sharpxia.agentreins.hub.auth.DeviceRegistrationRequest
+import dev.sharpxia.agentreins.hub.auth.LoginRequest
+import dev.sharpxia.agentreins.hub.auth.RefreshRequest
 import dev.sharpxia.agentreins.hub.projection.AgentRef
+import dev.sharpxia.agentreins.hub.projection.ApprovalDecisionRequest
+import dev.sharpxia.agentreins.hub.projection.CancelRunRequest
 import dev.sharpxia.agentreins.hub.projection.ConversationRow
+import dev.sharpxia.agentreins.hub.projection.CreateConversationRequest
+import dev.sharpxia.agentreins.hub.projection.CreateGatewayRequest
 import dev.sharpxia.agentreins.hub.projection.DefaultEventProjector
 import dev.sharpxia.agentreins.hub.projection.EventEnvelope
 import dev.sharpxia.agentreins.hub.projection.GatewaySummary
+import dev.sharpxia.agentreins.hub.projection.ReadCursorRequest
+import dev.sharpxia.agentreins.hub.projection.RenameConversationRequest
+import dev.sharpxia.agentreins.hub.projection.SendMessageRequest
+import dev.sharpxia.agentreins.hub.projection.SessionSummary
+import dev.sharpxia.agentreins.hub.projection.SessionsResponse
 import dev.sharpxia.agentreins.hub.projection.SnapshotResponse
 import dev.sharpxia.agentreins.hubdb.HubDatabase
 import kotlinx.coroutines.CoroutineScope
@@ -16,6 +29,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -92,7 +106,7 @@ class GatewaySurfaceTest {
         val db = newDb()
         DefaultEventProjector(db).applySnapshot(fixtureSnapshot())
         // 直接覆写损坏 JSON（模拟异常写入/历史脏数据）
-        db.hubQueries.insertGateway(GW, "mini", 0L, T0, "{not-a-json")
+        db.hubQueries.insertGateway(GW, "mini", 0L, T0, "{not-a-json", provider = "openclaw")
         val gw = client(db, backgroundScope).observeGateways().first().single()
         assertEquals(GW, gw.gatewayId)
         assertEquals("mini", gw.name)
@@ -130,6 +144,74 @@ class GatewaySurfaceTest {
         assertEquals(listOf(UiAgentRef("render", "Render")), render.agents)
     }
 
+    // ── ⑤ v1.4.0：provider 落库读出（快照路径透传 + 回拉 INSERT OR REPLACE 覆盖语义） ──
+
+    @Test
+    fun providerPersistsFromSnapshotAndUpsert() = runTest {
+        val db = newDb()
+        DefaultEventProjector(db).applySnapshot(fixtureSnapshot(gw2 = true))
+        val rows = db.hubQueries.selectGateways().executeAsList()
+        assertEquals("openclaw", rows.single { it.gatewayId == GW }.provider) // 快照带 provider 透传落库
+        assertEquals("", rows.single { it.gatewayId == GW2 }.provider) // 未知省略行落 ''（NOT NULL 缺省）
+
+        // 回拉路径（pullGatewaysIntoProjection 同构调用）：INSERT OR REPLACE 全列覆盖更新 provider
+        db.hubQueries.insertGateway(GW, "mini", 1L, T1, "[]", provider = "hermes")
+        assertEquals(
+            "hermes",
+            db.hubQueries.selectGateways().executeAsList().single { it.gatewayId == GW }.provider,
+        )
+    }
+
+    // ── ⑥ v1.4.0：deleteConversation/listAgentSessions 门面（REST 直调 + 204 后行删 / 响应透出） ──
+
+    @Test
+    fun deleteConversationFacadeCallsRestAndRemovesCardRow() = runTest {
+        val db = newDb()
+        DefaultEventProjector(db).applySnapshot(fixtureSnapshot())
+        val api = SessionAdminStubApi()
+        val client = client(db, backgroundScope)
+        client.sessionAdminApiOverride = api
+
+        client.deleteConversation(CONV)
+        assertEquals(listOf(CONV), api.deleted) // REST 面收到会话句柄（tombstone 请求原样）
+        assertEquals(
+            0,
+            db.hubQueries.selectConversations().executeAsList().size, // 204 后行删（乐观收敛）
+        )
+    }
+
+    @Test
+    fun listAgentSessionsFacadeReturnsResponse() = runTest {
+        val db = newDb()
+        val api = SessionAdminStubApi(
+            sessions = SessionsResponse(
+                listOf(
+                    SessionSummary(conversationId = CONV, label = "主线", lastActivityAt = T0, isMainSession = true),
+                    SessionSummary(
+                        conversationId = "01JTASK0000000000000000000", label = "任务",
+                        lastActivityAt = T1, isMainSession = false,
+                    ),
+                ),
+            ),
+        )
+        val client = client(db, backgroundScope)
+        client.sessionAdminApiOverride = api
+
+        val resp = client.listAgentSessions(GW, "main")
+        assertEquals(2, resp.sessions.size)
+        assertEquals(true, resp.sessions[0].isMainSession) // 主线族谓词原样透出（rename 门判定依据）
+        assertEquals(false, resp.sessions[1].isMainSession)
+        assertEquals(listOf(GW to "main"), api.listed) // 路由参数原样送达
+    }
+
+    @Test
+    fun deleteAndListFacadesWithoutLoginThrow() = runTest {
+        val db = newDb()
+        val client = client(db, backgroundScope) // 未登录：authStack null 且无 override → 栈查找降级
+        assertFailsWith<IllegalStateException> { client.deleteConversation(CONV) }
+        assertFailsWith<IllegalStateException> { client.listAgentSessions(GW, "main") }
+    }
+
     // ── fixture ──
 
     private fun fixtureSnapshot(gw2: Boolean = false) = SnapshotResponse(
@@ -140,9 +222,12 @@ class GatewaySurfaceTest {
                 GatewaySummary(
                     gatewayId = GW, name = "mini", online = false,
                     agents = listOf(AgentRef("main", "Main")),
+                    provider = "openclaw", // v10：快照行 provider 落库
                 ),
             )
             if (gw2) {
+                // GW2 不带 provider（未知省略口径）：落库为 ''（省略 ≠ 空串的第二形态只作用于
+                // 服务端读面，客户端列 NOT NULL 缺省 ''）
                 add(GatewaySummary(gatewayId = GW2, name = "render", online = true, agents = listOf(AgentRef("render", "Render"))))
             }
         },
@@ -174,4 +259,52 @@ private class GatewaySurfaceMemoryStore : CredentialStore {
     override suspend fun saveRefreshToken(token: String) { this.token = token }
     override suspend fun loadRefreshToken(): String? = token
     override suspend fun clear() { token = null }
+}
+
+/** v1.4.0 会话管理直调通道 stub（sessionAdminApiOverride 注入面）：记录 delete/list 调用、
+ *  list 返回预设响应；其余端点恒不触达（TODO 与 RecordingApi 同款口径）。 */
+private class SessionAdminStubApi(
+    val sessions: SessionsResponse = SessionsResponse(emptyList()),
+) : HubApi {
+    val deleted = mutableListOf<String>()
+    val listed = mutableListOf<Pair<String, String>>()
+
+    override suspend fun deleteConversation(conversationId: String) {
+        deleted += conversationId
+    }
+
+    override suspend fun listAgentSessions(gatewayId: String, agentId: String): SessionsResponse {
+        listed += gatewayId to agentId
+        return sessions
+    }
+
+    override suspend fun login(req: LoginRequest) = TODO()
+    override suspend fun refresh(req: RefreshRequest) = TODO()
+    override suspend fun registerDevice(req: DeviceRegistrationRequest) = TODO()
+    override suspend fun listDevices() = TODO()
+    override suspend fun deleteDevice(deviceId: String) = TODO()
+    override suspend fun registerApnsToken(req: ApnsTokenRequest) = TODO()
+    override suspend fun gateways() = TODO()
+    override suspend fun createGateway(req: CreateGatewayRequest) = TODO()
+    override suspend fun rotateBridgeToken(gatewayId: String) = TODO()
+    override suspend fun deleteGateway(gatewayId: String) = TODO()
+    override suspend fun conversations(limit: Int?, cursor: String?) = TODO()
+    override suspend fun messages(conversationId: String, before: Long?, limit: Int?) = TODO()
+    override suspend fun sendMessage(conversationId: String, req: SendMessageRequest) = TODO()
+    override suspend fun uploadMedia(
+        conversationId: String, bytes: ByteArray, mime: String,
+        fileName: String?, width: Int?, height: Int?,
+    ) = TODO()
+    override suspend fun fetchMediaContent(mediaId: String) = TODO()
+    override suspend fun markRead(conversationId: String, req: ReadCursorRequest) = TODO()
+    override suspend fun createConversation(gatewayId: String, agentId: String, req: CreateConversationRequest) = TODO()
+    override suspend fun compactConversation(conversationId: String) = TODO()
+    override suspend fun agentStatus(gatewayId: String, agentId: String) = TODO()
+    override suspend fun commands(conversationId: String) = TODO()
+    override suspend fun models(conversationId: String) = TODO()
+    override suspend fun renameConversation(conversationId: String, req: RenameConversationRequest) = TODO()
+    override suspend fun cancelRun(runId: String, req: CancelRunRequest) = TODO()
+    override suspend fun decideApproval(approvalId: String, req: ApprovalDecisionRequest) = TODO()
+    override suspend fun snapshot() = TODO()
+    override suspend fun events(cursor: String, limit: Int?) = TODO()
 }

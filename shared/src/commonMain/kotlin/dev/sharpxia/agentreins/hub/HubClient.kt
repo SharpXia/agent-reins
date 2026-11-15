@@ -18,6 +18,7 @@ import dev.sharpxia.agentreins.hub.projection.EventEnvelope
 import dev.sharpxia.agentreins.hub.projection.EventProjector
 import dev.sharpxia.agentreins.hub.projection.GatewayCreatedResponse
 import dev.sharpxia.agentreins.hub.projection.MediaUpload
+import dev.sharpxia.agentreins.hub.projection.SessionsResponse
 import dev.sharpxia.agentreins.hub.projection.SnapshotResponse
 import dev.sharpxia.agentreins.hub.projection.decodeAttachments
 import dev.sharpxia.agentreins.hub.projection.encodeAttachments
@@ -473,6 +474,13 @@ class DefaultHubClient(
     internal var messagesApiOverride: HubApi? = null
 
     /**
+     * 测试注入点（desktopTest 专用）：覆写 v1.4.0 会话管理直调通道（deleteConversation/listAgentSessions
+     * 门面的 REST 面）——fake 自管鉴权（不经 TokenManager.withBearer）；生产路径恒 null，
+     * 走 runtime.authStack。仅供 GatewaySurfaceTest 门面用例（204 后行删/响应透出）注入。
+     */
+    internal var sessionAdminApiOverride: HubApi? = null
+
+    /**
      * 向上翻页加载更早历史消息（wp-12）：REST #8 `?before=<seq>&limit=50` → 返回行按 messageId
      * upsert 合并进投影库 hubMessages（主键天然去重；与事件流同库同键，wp-1 合并器的 delta 只
      * 追加既有行、created 同键覆盖收敛，互不冲突——翻页只增行、不推进 cursor、不参与水位过滤，
@@ -623,6 +631,9 @@ class DefaultHubClient(
                     online = if (g.online) 1L else 0L,
                     lastSeenAt = g.lastSeenAt,
                     agentsJson = encodeAgentsJson(g.agents),
+                    // v10：provider 落列（未知省略行落 ''——INSERT OR REPLACE 全列覆盖，缺省
+                    // 不传会把既有 provider 打回 ''，评审 L5）
+                    provider = g.provider ?: "",
                 )
             }
             // 差集对账：响应清单外的本地行 = 撤销/异主残留，清掉（服务端已过滤 revoked）
@@ -667,7 +678,41 @@ class DefaultHubClient(
         return commands.decideApproval(approvalId, decision) != null
     }
 
-    // ── v1.1 新端点门面（#16/#17/#18/#19；不走幂等队列，直调） ──────────────
+    // ── v1.1 新端点门面（#16/#17/#18/#19；create 自 v1.4.0 入队，其余直调） ──
+
+    /**
+     * 会话删除（#29，v1.4.0 additive 多主会话轮；**纯 REST 直调不走幂等队列**——Hub 主权
+     * tombstone 为 204 幂等终态，与 deleteGateway 同款直调先例，无 CommandReceipt 可追）：
+     * withBearer 直调 REST（Token 刷新/重试由 TokenManager 承担）；204 后本地投影行即删
+     * （hubConversations/hubConversations_byActive 收敛，乐观 UI——事件面 session.removed
+     * 级联清映射/两跳暂存已在 DefaultEventProjector.onSessionRemoved，本门面不重复）。
+     * 幂等终态：对已删除会话再次 DELETE 亦 204；「不存在/无权」统一 404 HUB-BIZ-002 防枚举。
+     * 失败按 HubException 冒泡呈现，不静默；未登录抛 IllegalStateException。
+     */
+    suspend fun deleteConversation(conversationId: String) {
+        val overrideApi = sessionAdminApiOverride
+        if (overrideApi != null) {
+            overrideApi.deleteConversation(conversationId) // desktopTest 注入通道：fake 自管鉴权
+        } else {
+            val stack = runtime.authStack ?: throw IllegalStateException("未登录")
+            stack.auth.withBearer { stack.api.deleteConversation(conversationId) }
+        }
+        db?.hubQueries?.deleteConversation(conversationId)
+    }
+
+    /**
+     * 按 Agent 列会话（#28，v1.4.0 additive 多主会话轮；**纯读直调不走幂等队列**——管理面
+     * 清单查询，无 CommandReceipt）：管理面视图不收敛、不筛族（dashboard/主线族含
+     * main-<idempotencyKey> 多主线/task/channel/subagent/cron 全键族可见），isMainSession =
+     * 主线族谓词（消费面 rename 门据此判定）。返回 [SessionsResponse] 原样透出；失败按
+     * HubException 冒泡呈现，不静默；未登录抛 IllegalStateException。
+     */
+    suspend fun listAgentSessions(gatewayId: String, agentId: String): SessionsResponse {
+        val overrideApi = sessionAdminApiOverride
+        if (overrideApi != null) return overrideApi.listAgentSessions(gatewayId, agentId) // desktopTest 注入通道
+        val stack = runtime.authStack ?: throw IllegalStateException("未登录")
+        return stack.auth.withBearer { stack.api.listAgentSessions(gatewayId, agentId) }
+    }
 
     /**
      * 媒体上传门面（端点 #23，v1.2.0 additive 多模态 v1；**纯上传不走幂等队列**——上传是
@@ -703,19 +748,29 @@ class DefaultHubClient(
     }
 
     /**
-     * 新开会话（openclaw 原生指令；幂等键 Hub 生成，HubModels.kt CreateConversationRequest）。
-     * #16 聚合语义（2026-11-04 拍板）：无主线卡 agent 调用 → 新 session 兜底成卡；已有主线卡
-     * agent 调用 → 新 session 静默（后台任务会话，不进列表）。UI 入口只对无主线卡 agent 开放
-     * （入口侧筛选，本门面不拦）。回执 PERSISTED 后主动触发一次会话列表校准：新卡出现从
-     * R4 周期节拍（分钟级）提速到秒级，且「90s 内或重进列表出现」的手工验收因此必然命中。
-     * 校准失败不吞回执——列表在下一 R4 节拍重试。
-     * v1.1 additive（#16 主线锚定 2026-11-06）：本门面固定携带 mainSession=true（下游
-     * DefaultCommandClient 落地）——服务端组装 sessionKey=agent:<agentId>:main（客户端永不拼键，
-     * ADR-14），Gateway sessions.create 同名 key adopt 不 fork；iOS/desktop 新建入口经本门面
-     * 自动获得，签名不变。
+     * 新开会话（#16，openclaw 原生指令）。v1.4.0（多主会话轮 2026-11-16）起经幂等队列：
+     * 幂等键客户端生成、payloadJson 存路由信封（DefaultCommandClient.ConversationCreateEnvelope），
+     * 网络不可达入队 PENDING_LOCAL 待 retryUnfinished 自动重放（同键同载荷幂等）；确定性拒绝
+     * 队列条目 FAILED。
+     * [newMainSession]（缺省 false）= mainSession=true **默认主线**（旧入口语义）：服务端组装
+     * sessionKey=agent:<agentId>:main（客户端永不拼键，ADR-14），Gateway sessions.create 同名
+     * key adopt 不 fork；true = 新开一条主线：服务端以请求幂等键确定性派生
+     * agent:<agentId>:main-<idempotencyKey>——重试复用同键 = 同键形 = 同会话（客户端不拼键，
+     * 多主线键形由服务端文法保证）。恒不双真（服务端互斥 400 HUB-BIZ-004）。
+     * UI 入口只对无主线卡 agent 开放（入口侧筛选，本门面不拦）。回执 PERSISTED 后主动触发
+     * 一次会话列表校准：新卡出现从 R4 周期节拍（分钟级）提速到秒级，且「90s 内或重进列表
+     * 出现」的手工验收因此必然命中。校准失败不吞回执——列表在下一 R4 节拍重试。
+     * 返回 receipt（非空）；未送达（网络不可达 PENDING_LOCAL）抛 IllegalStateException——
+     * 调用方（iOS 桥/desktop 面板）runCatching 呈现「提交未送达」降级态，队列稍后自动重放。
      */
-    suspend fun createConversation(gatewayId: String, agentId: String, label: String?): CommandReceipt {
-        val receipt = commands!!.createConversation(gatewayId, agentId, label)
+    suspend fun createConversation(
+        gatewayId: String,
+        agentId: String,
+        label: String?,
+        newMainSession: Boolean = false,
+    ): CommandReceipt {
+        val receipt = commands!!.createConversation(gatewayId, agentId, label, newMainSession)
+            ?: throw IllegalStateException("提交未送达（可能为网络不可达），已入本地队列待重试")
         scope.launch { runCatching { engine?.calibrateConversations() } }
         return receipt
     }
@@ -773,10 +828,9 @@ class DefaultHubClient(
     /**
      * 撤销网关（#27，v1.3.0 additive，204 终态且对属主幂等）：撤销后服务端读面按
      * status='active' 过滤——该网关自此从 GET /v1/gateways 消失；本门面成功后触发一次
-     * [refreshGateways] 回拉对账。已知边界：refreshGateways 是行级 upsert 不删行，被撤销
-     * 网关的本地投影行留存至下次快照整体覆盖收敛（Hub.sq 无行级删除面，快照/校准对账
-     * 铁律内收敛）——UI 呈现面如需即时隐藏在 GatewaysView 轮次处理。失败按 HubException
-     * 冒泡呈现，不静默。
+     * [refreshGateways] 回拉对账。回拉收口（2026-11-15 死卡修复轮）：pullGatewaysIntoProjection
+     * 已带响应清单差集对账删除——被撤销网关的本地投影行在本次回拉即收敛消失（不再留存至
+     * 快照整体覆盖）。失败按 HubException 冒泡呈现，不静默。
      */
     suspend fun deleteGateway(gatewayId: String) {
         val stack = runtime.authStack ?: throw IllegalStateException("未登录")

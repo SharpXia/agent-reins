@@ -26,6 +26,7 @@ import dev.sharpxia.agentreins.hub.projection.MessagesPage
 import dev.sharpxia.agentreins.hub.projection.ReadCursorRequest
 import dev.sharpxia.agentreins.hub.projection.RenameConversationRequest
 import dev.sharpxia.agentreins.hub.projection.SendMessageRequest
+import dev.sharpxia.agentreins.hub.projection.SessionsResponse
 import dev.sharpxia.agentreins.hub.projection.SnapshotResponse
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
@@ -186,6 +187,17 @@ class DefaultHubApi(
     override suspend fun markRead(conversationId: String, req: ReadCursorRequest): CommandReceipt =
         post("/conversations/$conversationId/read-cursor", req)
 
+    /**
+     * #29（v1.4.0 additive）：会话删除——204 无响应体（ConversationDeleted），与 deleteGateway
+     * 同款 ensureSuccess 不走 decode()；幂等终态（重复 DELETE 204），「不存在/无权」统一 404
+     * HUB-BIZ-002 防枚举。路径参数 conversationId 为 Hub ULID（服务端签发句柄），直拼与既有
+     * 路径样板同口径安全。
+     */
+    override suspend fun deleteConversation(conversationId: String) {
+        val resp = http.delete(config.baseUrl + "/conversations/" + conversationId) { bearer() }
+        ensureSuccess(resp)
+    }
+
     // ── v1.1 新增（#16–#19） ────────────────────────────────────────────
 
     override suspend fun createConversation(
@@ -199,6 +211,10 @@ class DefaultHubApi(
 
     override suspend fun agentStatus(gatewayId: String, agentId: String): AgentStatusResponse =
         get("/gateways/$gatewayId/agents/$agentId/status")
+
+    /** #28（v1.4.0 additive）：按 Agent 列会话（管理面清单）；路径参数为 Hub ULID，直拼安全（既有 get 样板）。 */
+    override suspend fun listAgentSessions(gatewayId: String, agentId: String): SessionsResponse =
+        get("/gateways/$gatewayId/agents/$agentId/sessions")
 
     /** #21（v1.1 additive）：动态斜杠命令目录；路径参数不含用户自由文本，直拼安全（既有 get 样板）。 */
     override suspend fun commands(conversationId: String): CommandsList =

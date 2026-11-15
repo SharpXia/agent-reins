@@ -17,6 +17,14 @@ data class GatewaySummary(
     val online: Boolean,
     val lastSeenAt: String? = null,
     val agents: List<AgentRef> = emptyList(),
+    /**
+     * 可选（v1.4.0 additive，多主会话轮 2026-11-16）：桥自报供给方标识（如 openclaw/hermes），
+     * 从桥 capabilities() 顶层自报派生，Hub 原样存字节不解释。口径统一为「未知省略」：
+     * 网关未上报或解析不可得时字段省略（省略 ≠ 空串/null 第二形态）。客户端不得对取值做
+     * 枚举假设（非 BRIDGE_PROVIDER 枚举）；落库映射 hubGateways.provider（NOT NULL，省略行
+     * 落 ''），管理面展示用。
+     */
+    val provider: String? = null,
 )
 
 @Serializable
@@ -342,6 +350,15 @@ data class CreateConversationRequest(
     val label: String? = null,
     val idempotencyKey: String? = null,
     val mainSession: Boolean? = null,
+    /**
+     * 可选（v1.4.0 additive，多主会话轮 2026-11-16）：true = 在该 agent 名下新开一条主线
+     * （不 adopt 现有 agent:<agentId>:main）——Hub 以请求幂等键 UUID 确定性派生 mainKey，
+     * 组装 sessionKey = agent:<agentId>:main-<idempotencyKey>：重试复用同一 idempotencyKey =
+     * 同键形 = 同会话，载荷逐字节确定、指纹不漂移（客户端永不拼键，ADR-14）。
+     * 与 [mainSession] 互斥：两者同真 → 400 HUB-BIZ-004。缺省（null，不编码）保持现状
+     * dashboard 键行为；Gateway 仍是会话归属权威。
+     */
+    val newMainSession: Boolean? = null,
 )
 
 /** #19 conversation.rename：label 必填非空（缺失/空串 → 400 HUB-BIZ-004）。 */
@@ -357,6 +374,33 @@ data class AgentStatusResponse(
     val activeConversations: Int,
     val activeRuns: Int,
     val lastSeenAt: String? = null,
+)
+
+/**
+ * 会话清单条目（端点 #28，v1.4.0 additive 多主会话轮 2026-11-16；管理面视图——不收敛、不筛族，
+ * 排除 removed 行）。会话句柄 = conversationId（02 §3.7/ADR-14：Gateway 原生 sessionKey 不出
+ * App 面）。required 4 字段：conversationId/label/lastActivityAt/isMainSession。
+ */
+@Serializable
+data class SessionSummary(
+    /** Hub ULID 会话句柄（化身更替后不变）。 */
+    val conversationId: String,
+    /** 会话标签（sessions.label 投影；未命名会话为空串）。 */
+    val label: String,
+    /** 最近活动时间（Rfc3339Millis）。 */
+    val lastActivityAt: String,
+    /**
+     * 主线族谓词（#7/快照聚合口径同源，02 §3.7 两族定义）：is_main 真 / 末段 == 'main' /
+     * 末段 'main-' 前缀命中为 true（v1.4.0 起谓词扩纳 main-<idempotencyKey> 多主线键形）；
+     * dashboard/task/channel/subagent/cron 行 false——消费面（K2/K3 rename 门）据此判定。
+     */
+    val isMainSession: Boolean,
+)
+
+/** 端点 #28 响应体（v1.4.0 additive）：按 lastActivityAt 降序，个人规模会话数为小整数、无分页。 */
+@Serializable
+data class SessionsResponse(
+    val sessions: List<SessionSummary> = emptyList(),
 )
 
 /**

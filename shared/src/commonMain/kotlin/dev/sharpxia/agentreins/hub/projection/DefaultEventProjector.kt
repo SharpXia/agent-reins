@@ -205,6 +205,7 @@ class DefaultEventProjector(
                     online = if (g.online) 1L else 0L,
                     lastSeenAt = g.lastSeenAt,
                     agentsJson = json.encodeToString(ListSerializerAgentRef, g.agents),
+                    provider = g.provider ?: "", // v10：快照行 provider 透传（未知省略行落 ''）
                 )
             }
             db.hubQueries.clearConversations()

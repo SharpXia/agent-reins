@@ -25,16 +25,17 @@ import dev.sharpxia.agentreins.hub.projection.MessagesPage
 import dev.sharpxia.agentreins.hub.projection.ReadCursorRequest
 import dev.sharpxia.agentreins.hub.projection.RenameConversationRequest
 import dev.sharpxia.agentreins.hub.projection.SendMessageRequest
+import dev.sharpxia.agentreins.hub.projection.SessionsResponse
 import dev.sharpxia.agentreins.hub.projection.SnapshotResponse
 import dev.sharpxia.agentreins.hub.projection.CancelRunRequest
 
 /**
- * Hub REST 客户端（契约 v1.3.0：27 端点 + WSS，冻结 tag hub-api-v1.3.0；v1.2.0 24 端点 +
- * 多模态新增 #23/#24；v1.1 20 端点 + #16–#21）。
+ * Hub REST 客户端（契约 v1.4.0：29 端点 + WSS，冻结 tag hub-api-v1.4.0；v1.3.0 27 端点 +
+ * 网关供给面 #25–#27；v1.2.0 24 端点 + 多模态新增 #23/#24；v1.1 20 端点 + #16–#21）。
  *
  * 契约钉版（P0 验收②，docs/plans/hub-migration-plan.md §6-P0；v1.1 迁移见 §8 变更清单）：
- * - REST 契约：`api/hub-api-v1.yaml` — OpenAPI 3.0.3，info.version = **v1.3.0**，`x-hub-api-version: 1`，
- *   冻结 git tag `hub-api-v1.3.0`（AgentReinService 仓；tag 名 ≠ yaml version，AGENTS.md 纪律）
+ * - REST 契约：`api/hub-api-v1.yaml` — OpenAPI 3.0.3，info.version = **v1.4.0**，`x-hub-api-version: 1`，
+ *   冻结 git tag `hub-api-v1.4.0`（AgentReinService 仓；tag 名 ≠ yaml version，AGENTS.md 纪律）
  * - WSS 帧契约：`api/hub-wss-frames-v1.schema.json` — JSON Schema 2020-12，protocolVersion 支持集 = {1}
  * - 版本策略（08 §6.1）：/v1 内仅 additive（新增端点、可选请求字段、响应字段、错误码）；
  *   破坏性变更升 /v2 并行 ≥90 天（v1.1 为前端未开工期的破坏性修订特例，不经 /v2）。客户端义务
@@ -49,6 +50,16 @@ import dev.sharpxia.agentreins.hub.projection.CancelRunRequest
  *   新旧双活）/ DELETE /v1/gateways/{gatewayId}（撤销终态，204 幂等）。全部 bearerDevice（与
  *   GET /v1/gateways 同链）；客户端义务：bridgeToken 不持久化（仅会话内存，复制给设备 env
  *   用完即弃）；错误码零新增（复用 HUB-BIZ-001/002 与既有认证族）
+ * - v1.4.0 additive（多主会话 + 会话删除 + 管理/供给读面，2026-11-16）：#16 请求体增可选
+ *   newMainSession（true = 在该 agent 名下新开主线，Hub 以请求幂等键 UUID 确定性派生
+ *   sessionKey=agent:<agentId>:main-<idempotencyKey>，重试同键=同键形=同会话；与 mainSession
+ *   互斥，同真 400 HUB-BIZ-004）；新端点 #28 GET /v1/gateways/{gatewayId}/agents/{agentId}/sessions
+ *   （按 agent 列会话，管理面清单 SessionsResponse，不收敛不筛族）与 #29 DELETE
+ *   /v1/conversations/{conversationId}（Hub 主权 tombstone，204 幂等终态，历史只读保留）；
+ *   GatewaySummary 增可选 provider（桥自报供给方标识，未知省略）。客户端义务同族：忽略未知
+ *   字段、provider 不做枚举假设；本接口 deleteConversation/listAgentSessions 给默认实现抛
+ *   UnsupportedOperationException（desktopTest 存量 fake 不在本批改动清单，生产实现
+ *   [DefaultHubApi] 必须覆盖）
  */
 interface HubApi {
     // ── 认证（#1 / #2，公开端点） ─────────────────────────────────────────
@@ -148,6 +159,19 @@ interface HubApi {
     /** 已读上报命令 read.mark；readUpTo 指向当前化身的既有精确 message seq（05 §3.10）。 */
     suspend fun markRead(conversationId: String, req: ReadCursorRequest): CommandReceipt
 
+    /**
+     * 会话删除（#29，v1.4.0 additive 多主会话轮，204 无响应体与 deleteDevice 同款 no-body）：
+     * Hub 主权 tombstone（用户发起的 App 面删除）——Hub append session.removed 事件驱动服务端
+     * 投影 conversation_state='removed'，句柄与只读历史保留、不级联 messages/events；#7/快照
+     * 与 #28 管理清单自此不再产出该行。**原生删除非承诺**：Gateway 侧物理删除不在本端点语义内。
+     * 204 幂等终态：对已 removed 会话再次 DELETE 亦 204；「不存在与无权」统一 404 HUB-BIZ-002
+     * 防枚举。默认实现抛 UnsupportedOperationException（存量测试 fake 不必逐一补 stub，
+     * 见接口头注；生产实现必须覆盖）。
+     */
+    suspend fun deleteConversation(conversationId: String) {
+        throw UnsupportedOperationException("deleteConversation 为 v1.4.0 新端点，实现方必须覆盖")
+    }
+
     // ── v1.1 新增（#16–#19；命令类 202 + CommandReceipt，幂等键由 Hub 生成，网关离线进 WAITING_BRIDGE 排队） ──
     /** 新开会话命令 conversation.create（#16，openclaw 原生指令端点）；新会话经 roster 同步自动出现在列表。404 HUB-BIZ-002。 */
     suspend fun createConversation(gatewayId: String, agentId: String, req: CreateConversationRequest): CommandReceipt
@@ -157,6 +181,19 @@ interface HubApi {
 
     /** Agent 状态查询（#18，纯投影派生无副作用；限流走列表类）。 */
     suspend fun agentStatus(gatewayId: String, agentId: String): AgentStatusResponse
+
+    /**
+     * 按 Agent 列会话（#28，v1.4.0 additive 多主会话轮，纯投影查询；限流走列表类）：
+     * 管理面清单视图——与端点 #7 聚合口径不同，不收敛、不筛族（dashboard/主线族含
+     * main-<idempotencyKey> 多主线/task/channel/subagent/cron 全键族可见），按 lastActivityAt
+     * 降序、无分页；排除 removed 行（#29 tombstone 终态行不出清单）。
+     * SessionSummary.isMainSession = 主线族谓词（消费面 rename 门据此判定）。
+     * 「未知 Gateway/Agent/非属主」404 HUB-BIZ-002 防枚举。默认实现抛
+     * UnsupportedOperationException（存量测试 fake 不必逐一补 stub，见接口头注）。
+     */
+    suspend fun listAgentSessions(gatewayId: String, agentId: String): SessionsResponse {
+        throw UnsupportedOperationException("listAgentSessions 为 v1.4.0 新端点，实现方必须覆盖")
+    }
 
     /**
      * 端点 #21（v1.1 additive，2026-11-07）：动态斜杠命令目录——Gateway commands.list 有界透传，

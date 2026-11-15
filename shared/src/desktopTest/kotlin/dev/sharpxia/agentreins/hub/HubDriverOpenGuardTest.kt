@@ -51,6 +51,7 @@ class HubDriverOpenGuardTest {
         assertEquals(HUB_DB_VERSION.toString(), scalar(d1, "SELECT value FROM hubSyncState WHERE key='db_version'"))
         db1.hubQueries.insertGateway(
             gatewayId = "gw-1", name = "n", online = 1L, lastSeenAt = null, agentsJson = "[]",
+            provider = "", // v10 加列编译适配（守卫用例不涉 provider 语义）
         )
         d1.close()
 
@@ -95,6 +96,7 @@ class HubDriverOpenGuardTest {
         assertNotNull(db1)
         db1.hubQueries.insertGateway(
             gatewayId = "gw-keep", name = "n", online = 1L, lastSeenAt = null, agentsJson = "[]",
+            provider = "", // v10 加列编译适配（守卫用例不涉 provider 语义）
         )
         // 模拟 wipeLocalData：清行不删表（含 db_version 记账行）
         d1.execute(null, "DELETE FROM hubSyncState", 0)

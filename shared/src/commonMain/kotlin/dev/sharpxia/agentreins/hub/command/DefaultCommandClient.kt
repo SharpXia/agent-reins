@@ -17,6 +17,7 @@ import dev.sharpxia.agentreins.hub.projection.SendMessageRequest
 import dev.sharpxia.agentreins.hub.projection.encodeAttachments
 import dev.sharpxia.agentreins.hubdb.HubDatabase
 import kotlinx.coroutines.CancellationException
+import kotlinx.serialization.Serializable
 import kotlin.random.Random
 
 /**
@@ -24,8 +25,10 @@ import kotlin.random.Random
  * 入队（PENDING_LOCAL + 乐观行 sending）→ REST 提交（202 receipt → PERSISTED）→
  * 后续状态只经事件流 command.acked/command.failed 翻转（projector 落库）。
  * 幂等键生成后永不更换；HUB-BIZ-001 → FAILED（禁换键）；网络失败保持 PENDING_LOCAL 待重试。
- * payloadJson 存原始载荷（message.send 存文本、read.mark 存 readUpTo 数字串），重试按同键同载荷。
- * v1.1 的 create/compact/rename 不走队列（幂等键由 Hub 生成，见 [CommandClient] 注）。
+ * payloadJson 存原始载荷（message.send 存文本、read.mark 存 readUpTo 数字串、conversation.create
+ * 存路由信封 [ConversationCreateEnvelope]），重试按同键同载荷。
+ * compact/rename 不走队列（幂等键由 Hub 生成）；create 自 v1.4.0（多主会话轮 2026-11-16）入队
+ * （客户端幂等键 + conversationId=null + 路由信封 payloadJson，见 [CommandClient] 注）。
  * wp-4（发起方）：命令提交面兼 [RunOriginRegistry] 登记面——message.send 记 SEND（本端发起 run
  * 的主通道，准入该会话后续 run 终态提醒）；conversation.compact 记 COMPACT（静默通道，wp-4 scope
  * 「compact 触发静默」）。其余命令与 run 发起无关不登记。SEND 登记时机 = submit 取得 PERSISTED
@@ -83,13 +86,40 @@ class DefaultCommandClient(
         }
 
     /**
-     * #16 新开会话：固定携带 mainSession=true（v1.1 additive，主线锚定 2026-11-06）——
-     * app 新建入口语义即主线锚定，服务端据此组装 sessionKey=agent:<agentId>:main
-     * （客户端永不拼键，ADR-14），Gateway sessions.create 同名 key adopt 不 fork。
-     * encodeDefaults=false 下显式 true 正常编码；缺省不携带=现状 dashboard 键行为（本客户端不产生）。
+     * #16 新开会话（v1.4.0 起入队，此前 v1.1 直调不入队）：客户端生成幂等键 → PENDING_LOCAL
+     * 队列 → 提交。payloadJson 存路由信封（[ConversationCreateEnvelope]——conversationId=null
+     * 条目的重放分支无路由参数可依，信封整体落 payloadJson 零加列）；REST 体 =
+     * CreateConversationRequest 同形（[createConversationRequest] 同一构造器：信封 request 与
+     * REST 体由同一 key 构造 → 逐字节同 → 服务端确定性派生指纹不漂移，H4/H5）。
+     * mainSession 一并参数化（评审 H2，不再硬编码 true）：newMainSession=false（缺省）→
+     * mainSession=true 默认主线（旧入口语义，sessionKey=agent:<agentId>:main，同名 key adopt
+     * 不 fork）；newMainSession=true → mainSession=false（契约明文「含显式 false」= 缺省语义）
+     * + newMainSession=true（服务端以请求幂等键派生 agent:<agentId>:main-<idempotencyKey>）——
+     * 两者恒不双真（互斥 400 HUB-BIZ-004）。encodeDefaults=false 下显式 true/false 正常编码、
+     * null（label）不编码。无乐观行（新卡由快照/校准灌入，发送队列仅登记不产行）。
      */
-    override suspend fun createConversation(gatewayId: String, agentId: String, label: String?): CommandReceipt =
-        auth.withBearer { api.createConversation(gatewayId, agentId, CreateConversationRequest(label = label, mainSession = true)) }
+    override suspend fun createConversation(
+        gatewayId: String,
+        agentId: String,
+        label: String?,
+        newMainSession: Boolean,
+    ): CommandReceipt? =
+        enqueueAndSubmit(
+            "conversation.create",
+            conversationId = null,
+            payload = { key ->
+                HubJson.encodeToString(
+                    ConversationCreateEnvelope.serializer(),
+                    ConversationCreateEnvelope(
+                        gatewayId = gatewayId,
+                        agentId = agentId,
+                        request = createConversationRequest(key, label, newMainSession),
+                    ),
+                )
+            },
+        ) { key ->
+            api.createConversation(gatewayId, agentId, createConversationRequest(key, label, newMainSession))
+        }
 
     override suspend fun compactConversation(conversationId: String): CommandReceipt {
         // wp-4：compact 是静默通道——登记 COMPACT 覆盖会话准入，其触发的 run 终态不提醒
@@ -126,12 +156,49 @@ class DefaultCommandClient(
                         }
                     }
                 }
+                "conversation.create" -> {
+                    // v1.4.0：payloadJson 为路由信封（gatewayId/agentId + CreateConversationRequest
+                    // 同形，conversationId=null 条目的路由参数唯一来源）——解码后按同键同载荷重放
+                    // （幂等键以队列条目 cmd.idempotencyKey 为准；mainSession/newMainSession 原样
+                    // 透传，服务端确定性派生使重试载荷逐字节同 → 同指纹 → 202+原 commandId）。
+                    // 解码失败（存量/异形行）按既有纪律跳过不重放。
+                    val env = runCatching {
+                        HubJson.decodeFromString(ConversationCreateEnvelope.serializer(), cmd.payloadJson)
+                    }.getOrNull()
+                    if (env != null) {
+                        submit(cmd.idempotencyKey) {
+                            api.createConversation(
+                                env.gatewayId,
+                                env.agentId,
+                                CreateConversationRequest(
+                                    idempotencyKey = cmd.idempotencyKey,
+                                    label = env.request.label,
+                                    mainSession = env.request.mainSession,
+                                    newMainSession = env.request.newMainSession,
+                                ),
+                            )
+                        }
+                    }
+                }
                 else -> Unit // run.cancel/approval.decide 的重放需服务端资源在途，UI 显式重发路径处理
             }
         }
     }
 
     // ── 内部 ──
+
+    /**
+     * #16 请求体构造器：入队信封 request 与初次提交 REST 体共用同一构造（同一 key 传入），
+     * 保证两条路径编码逐字节同——服务端确定性派生（v1.4.0 S1b③）以请求幂等键派生
+     * agent:<agentId>:main-<idempotencyKey>，重试同键同载荷才同指纹（H4/H5 闭环在本层）。
+     */
+    private fun createConversationRequest(key: String, label: String?, newMainSession: Boolean) =
+        CreateConversationRequest(
+            idempotencyKey = key,
+            label = label,
+            mainSession = !newMainSession,
+            newMainSession = newMainSession,
+        )
 
     /**
      * [payload] 为幂等键 → 载荷 JSON 编码函数（键在函数内生成，message.send 的载荷含键）；
@@ -232,3 +299,19 @@ class DefaultCommandClient(
         }
     }
 }
+
+/**
+ * conversation.create 路由信封（v1.4.0 多主会话轮 2026-11-16；hubCommands.payloadJson 专用形态，
+ * 非 REST 线格式——REST 体 = 信封 [CreateConversationRequest] 字段同形逐字节）：conversationId=null
+ * 的队列条目在重放分支无路由参数可依（hubCommands 无 gatewayId/agentId 列、#16 REST 体无路由
+ * 字段），信封把路由三元组 (gatewayId, agentId, request) 整体落 payloadJson，零加列闭合重放。
+ * 同键同载荷：request.idempotencyKey 与队列条目 idempotencyKey 同值（客户端生成 UUID），
+ * 重放重建的请求与初次提交逐字节同 → 服务端确定性派生 mainKey 指纹不漂移（评审 H4/H5）。
+ * 解码失败（存量/异形行）按既有纪律跳过不重放。internal：desktopTest 信封用例直用。
+ */
+@Serializable
+internal data class ConversationCreateEnvelope(
+    val gatewayId: String,
+    val agentId: String,
+    val request: CreateConversationRequest,
+)

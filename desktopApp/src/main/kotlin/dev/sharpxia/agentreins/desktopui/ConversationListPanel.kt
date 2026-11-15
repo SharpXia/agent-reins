@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -54,6 +55,7 @@ import dev.sharpxia.agentreins.hub.DefaultHubClient
 import dev.sharpxia.agentreins.hub.UiAgentRef
 import dev.sharpxia.agentreins.hub.UiConversation
 import dev.sharpxia.agentreins.hub.UiGateway
+import dev.sharpxia.agentreins.hub.projection.SessionSummary
 import kotlinx.coroutines.launch
 
 /**
@@ -71,12 +73,19 @@ import kotlinx.coroutines.launch
  *   （iOS HubViews 菜单 .disabled(compacting || conv.hasActiveRun) 同口径）；结果以
  *   compaction 合成行/校准回流，本端零解析；失败以面板横幅显式降级可重试。
  * - 新建会话入口（#16，网关/Agent 维度）：面板头「＋ 新建会话」→ 网关/Agent 弹窗，行态
- *   四态判定 [newConversationRowState]（hasMainCard 门语义复刻 iOS HubStore.swift:162-175：
- *   已有主线卡置灰、「已提交」等待态、提交中 spinner、可新建）；提交失败显式降级可重试；
- *   成卡以校准收敛为准零解析（回执不拼卡，DefaultHubClient 成功即触发一次校准，秒级入列；
- *   R4 周期兜底）。入口经 shared 门面自动携带 mainSession=true（wp-2 落地于
- *   DefaultCommandClient.createConversation，服务端组装 sessionKey=agent:<agentId>:main，
- *   客户端永不拼键，ADR-14）。
+ *   三态判定 [newConversationRowState]（多主会话轮 v1.4.0：原 hasMainCard 置灰门拆除——
+ *   入口常开，「已提交」等待态、提交中 spinner、可新建）；提交失败显式降级可重试（文案
+ *   中性，评审 L9）；成卡以校准收敛为准零解析（回执不拼卡，DefaultHubClient 成功即触发
+ *   一次校准，秒级入列；R4 周期兜底）。写路径按主线卡判据 [hasMainCard] 分流（iOS
+ *   HubStore.createConversation 同签名）：无卡 = 默认主线（门面自动携带 mainSession=true，
+ *   服务端组装 sessionKey=agent:<agentId>:main adopt 不 fork）；有卡 = 新开一条主线
+ *   （newMainSession=true，服务端以请求幂等键确定性派生 main-<idempotencyKey>，重试同键
+ *   同会话）——客户端永不拼键（wp-2 落地于 DefaultCommandClient.createConversation，ADR-14）。
+ * v1.4.0 会话管理（#28 清单 / #19 rename / #29 delete）：agent 行（GatewaysPanel）与会话卡
+ * 右键菜单「管理会话」→ [AgentSessionsManagerDialog]——全量会话行（管理面不收敛不筛族）；
+ * rename 仅主线族行开放（评审 M7：#19 服务端只在卡行集内解析，task/channel 行必 404
+ * HUB-BIZ-002——非主线行只给删除）；delete 走 #29 直调门面，乐观移除 + 事件级联
+ * （session.removed）双路径幂等（验收 L6，iOS SessionManagerSheet 同语义）。
  * 多网关轮（v1.3.0，设计稿 §3.2）：会话行标题下加一行 caption 网关名（hub.gateways 按
  * gatewayId 查名，空名/未知回退 gatewayId 尾段——[gatewayNameFor]，iOS HubConversationRow
  * caption 同构），多网关混排列表的归属歧义就此消除。
@@ -103,10 +112,12 @@ internal fun ConversationListPanel(
     var compactError by remember { mutableStateOf<String?>(null) }
     var showNewConversation by remember { mutableStateOf(false) }
     // 「已提交」瞬态集（iOS HubStore.createdConversationFor 同型，键 = [conversationEntryKey]）：
-    // 成卡即收敛清理（见下方 LaunchedEffect），置灰由主线卡判据接管
+    // 成卡即收敛清理（见下方 LaunchedEffect，评审 H3：已有卡 agent 不再显示「已提交」提示）
     var submittedKeys by remember { mutableStateOf(emptySet<String>()) }
     var creatingKey by remember { mutableStateOf<String?>(null) }
     var createError by remember { mutableStateOf<String?>(null) }
+    // v1.4.0「管理会话」目标（会话卡右键菜单；nil = 关）
+    var sessionsManagerTarget by remember { mutableStateOf<AgentSessionsTarget?>(null) }
 
     fun renameNow(conv: UiConversation, label: String) {
         renameError = null
@@ -137,35 +148,37 @@ internal fun ConversationListPanel(
     }
 
     fun submitCreate(gatewayId: String, agentId: String) {
-        // iOS HubStore.createConversation 同守卫：提交中单飞 + 已有主线卡不得重复提交
-        // （hasMainCard 门在行态已置灰，此处为防御性复核）
+        // iOS HubStore.createConversation 同守卫：提交中单飞。多主会话轮置灰门拆除——写路径按
+        // 主线卡判据分流（无卡 = 默认主线 mainSession=true adopt 不 fork；有卡 = 新开主线
+        // newMainSession=true，服务端以请求幂等键确定性派生 main-<idempotencyKey>，重试同键同会话）
         if (creatingKey != null) return
-        if (newConversationRowState(conversations, gatewayId, agentId, submittedKeys, creatingKey) ==
-            NewConversationRowState.GRAYED
-        ) return
         val key = conversationEntryKey(gatewayId, agentId)
+        val newMainSession = hasMainCard(conversations, gatewayId, agentId)
         createError = null
         creatingKey = key
         scope.launch {
-            val ok = runCatching { client.createConversation(gatewayId, agentId, null) }
-                .map { it.commandId.isNotBlank() }
-                .getOrDefault(false)
+            val ok = runCatching {
+                client.createConversation(gatewayId, agentId, null, newMainSession = newMainSession)
+            }.map { it.commandId.isNotBlank() }.getOrDefault(false)
             creatingKey = null
-            if (ok) submittedKeys = submittedKeys + key else createError = "提交未送达（可能为网络不可达），可重试"
+            // 评审 L9：文案中性——网络不可达已入本地队列（PENDING_LOCAL）待自动重放、确定性
+            // 拒绝走 FAILED，两条路径不预判（iOS HubStore.createConversation 同文案）
+            if (ok) submittedKeys = submittedKeys + key else createError = "提交未送达或被服务端拒绝（可重试）"
         }
     }
 
     // wp-7 成卡收敛清理（iOS watchGateways formIntersection 同语义）：已兜底成卡的
-    // (gatewayId, agentId) 移出「已提交」瞬态，行翻置灰由主线卡判据接管
+    // (gatewayId, agentId) 移出「已提交」瞬态——行态三态判定不再读卡（入口常开），收敛即
+    // 「成卡清瞬态」的唯一面（评审 H3）
     LaunchedEffect(conversations) {
-        val cardKeys = conversations.map { conversationEntryKey(it.gatewayId, it.agentId) }.toSet()
-        if (submittedKeys.any(cardKeys::contains)) submittedKeys = submittedKeys - cardKeys
+        val pruned = pruneSubmittedKeys(submittedKeys, conversations)
+        if (pruned != submittedKeys) submittedKeys = pruned
     }
 
     Surface(modifier = modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)) {
         Column(modifier = Modifier.fillMaxSize()) {
             // wp-7：面板头 + 新建会话入口（iOS 工具栏 plus.message 同面——入口按网关/Agent
-            // 维度弹窗呈现，hasMainCard 门在弹窗行内判定，不在本入口拦截）
+            // 维度弹窗呈现，多主会话轮入口常开不在本入口拦截，分流在 submitCreate）
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
                 horizontalArrangement = Arrangement.End,
@@ -212,6 +225,9 @@ internal fun ConversationListPanel(
                             onToggleMute = onToggleMute,
                             onRename = { renameTarget = it },
                             onCompact = { compactNow(it) },
+                            onManageSessions = {
+                                sessionsManagerTarget = AgentSessionsTarget(conv.gatewayId, conv.agentId)
+                            },
                             onClick = { onSelect(conv.conversationId) },
                         )
                     }
@@ -232,8 +248,8 @@ internal fun ConversationListPanel(
         )
     }
 
-    // wp-7：新建会话弹窗（网关/Agent 维度四态行；conversations 持续推送——弹窗开着时成卡
-    // 即时翻置灰，「已提交」瞬态即时收敛）
+    // wp-7：新建会话弹窗（网关/Agent 维度三态行；conversations 持续推送——弹窗开着时成卡
+    // 即时收敛「已提交」瞬态；入口常开，无卡/有卡分流在 submitCreate）
     if (showNewConversation) {
         NewConversationDialog(
             client = client,
@@ -244,6 +260,15 @@ internal fun ConversationListPanel(
             onSubmit = { gatewayId, agentId -> submitCreate(gatewayId, agentId) },
             onAckError = { createError = null },
             onDismiss = { showNewConversation = false },
+        )
+    }
+
+    // v1.4.0：会话管理对话框（#28 清单 / #19 rename 仅主线族 / #29 delete 乐观移除 + 事件级联）
+    sessionsManagerTarget?.let { target ->
+        AgentSessionsManagerDialog(
+            client = client,
+            target = target,
+            onDismiss = { sessionsManagerTarget = null },
         )
     }
 }
@@ -259,6 +284,7 @@ private fun ConversationCard(
     onToggleMute: (conversationId: String, muted: Boolean) -> Unit,
     onRename: (UiConversation) -> Unit,
     onCompact: (UiConversation) -> Unit,
+    onManageSessions: () -> Unit,
     onClick: () -> Unit,
 ) {
     val bg = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent
@@ -372,6 +398,15 @@ private fun ConversationCard(
                     onCompact(conv)
                 },
             )
+            // v1.4.0：管理会话（#28 清单 / #19 rename 仅主线族 / #29 delete；iOS 会话卡
+            // contextMenu「管理会话」桌面同位）
+            DropdownMenuItem(
+                text = { Text("管理会话") },
+                onClick = {
+                    menuOpen = false
+                    onManageSessions()
+                },
+            )
         }
     }
 }
@@ -430,10 +465,11 @@ private fun RenameConversationDialog(
 
 /**
  * wp-7 新建会话弹窗（iOS NewConversationSheet parity，#16 聚合语义 2026-11-04 拍板的 UI 面）：
- * 网关分节（在线圆点 + 名称 + 在线徽标）× Agent 四态行（[newConversationRowState]）。
+ * 网关分节（在线圆点 + 名称 + 在线徽标）× Agent 三态行（[newConversationRowState]）。
  * 数据面 = observeGateways Flow（弹窗组合期订阅，关闭即退订）；conversations 由面板参数
- * 持续推送——弹窗开着时成卡即时翻置灰。空清单/空 Agent 降级提示（iOS ContentUnavailableView
- * 同文案族）；提交失败错误横幅常驻弹窗底部，点击即清可重试；「完成」关闭。
+ * 持续推送——弹窗开着时成卡即时收敛「已提交」瞬态。空清单/空 Agent 降级提示
+ * （iOS ContentUnavailableView 同文案族）；提交失败错误横幅常驻弹窗底部，点击即清可重试；
+ * 「完成」关闭。多主会话轮：入口常开，无卡 = 默认主线 / 有卡 = 新开主线（分流在 submitCreate）。
  */
 @Composable
 private fun NewConversationDialog(
@@ -452,7 +488,7 @@ private fun NewConversationDialog(
             Column(modifier = Modifier.width(420.dp).heightIn(max = 560.dp).padding(16.dp)) {
                 Text("新建会话", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "入口只对无主线卡 Agent 开放；新会话锚定该 Agent 主线，校准后入列",
+                    "无主线卡 Agent 新建默认主线；已有主线卡的 Agent 新开独立主线会话——均校准后入列",
                     fontSize = 11.sp,
                     color = Color(0xFF888888),
                 )
@@ -493,7 +529,7 @@ private fun NewConversationDialog(
                                         gatewayId = gw.gatewayId,
                                         agent = agent,
                                         state = newConversationRowState(
-                                            conversations, gw.gatewayId, agent.agentId, submittedKeys, creatingKey,
+                                            gw.gatewayId, agent.agentId, submittedKeys, creatingKey,
                                         ),
                                         onCreate = { onSubmit(gw.gatewayId, agent.agentId) },
                                     )
@@ -541,7 +577,7 @@ private fun GatewayOnlineDot(online: Boolean) {
     )
 }
 
-/** wp-7 新建会话单 Agent 行：四态呈现（iOS NewConversationAgentRow 同语义）。 */
+/** wp-7 新建会话单 Agent 行：三态呈现（多主会话轮置灰终态拆除；iOS NewConversationAgentRow 同语义）。 */
 @Composable
 private fun NewConversationAgentRow(
     gatewayId: String,
@@ -549,85 +585,68 @@ private fun NewConversationAgentRow(
     state: NewConversationRowState,
     onCreate: () -> Unit,
 ) {
-    if (state == NewConversationRowState.GRAYED) {
-        // 置灰终态（iOS checkmark.circle + 「已有主线卡 · 新会话将作为后台任务会话静默」同文案：
-        // 置灰是终态语义而非错误，行内常驻说明）
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-        ) {
-            Text("✓", fontSize = 13.sp, color = Color(0xFF999999))
-            Spacer(Modifier.width(8.dp))
-            Column {
-                Text(agent.label.ifBlank { agent.agentId }, fontSize = 13.sp, color = Color(0xFF999999))
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(agent.label.ifBlank { agent.agentId }, fontSize = 13.sp)
+            if (state == NewConversationRowState.SUBMITTED) {
                 Text(
-                    "已有主线卡 · 新会话将作为后台任务会话静默",
+                    "已提交 · 卡片校准后入列（或重进列表）",
                     fontSize = 11.sp,
-                    color = Color(0xFFAAAAAA),
-                    maxLines = 2,
+                    color = Color(0xFF888888),
                 )
             }
         }
-    } else {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(agent.label.ifBlank { agent.agentId }, fontSize = 13.sp)
-                if (state == NewConversationRowState.SUBMITTED) {
-                    Text(
-                        "已提交 · 卡片校准后入列（或重进列表）",
-                        fontSize = 11.sp,
-                        color = Color(0xFF888888),
-                    )
-                }
-            }
-            if (state == NewConversationRowState.CREATING) {
-                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                Spacer(Modifier.width(8.dp))
-            }
-            TextButton(onClick = onCreate, enabled = state == NewConversationRowState.IDLE) {
-                Text(
-                    when (state) {
-                        NewConversationRowState.SUBMITTED -> "已提交"
-                        NewConversationRowState.CREATING -> "提交中…"
-                        else -> "新建"
-                    },
-                    fontSize = 13.sp,
-                )
-            }
+        if (state == NewConversationRowState.CREATING) {
+            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+            Spacer(Modifier.width(8.dp))
+        }
+        TextButton(onClick = onCreate, enabled = state == NewConversationRowState.IDLE) {
+            Text(
+                when (state) {
+                    NewConversationRowState.SUBMITTED -> "已提交"
+                    NewConversationRowState.CREATING -> "提交中…"
+                    else -> "新建"
+                },
+                fontSize = 13.sp,
+            )
         }
     }
 }
 
-// ── wp-7 新建会话入口判定纯函数（desktopTest 回归锚 ConversationEntryRulesTest） ──────────
+// ── wp-7 新建会话入口判定纯函数（desktopApp jvmTest 回归锚 ConversationEntryRulesTest） ──────────
 
 /** 「已提交」瞬态键：gatewayId|agentId（iOS HubStore.entryKey 同格式，同 agent 跨网关互不影响）。 */
 internal fun conversationEntryKey(gatewayId: String, agentId: String): String = "$gatewayId|$agentId"
 
-/** 新建会话入口单 Agent 行四态（iOS NewConversationAgentRow 同语义）。 */
-internal enum class NewConversationRowState {
-    /** 已有主线卡——置灰终态（新会话将作为后台任务会话静默）。 */
-    GRAYED,
+/** 主线卡判据（多主会话轮 2026-11-16：原入口禁用门降级为**分流判据**，iOS HubStore.hasMainCard
+ *  同型）——该 (gatewayId, agentId) 已有卡片 = 已有主线，submitCreate 据此分流 newMainSession
+ *  写路径；false = 默认主线（mainSession=true，服务端 DISTINCT ON 聚合保证一 agent 至多一张
+ *  默认主线卡）。 */
+internal fun hasMainCard(conversations: List<UiConversation>, gatewayId: String, agentId: String): Boolean =
+    conversations.any { it.gatewayId == gatewayId && it.agentId == agentId }
 
-    /** 已提交等待成卡（校准收敛）。 */
+/** 新建会话入口单 Agent 行三态（多主会话轮 GRAYED 置灰终态拆除后收敛；iOS 同语义）。 */
+internal enum class NewConversationRowState {
+    /** 已提交等待成卡（校准收敛；成卡即清瞬态，评审 H3）。 */
     SUBMITTED,
 
     /** 提交在途（单飞）。 */
     CREATING,
 
-    /** 可新建。 */
+    /** 可新建（无卡 = 默认主线 / 有卡 = 新开主线，分流在 submitCreate 经 [hasMainCard]）。 */
     IDLE,
 }
 
 /**
- * 行态判定（hasMainCard 门，语义复刻 iOS HubStore.swift:162-175）：置灰（已有主线卡 =
- * conversations 含 (gatewayId, agentId) 行）优先——iOS if hasMainCard 先判，已提交/提交中
- * 瞬态一律被主线卡判据接管（成卡即翻置灰）；键含 gatewayId，同 agent 跨网关互不影响。
+ * 行态判定（多主会话轮 2026-11-16 三态收敛：原 hasMainCard 置灰门拆除——入口常开，行态只管
+ * 瞬态呈现）：提交中（单飞）优先、已提交等待成卡次之、其余可新建；键含 gatewayId，同 agent
+ * 跨网关互不影响。「已提交」瞬态由成卡收敛清理（[pruneSubmittedKeys]）——已有卡 agent 不再
+ * 显示提示（评审 H3）；瞬态清空后防重仅剩提交中单飞 creatingKey。
  */
 internal fun newConversationRowState(
-    conversations: List<UiConversation>,
     gatewayId: String,
     agentId: String,
     submittedKeys: Set<String>,
@@ -635,9 +654,301 @@ internal fun newConversationRowState(
 ): NewConversationRowState {
     val key = conversationEntryKey(gatewayId, agentId)
     return when {
-        conversations.any { it.gatewayId == gatewayId && it.agentId == agentId } -> NewConversationRowState.GRAYED
         creatingKey == key -> NewConversationRowState.CREATING
         key in submittedKeys -> NewConversationRowState.SUBMITTED
         else -> NewConversationRowState.IDLE
+    }
+}
+
+/**
+ * 成卡收敛（桌面减法，ConversationListPanel/GatewaysPanel 两面板共用；iOS watchGateways
+ * formIntersection 同语义）：已兜底成卡的 (gatewayId, agentId) 键移出「已提交」瞬态——
+ * 行态判定不再读卡（入口常开），本函数即「成卡清瞬态」的唯一实现面。
+ */
+internal fun pruneSubmittedKeys(submittedKeys: Set<String>, conversations: List<UiConversation>): Set<String> {
+    if (submittedKeys.isEmpty()) return submittedKeys
+    val cardKeys = conversations.map { conversationEntryKey(it.gatewayId, it.agentId) }.toSet()
+    return submittedKeys - cardKeys
+}
+
+// ── v1.4.0 会话管理面板（#28 清单 / #19 rename / #29 delete）纯函数（回归锚 SessionManagerRulesTest） ──
+
+/** 「管理会话」目标载体（gatewayId|agentId 二元组；会话卡 / GatewaysPanel agent 行两入口共用）。 */
+internal data class AgentSessionsTarget(val gatewayId: String, val agentId: String)
+
+/**
+ * rename 门（评审 M7，同 K2 iOS SessionManagerSheet）：#19 conversation.rename 服务端经
+ * lookupActiveConversation 只在卡行集内解析，task/channel 行必 404 HUB-BIZ-002——**仅主线族
+ * 行（isMainSession=true）开放重命名**，非主线行只给删除；dashboard 卡行重命名走既有卡 UI 入口。
+ */
+internal fun sessionRowRenameAllowed(isMainSession: Boolean): Boolean = isMainSession
+
+/** 乐观移除（#29 delete 成功路径：清单行即撤，幂等——无匹配行原样返回；验收 L6 双路径之一）。 */
+internal fun removeSessionRow(sessions: List<SessionSummary>, conversationId: String): List<SessionSummary> =
+    sessions.filterNot { it.conversationId == conversationId }
+
+/** 乐观改名（#19 PERSISTED 回执后行 label 即时翻新，幂等——无匹配行原样返回；权威面由
+ *  session.updated 事件 / 下次 #28 重拉收敛）。 */
+internal fun renameSessionRow(
+    sessions: List<SessionSummary>,
+    conversationId: String,
+    label: String,
+): List<SessionSummary> = sessions.map {
+    if (it.conversationId == conversationId) it.copy(label = label) else it
+}
+
+/**
+ * v1.4.0 会话管理对话框（#28 清单 / #19 rename / #29 delete；入口 = 会话卡与 GatewaysPanel
+ * agent 行右键菜单「管理会话」，iOS SessionManagerSheet 桌面同构）：全量会话行（管理面视图
+ * 不收敛不筛族——dashboard/主线族含 main-<idempotencyKey> 多主线/task/channel/subagent/cron
+ * 全键族可见）。rename 仅主线族行开放（[sessionRowRenameAllowed]，评审 M7）；delete 走
+ * #29 直调门面（204 后投影行删 = 卡列表乐观收敛，session.removed 事件级联幂等，验收 L6）+
+ * 本清单行乐观移除。失败显式降级态可重试，不静默；对话框关闭即弃全部瞬态（下次进入重拉）。
+ */
+@Composable
+internal fun AgentSessionsManagerDialog(
+    client: DefaultHubClient,
+    target: AgentSessionsTarget,
+    onDismiss: () -> Unit,
+) {
+    // 状态机：sessions = null 加载中 / 非空已载（管理面无收敛语义，清单即服务端原样）；
+    // 行级动作在途集防重复提交；错误行显式呈现可重试（iOS agentSessionsError 同式）
+    var sessions by remember(target) { mutableStateOf<List<SessionSummary>?>(null) }
+    var loading by remember(target) { mutableStateOf(false) }
+    var loadError by remember(target) { mutableStateOf<String?>(null) }
+    var deletingIds by remember(target) { mutableStateOf(emptySet<String>()) }
+    var renamingIds by remember(target) { mutableStateOf(emptySet<String>()) }
+    var deleteError by remember(target) { mutableStateOf<String?>(null) }
+    var renameError by remember(target) { mutableStateOf<String?>(null) }
+    // 重命名子对话框载体（nil = 关；预填当前 label）
+    var renameTargetId by remember { mutableStateOf<String?>(null) }
+    var renameDraft by remember { mutableStateOf("") }
+    // 删除确认载体（终态警示后提交）
+    var deleteCandidate by remember { mutableStateOf<SessionSummary?>(null) }
+    val scope = rememberCoroutineScope()
+
+    fun load() {
+        if (loading) return
+        loading = true
+        loadError = null
+        scope.launch {
+            val page = runCatching { client.listAgentSessions(target.gatewayId, target.agentId) }.getOrNull()
+            loading = false
+            if (page != null) sessions = page.sessions else loadError = "会话清单加载失败，可重试"
+        }
+    }
+
+    fun renameSession(conversationId: String, label: String) {
+        if (conversationId in renamingIds) return
+        renamingIds = renamingIds + conversationId
+        renameError = null
+        scope.launch {
+            val ok = runCatching { client.renameConversation(conversationId, label) }
+                .map { it.commandId.isNotBlank() }
+                .getOrDefault(false)
+            renamingIds = renamingIds - conversationId
+            if (ok) sessions = sessions?.let { renameSessionRow(it, conversationId, label) }
+            else renameError = "重命名未送达或被服务端拒绝（可重试）"
+        }
+    }
+
+    fun deleteSession(summary: SessionSummary) {
+        val cid = summary.conversationId
+        if (cid in deletingIds) return
+        deletingIds = deletingIds + cid
+        deleteError = null
+        // 乐观移除（清单行）：与门面 204 后投影行删、session.removed 事件级联三面各自幂等
+        // （验收 L6：乐观删后事件再删不告警不重复）
+        sessions = sessions?.let { removeSessionRow(it, cid) }
+        scope.launch {
+            val ok = runCatching { client.deleteConversation(cid) }.isSuccess
+            deletingIds = deletingIds - cid
+            if (!ok) deleteError = "删除未送达或被服务端拒绝（可重试）"
+        }
+    }
+
+    LaunchedEffect(target) { load() }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surface) {
+            Column(
+                modifier = Modifier.width(480.dp).heightIn(max = 560.dp).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text("管理会话", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "全量会话（管理面不筛族）；仅主线行可重命名，删除为终态不可恢复",
+                    fontSize = 11.sp,
+                    color = Color(0xFF888888),
+                )
+                Spacer(Modifier.height(6.dp))
+                Column(
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    when {
+                        loading && sessions == null -> Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(vertical = 12.dp),
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text("加载中…", fontSize = 12.sp, color = Color(0xFF888888))
+                        }
+                        loadError != null -> Column(Modifier.padding(vertical = 8.dp)) {
+                            Text(loadError!!, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                            TextButton(onClick = { load() }) { Text("重试", fontSize = 12.sp) }
+                        }
+                        sessions != null && sessions!!.isEmpty() -> Text(
+                            "该 Agent 暂无会话",
+                            fontSize = 12.sp,
+                            color = Color(0xFF888888),
+                            modifier = Modifier.padding(vertical = 8.dp),
+                        )
+                        sessions != null -> sessions!!.forEach { s ->
+                            SessionManageRow(
+                                summary = s,
+                                busy = s.conversationId in deletingIds || s.conversationId in renamingIds,
+                                canRename = sessionRowRenameAllowed(s.isMainSession),
+                                onRename = {
+                                    renameTargetId = s.conversationId
+                                    renameDraft = s.label
+                                },
+                                onDelete = { deleteCandidate = s },
+                            )
+                        }
+                    }
+                }
+                // 行级动作失败显式降级（与清单加载错误并存，不静默）
+                deleteError?.let { err ->
+                    Text(err, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                }
+                renameError?.let { err ->
+                    Text(err, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onDismiss) { Text("完成") }
+                }
+            }
+        }
+    }
+
+    // 重命名子对话框（预填当前 label，trim 非空防线；仅主线族行可达——M7 门在行层已收口；
+    // 保存即提交并关子框，在途态由行内 renamingIds spinner 呈现，失败经 renameError 行降级）
+    renameTargetId?.let { id ->
+        Dialog(onDismissRequest = { renameTargetId = null }) {
+            Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surface) {
+                Column(
+                    modifier = Modifier.width(320.dp).padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text("重命名会话", style = MaterialTheme.typography.titleMedium)
+                    OutlinedTextField(
+                        value = renameDraft,
+                        onValueChange = { renameDraft = it },
+                        singleLine = true,
+                        label = { Text("会话名称") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        TextButton(onClick = { renameTargetId = null }) { Text("取消") }
+                        Spacer(Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                renameSession(id, renameDraft.trim())
+                                renameTargetId = null
+                            },
+                            enabled = renameDraft.trim().isNotEmpty(),
+                        ) {
+                            Text("保存")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 删除确认（终态警示；iOS confirmationDialog 同文案族）
+    deleteCandidate?.let { candidate ->
+        Dialog(onDismissRequest = { deleteCandidate = null }) {
+            Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surface) {
+                Column(
+                    modifier = Modifier.width(340.dp).padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text("删除该会话？", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "删除为终态：会话消息与后台任务一并删除，不可恢复。",
+                        fontSize = 12.sp,
+                        color = Color(0xFF888888),
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        TextButton(onClick = { deleteCandidate = null }) { Text("取消") }
+                        Spacer(Modifier.width(8.dp))
+                        Button(onClick = {
+                            deleteCandidate = null
+                            deleteSession(candidate)
+                        }) {
+                            Text("删除", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 管理清单单行：label（空回退 conversationId）+ 主线徽标 + 句柄/最近活跃 caption + 行内动作
+ *  （重命名仅主线族行；删除全行开放，确认后乐观移除）。 */
+@Composable
+private fun SessionManageRow(
+    summary: SessionSummary,
+    busy: Boolean,
+    canRename: Boolean,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                summary.label.ifBlank { summary.conversationId },
+                fontSize = 13.sp,
+                maxLines = 1,
+                modifier = Modifier.weight(1f),
+            )
+            if (summary.isMainSession) {
+                TagChip("主线", Color(0xFF4A6DA7))
+            }
+            if (busy) {
+                Spacer(Modifier.width(6.dp))
+                CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 2.dp)
+            }
+        }
+        MonoText(summary.conversationId, color = Color(0xFF999999))
+        Text(
+            "最近活跃 ${formatTs(summary.lastActivityAt)}",
+            fontSize = 11.sp,
+            color = Color(0xFF888888),
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (canRename) {
+                TextButton(onClick = onRename, enabled = !busy, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
+                    Text("重命名", fontSize = 12.sp)
+                }
+            }
+            TextButton(onClick = onDelete, enabled = !busy, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
+                Text("删除", fontSize = 12.sp, color = Color(0xFFB45309))
+            }
+        }
     }
 }

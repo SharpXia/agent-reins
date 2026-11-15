@@ -492,11 +492,17 @@ class DefaultHubClient(
         val convBefore = db.hubQueries.selectConversation(conversationId).executeAsOneOrNull() ?: return null
         val oldestLoadedSeq = db.hubQueries.selectOldestLoadedSeq(conversationId).executeAsOneOrNull()?.oldestSeq
         val effectiveBefore = when {
-            oldestLoadedSeq == null -> before
+            // 库内零行（2026-11-15 空时间线回灌修复）：非「真空会话」判定——事件旁路映射未
+            // 建立时消息事件被 resolveConversation 永久 skip（游标照常推进，不重投），本地空
+            // 但服务端有行（真机 hermes 实测：卡片 lastSeq=3、时间线空、「加载更早」点不出）。
+            // 以会话 lastSeq+1 取「截至最新」尾页（契约 before≥1 内），回灌链才可达；
+            // 真空会话（lastSeq=0）→ before=1 → 服务端空页 → Swift exhausted 收敛（原
+            // return null 会走 autoEarlierBlocked 错误横幅，语义更差）。
+            oldestLoadedSeq == null -> convBefore.lastSeq + 1L
             before == null || before < oldestLoadedSeq -> oldestLoadedSeq
             else -> before
         }
-        if (effectiveBefore == null || effectiveBefore < 1) return null // 契约 Before minimum: 1（08 §4.3）
+        if (effectiveBefore < 1) return null // 契约 Before minimum: 1（08 §4.3；兜底链后 effectiveBefore 恒非空）
         val page = try {
             messagesApiOverride?.messages(conversationId, effectiveBefore, limit.coerceIn(1, 200)) ?: run {
                 val stack = runtime.authStack ?: return null

@@ -216,18 +216,59 @@ class HubMessagesPagingTest {
         assertEquals(45L, stub.lastBefore)
     }
 
+    // ── ⑥ 空时间线回灌游标（2026-11-15 修复轮，hermes 实测回归） ──
+    //
+    // 根因：事件旁路映射未建立期，消息事件被 resolveConversation 永久 skip（游标照常推进
+    // 不重投）——本地零行但服务端有行（卡片 lastSeq=3、时间线空）。旧实现库内零行 + before=nil
+    // → return null → autoEarlierBlocked 错误横幅，空时间线结构性无法回灌（设计假设只有
+    // lastSeq=0 真空会话才会空）。修复：零行时以 lastSeq+1 取「截至最新」尾页（契约 before≥1
+    // 内）；真空会话（lastSeq=0）→ before=1 → 服务端空页 → exhausted 收敛。
+
     @Test
-    fun nullBeforeWithoutLoadedRowsReturnsNull() = runTest {
+    fun nullBeforeWithoutLoadedRowsFallsBackToLastSeqTail() = runTest {
         val db = newDb()
         val p = DefaultEventProjector(db)
         p.applySnapshot(fixtureSnapshot())
-        db.hubQueries.clearMessages() // 会话行存在但库内无任何已载行
+        db.hubQueries.clearMessages() // 会话行存在（lastSeq=60）但库内无任何已载行
         val client = newClient(db)
         val stub = PagingStubApi()
         client.messagesApiOverride = stub
-        // 库内无行且 before=nil → 无游标可依 → null（UI 呈降级态，不发请求）
-        assertNull(client.loadEarlierMessages(CONV, before = null))
-        assertNull(stub.lastConversationId)
+        // 库内无行 + before=nil → 以 lastSeq+1=61 下发（尾页口径），不再返回 null
+        val page = client.loadEarlierMessages(CONV, before = null)
+        assertNotNull(page)
+        assertEquals(61L, stub.lastBefore)
+        assertEquals(CONV, stub.lastConversationId)
+        // 页行正常合入（翻页与事件路径同库同键）
+        assertEquals(10, db.hubQueries.selectMessages(CONV).executeAsList().size)
+    }
+
+    @Test
+    fun emptyConversationDispatchesBeforeOneInsteadOfNull() = runTest {
+        val db = newDb()
+        val p = DefaultEventProjector(db)
+        // 真空会话 fixture：lastSeq=0、零行
+        p.applySnapshot(
+            SnapshotResponse(
+                snapshotWatermark = WM,
+                generatedAt = T0,
+                gateways = listOf(GatewaySummary(gatewayId = GW, name = "mini", online = false, agents = listOf(AgentRef("main", "Main")))),
+                conversations = listOf(
+                    ConversationRow(
+                        conversationId = CONV, gatewayId = GW, label = "真空", agentId = "main",
+                        lastMessagePreview = "", lastSeq = 0L, lastActiveAt = T0,
+                        unreadCount = 0, hasActiveRun = false, reconciling = false,
+                    ),
+                ),
+                messages = mapOf(CONV to emptyList()),
+                readCursors = mapOf(CONV to 0L),
+            ),
+        )
+        val client = newClient(db)
+        val stub = PagingStubApi()
+        client.messagesApiOverride = stub
+        val page = client.loadEarlierMessages(CONV, before = null)
+        assertNotNull(page) // 不再 null（原降级态）；before=1 下发 → 服务端空页 → UI exhausted 收敛
+        assertEquals(1L, stub.lastBefore)
     }
 
     // ── fixture ──────────────────────────────────────────────────────────────

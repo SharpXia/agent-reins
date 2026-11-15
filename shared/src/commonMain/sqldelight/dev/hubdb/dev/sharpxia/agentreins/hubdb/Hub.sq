@@ -532,6 +532,22 @@ WHERE conversationId = :conversationId
       AND m2.seq != 9223372036854775807
   );
 
+-- wire 用户行重复清除（2026-11-15 排序修复轮第三步）：resume 重报 dup 行经事件流已同步的
+-- 设备，服务端删行无墓碑事件——本地幽灵行按服务端去重同规则清除（无命令锚 wire 用户行、
+-- 同会话存在同正文的命令锚定行）。与 store_pg.go bindSending 抑制（4f677e2）同口径镜像。
+deleteWireUserDuplicates:
+DELETE FROM hubMessages
+WHERE conversationId = :conversationId
+  AND role = 'user' AND seq != 9223372036854775807
+  AND (commandId IS NULL OR commandId = '')
+  AND TRIM(COALESCE(content, '')) != ''
+  AND EXISTS (
+    SELECT 1 FROM hubMessages m2
+    WHERE m2.conversationId = hubMessages.conversationId
+      AND m2.role = 'user' AND m2.commandId IS NOT NULL AND m2.commandId != ''
+      AND m2.content = hubMessages.content
+  );
+
 insertCommand:
 INSERT OR REPLACE INTO hubCommands
 (idempotencyKey, commandId, conversationId, runId, approvalId, type, payloadJson, state, errorCode, createdAt, updatedAt)

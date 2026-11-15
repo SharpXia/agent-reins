@@ -412,6 +412,7 @@ class DefaultHubClient(
         db.hubQueries.transaction {
             db.hubQueries.mergeStuckOptimisticContent(conversationId)
             db.hubQueries.deleteStuckOptimisticBound(conversationId)
+            db.hubQueries.deleteWireUserDuplicates(conversationId)
         }
         return db.hubQueries.selectMessages(conversationId).asFlow().mapToList(scope.coroutineContext).map { rows ->
             rows.map {

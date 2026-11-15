@@ -95,6 +95,27 @@ class StuckOptimisticRepairTest {
         assertEquals("在途消息", rows.single().content)
     }
 
+    // ── ③b wire 重复行清除（服务端删行无墓碑——已同步 dup 的本地幽灵行自愈） ──
+
+    @Test
+    fun deletesWireUserDuplicatesMatchingCommandAnchoredRow() = runTest {
+        val db = newDb()
+        // 命令锚定权威行（真 seq）+ 同文 wire 重复行（resume 重报经事件流同步的形态）
+        db.hubQueries.upsertMessage(
+            messageId = "auth-cmd", conversationId = CONV, seq = 9L, role = "user", content = "你这个消息排序是不是逗我？",
+            state = "final", uiState = "delivered", commandId = "cmd-9", idempotencyKey = "idem-9", ts = T0, reason = null, attachments = null,
+        )
+        db.hubQueries.upsertMessage(
+            messageId = "row:18-wire", conversationId = CONV, seq = 18L, role = "user", content = "你这个消息排序是不是逗我？",
+            state = "final", uiState = "delivered", commandId = null, idempotencyKey = null, ts = T1, reason = null, attachments = null,
+        )
+        repair(db)
+        val rows = client(db, backgroundScope).observeMessages(CONV).first()
+        assertEquals(1, rows.size)
+        assertEquals(9L, rows.single().seq)
+        assertEquals("auth-cmd", rows.single().messageId)
+    }
+
     // ── ④ 无占位行可并入的空权威行不动（不虚构内容） ──
 
     @Test

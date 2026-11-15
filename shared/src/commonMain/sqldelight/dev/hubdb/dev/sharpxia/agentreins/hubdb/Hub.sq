@@ -229,6 +229,13 @@ DELETE FROM hubSyncState;
 selectGateways:
 SELECT * FROM hubGateways ORDER BY name;
 
+-- 网关目录对账删除（2026-11-15 死卡修复轮）：REST 回拉（pullGatewaysIntoProjection）是
+-- 行级 upsert——撤销网关行永远残留（快照整体覆盖才清，restore 路径不触发快照）。回拉时
+-- 以响应清单差集删除本地残留行（调用方保证清单非空，空差集不触发；服务端已过滤 revoked，
+-- 差集即撤销/异主残留）。真机实证：已撤销的 Hermes 网关卡在「网关与 Agent」页恒显离线。
+deleteGatewaysByIds:
+DELETE FROM hubGateways WHERE gatewayId IN ?;
+
 -- 快照/列表落定的卡片灌入（v1.1 行无 sessionKey/revision；conversationId 是主键）。
 -- gatewayId 为快照/校准行 required（v5 透出）。activeRunId（v6 wp-3 活跃 run 权威回填，
 -- 2026-11-06）：快照/校准行可选字段透传（服务端 runs RUNNING 权威行 native_run_id），
@@ -395,7 +402,11 @@ DELETE FROM hubMessages WHERE conversationId = ? AND messageId = ?;
 -- queued 保留（#3 2026-11-08：消息级排队态——乐观行发送时 run 活跃即置 queued，回执到达
 -- 不改变排队事实；排队释放由 run 终态 releaseQueuedRows 承担，不在此提前翻 delivered）
 promoteLocalEcho:
-UPDATE hubMessages SET messageId = :messageId, content = :content, seq = :seq,
+UPDATE hubMessages SET messageId = :messageId,
+  -- 内容守卫（2026-11-15 排序修复轮）：回显正文为空不覆盖本地正文——服务端合成行
+  -- （hermes 用户行回显缺失的历史形态）正文空，盲覆盖即「发出内容被抹空」。
+  content = CASE WHEN :content = '' THEN content ELSE :content END,
+  seq = :seq,
   uiState = CASE WHEN uiState = 'queued' THEN 'queued' ELSE 'delivered' END,
   commandId = :commandId, ts = :ts
 WHERE idempotencyKey = :idempotencyKey;
@@ -478,6 +489,48 @@ WHERE conversationId = ? AND seq > ? AND role = 'assistant' AND state = 'final'
 
 deleteMessagesByConversation:
 DELETE FROM hubMessages WHERE conversationId = ?;
+
+-- 占位乐观行开屏修复（2026-11-15 排序混乱修复轮，两步同事务；幂等对账）：
+-- 现象面 = 用户行回显缺失/skip 的会话（hermes 实证）：乐观行（seq=Long.MAX 占位、已
+-- delivered、commandId 经 ack 盖章）永沉时间线底部，服务端权威行（合成行）正文空——
+-- 修复后服务端行有正文，但本地权威行是修复前取回的空行且不会重流。修法：
+-- ① mergeStuckOptimisticContent——占位行正文并入同 commandId 的空权威行（服务端行
+--    已带正文则本步空转，绝不覆盖非空权威内容）；
+-- ② deleteStuckOptimisticBound——已有权威行对位的占位行清除（双气泡消除）。
+-- 无权威行对位的占位行（服务端终态未落的在途行）不动。
+mergeStuckOptimisticContent:
+UPDATE hubMessages
+SET content = (
+  SELECT ph.content FROM hubMessages ph
+  WHERE ph.conversationId = hubMessages.conversationId
+    AND ph.role = 'user' AND ph.seq = 9223372036854775807
+    AND ph.uiState = 'delivered' AND ph.commandId = hubMessages.commandId
+    AND TRIM(COALESCE(ph.content, '')) != ''
+  ORDER BY ph.ts DESC LIMIT 1
+)
+WHERE hubMessages.conversationId = :conversationId
+  AND hubMessages.role = 'user'
+  AND TRIM(COALESCE(hubMessages.content, '')) = ''
+  AND hubMessages.commandId IS NOT NULL
+  AND EXISTS (
+    SELECT 1 FROM hubMessages ph2
+    WHERE ph2.conversationId = hubMessages.conversationId
+      AND ph2.seq = 9223372036854775807 AND ph2.uiState = 'delivered'
+      AND ph2.commandId = hubMessages.commandId
+      AND TRIM(COALESCE(ph2.content, '')) != ''
+  );
+
+deleteStuckOptimisticBound:
+DELETE FROM hubMessages
+WHERE conversationId = :conversationId
+  AND role = 'user' AND seq = 9223372036854775807 AND uiState = 'delivered'
+  AND commandId IS NOT NULL
+  AND EXISTS (
+    SELECT 1 FROM hubMessages m2
+    WHERE m2.conversationId = hubMessages.conversationId
+      AND m2.commandId = hubMessages.commandId
+      AND m2.seq != 9223372036854775807
+  );
 
 insertCommand:
 INSERT OR REPLACE INTO hubCommands

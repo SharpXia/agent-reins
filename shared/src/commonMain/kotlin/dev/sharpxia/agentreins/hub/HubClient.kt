@@ -297,6 +297,10 @@ class DefaultHubClient(
         scheduler?.start()
         // 断线恢复：未终态命令按同键幂等重发（05 §3.5 恢复流程收尾步）
         scope.launch { runCatching { commands?.retryUnfinished() } }
+        // 网关目录对账回拉（2026-11-15 死卡修复轮）：restore 路径不触发快照（快照才整体
+        // 清灌 hubGateways）——登录/重连组装点拉一次 REST #6 对账（防抖通道，含差集删除），
+        // 撤销网关卡免等 agents_changed 边沿即收敛。失败静默（runCatching 内，事件/快照兜底）。
+        refreshGateways()
     }
 
     /**
@@ -402,6 +406,13 @@ class DefaultHubClient(
 
     fun observeMessages(conversationId: String): Flow<List<UiMessage>> {
         val db = db ?: return flowOf(emptyList())
+        // 占位乐观行开屏修复（2026-11-15 排序混乱修复轮，查询注见 Hub.sq）：幂等对账——
+        // 占位行正文并入同 commandId 空权威行 + 已对位占位行清除。旧形态（回显缺失/skip）
+        // 的残留行在开屏即自愈；修后 selectMessages Flow 推升序全序列。
+        db.hubQueries.transaction {
+            db.hubQueries.mergeStuckOptimisticContent(conversationId)
+            db.hubQueries.deleteStuckOptimisticBound(conversationId)
+        }
         return db.hubQueries.selectMessages(conversationId).asFlow().mapToList(scope.coroutineContext).map { rows ->
             rows.map {
                 UiMessage(
@@ -593,10 +604,11 @@ class DefaultHubClient(
 
     /**
      * 回拉执行体（[refreshGateways] 唯一落库路径）：withBearer（TokenManager 负责刷新重试）
-     * 拉 GET /v1/gateways → hubGateways **行级 upsert**（INSERT OR REPLACE 逐行，不 clear
-     * 表——与 applySnapshot 的「先清后灌」整体覆盖铁律区分：本路径是目录对账不是重建，
-     * 既有行逐行被响应权威值覆盖，无行则插入）。agentsJson 编码沿用 [observeGateways]
-     * 同族 Json 配置的解析降级链（坏载荷降级空数组，网关行本体不丢）。
+     * 拉 GET /v1/gateways → hubGateways **行级 upsert + 差集对账删除**（INSERT OR REPLACE
+     * 逐行，不 clear 表——与 applySnapshot 的「先清后灌」整体覆盖铁律区分：本路径是目录
+     * 对账不是重建，既有行逐行被响应权威值覆盖，无行则插入；2026-11-15 死卡修复轮补
+     * 差集删除——撤销网关行此前永远残留，真机「网关与 Agent」页死卡实证）。agentsJson
+     * 编码沿用 [observeGateways] 同族 Json 配置的解析降级链（坏载荷降级空数组，网关行本体不丢）。
      */
     private suspend fun pullGatewaysIntoProjection() {
         val db = db ?: return
@@ -612,6 +624,12 @@ class DefaultHubClient(
                     agentsJson = encodeAgentsJson(g.agents),
                 )
             }
+            // 差集对账：响应清单外的本地行 = 撤销/异主残留，清掉（服务端已过滤 revoked）
+            val received = page.gateways.map { it.gatewayId }.toSet()
+            val stale = db.hubQueries.selectGateways().executeAsList()
+                .map { it.gatewayId }
+                .filter { it !in received }
+            if (stale.isNotEmpty()) db.hubQueries.deleteGatewaysByIds(stale)
         }
     }
 

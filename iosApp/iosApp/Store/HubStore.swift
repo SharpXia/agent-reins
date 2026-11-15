@@ -1131,10 +1131,15 @@ final class HubStore {
     /// 文本为空），session.message 广播→message.created 每条直达本面——空正文无附件行与
     ///「无回复」心跳行不派发，纯附件行照推（summary 承载「[图片]」家族）。11-06 三面过滤
     ///（客户端查询/服务端 unread/推送闭值）缺的第四面，v1.3 触发面迁移时遗留的回归。
-    private func noteReplyMessage(conversationId: String, content: String, attachmentCount: Int) {
+    private func noteReplyMessage(conversationId: String, runId: String, content: String, attachmentCount: Int) {
         guard isLoggedIn, !conversationId.isEmpty else { return }
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !(trimmed.isEmpty && attachmentCount == 0), trimmed != "无回复" else { return }
+        // 失败回声行去重（2026-11-15 推送降噪轮，服务端 push/apns.go 镜像）：同 runId 已记
+        // 失败锚且正文与失败原因等值 → 不再以「新回复」二推（失败信息由失败通知单条承载）。
+        // 锚过期/正文不等值/无 runId 一律放行（绝不误伤正常回复）。
+        if !runId.isEmpty, let f = recentRunFailures[runId], !isExpiredFailureAnchor(f.at),
+           !f.reason.isEmpty, f.reason == trimmed { return }
         guard let c = conversations.first(where: { $0.conversationId == conversationId }) else { return }
         guard selected?.conversationId != conversationId else { return }   // 当前打开不提醒（scope 语义）
         guard !mutedConversations.contains(conversationId) else { return } // 按会话静音
@@ -1162,20 +1167,51 @@ final class HubStore {
         )
     }
 
-    /// run 终态事件（桥 eventTap 回调，主线程）。conversationId 空串 = 未映射会话：无归属、
-    /// 无法静音判定与跳转，显式降级不提醒（不编造归属，与 UiApproval conversationId 同纪律）。
-    /// 2026-11-07 用户拍板：run 完成不再推送——heartbeat 周期 run 的「运行完成」是噪声，
-    /// 实际回复由 unread 增量路径（noteConversationsPush → replyArrived）承载；原「完成+回复」
-    /// 双响 3s 抑制窗随之移除（窗若保留会吞掉完成后的真实回复通知）。失败仍提醒（异常需要
-    /// 知道，且失败 run 无回复可依赖）。
-    private func noteRunTerminal(conversationId: String, runId: String, status: String) {
-        guard isLoggedIn, !conversationId.isEmpty else { return }
+    /// run 终态事件（桥 eventTap 回调，主线程）。2026-11-15 推送降噪轮（服务端 push/apns.go
+    /// 同口径）：桥侧对失败 run 全量放行（含 heartbeat 等自驱 run 与他端发起），本面据此
+    /// 记回声行去重锚（noteReplyMessage 消费）；**本地通知仍只认本端发起的失败 run**——
+    /// conversationId 空串 = 未映射会话：无归属、无法静音判定与跳转，显式降级不提醒（不编造
+    /// 归属，与 UiApproval conversationId 同纪律）。2026-11-07 用户拍板：run 完成不再推送
+    /// （completed 桥侧已过滤）；失败仍提醒但**单条承载失败原因**（body = reason，回退静态
+    /// 文案），标题=会话名（displayLabel 链）——与服务端失败推送同款文案。
+    private func noteRunTerminal(conversationId: String, runId: String, status: String, reason: String, localOrigin: Bool) {
+        guard isLoggedIn else { return }
+        if status == "failed" { rememberRunFailure(runId: runId, reason: reason) } // 回声去重锚（全量）
+        guard localOrigin, status == "failed" else { return }                     // 通知只认本端失败
+        guard !conversationId.isEmpty else { return }
         guard !mutedConversations.contains(conversationId) else { return }
         guard shouldNotifyLocally else { return } // #4：后台/重建期不派发本地通知（后台 APNs 承载）
-        guard status == "failed" else { return } // completed 等其余值不推送（桥只发两种）
         let label = conversations.first { $0.conversationId == conversationId }
             .map(displayLabel) ?? "会话"
-        notifications.runFailed(conversationId: conversationId, label: label)
+        notifications.runFailed(conversationId: conversationId, label: label, reason: boundedFailureReason(reason))
+    }
+
+    // ---------- 失败 run 回声去重锚（2026-11-15 推送降噪轮） ----------
+
+    /// 失败 runId → (失败原因, 记忆时刻)。TTL/容量双帽与服务端 push 包同参（2min/256）；
+    /// 触顶剪过期后仍超 = 放弃记忆（降级为可能的双推送，绝不误伤正常回复）。
+    private var recentRunFailures: [String: (reason: String, at: Date)] = [:]
+
+    private static let runFailureTTL: TimeInterval = 120
+    private static let runFailureMaxKeys = 256
+
+    private func rememberRunFailure(runId: String, reason: String) {
+        guard !runId.isEmpty, !reason.isEmpty else { return }
+        let now = Date()
+        recentRunFailures = recentRunFailures.filter { now.timeIntervalSince($0.value.at) < Self.runFailureTTL }
+        guard recentRunFailures.count < Self.runFailureMaxKeys else { return }
+        recentRunFailures[runId] = (reason, now)
+    }
+
+    private func isExpiredFailureAnchor(_ at: Date) -> Bool {
+        Date().timeIntervalSince(at) >= Self.runFailureTTL
+    }
+
+    /// 失败原因有界透传（通知 body；与服务端 truncateSummary 同参 ≤140）。
+    private func boundedFailureReason(_ reason: String) -> String {
+        let t = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard t.count > 140 else { return t }
+        return String(t.prefix(139)) + "…"
     }
 
     /// 通知点按跳会话（coordinator 回调；可能在非主线程，回主队列再动 UI 态）。
@@ -1439,17 +1475,27 @@ final class HubStore {
         notifications.onTapConversation = { [weak self] conversationId in
             self?.handleNotificationTap(conversationId: conversationId)
         }
-        bridge.hubWatchRunTerminal { [weak self] conversationId, runId, status in
-            self?.noteRunTerminal(conversationId: conversationId, runId: runId, status: status)
+        // 2026-11-15 推送降噪轮：失败 run 全量过桥回调（记回声行去重锚），本地通知仍只认
+        // 本端发起（localOrigin）——服务端 push/apns.go 自驱静默 + 回声去重的端上镜像。
+        // 桥回调 Bool 参数经 ObjC 互携为 KotlinBoolean 装箱（同下行 KotlinInt）——解箱。
+        bridge.hubWatchRunTerminal { [weak self] conversationId, runId, status, reason, localOrigin in
+            self?.noteRunTerminal(
+                conversationId: conversationId,
+                runId: runId,
+                status: status,
+                reason: reason,
+                localOrigin: localOrigin.boolValue,
+            )
         }
         bridge.hubWatchApprovalRequested { [weak self] conversationId in
             self?.noteApprovalRequested(conversationId: conversationId)
         }
         // v1.3 通知摘要轮：assistant final 权威行 → 回复通知（摘要见 MessageSummary）。
         // 桥回调 Int 参数经 ObjC 互携为 KotlinInt 装箱（函数类型参数位）——解箱为 Int。
-        bridge.hubWatchReplyMessage { [weak self] conversationId, content, attachmentCount in
+        bridge.hubWatchReplyMessage { [weak self] conversationId, runId, content, attachmentCount in
             self?.noteReplyMessage(
                 conversationId: conversationId,
+                runId: runId,
                 content: content,
                 attachmentCount: Int(attachmentCount.int32Value),
             )

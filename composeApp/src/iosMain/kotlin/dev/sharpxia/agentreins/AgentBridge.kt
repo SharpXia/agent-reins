@@ -54,8 +54,12 @@ class AgentBridge {
     private var hubWorkActivityJob: Job? = null
     private var hubPhaseJob: Job? = null
 
-    /** wp-13：run 终态通知回调（Swift 注册；见 [hubWatchRunTerminal]）。 */
-    private var runTerminalSink: ((conversationId: String, runId: String, status: String) -> Unit)? = null
+    /**
+     * wp-13：run 终态通知回调（Swift 注册；见 [hubWatchRunTerminal]）。2026-11-15 推送
+     * 降噪轮扩形：reason = run.failed 载荷 error 字段（失败原因，供通知 body 携带）；
+     * localOrigin = 是否本端发起（Swift 据此分派：失败通知只认本端，回声行去重锚全量记录）。
+     */
+    private var runTerminalSink: ((conversationId: String, runId: String, status: String, reason: String, localOrigin: Boolean) -> Unit)? = null
 
     /** wp-13：审批请求通知回调（Swift 注册；见 [hubWatchApprovalRequested]）。 */
     private var approvalRequestedSink: ((conversationId: String) -> Unit)? = null
@@ -63,8 +67,10 @@ class AgentBridge {
     /**
      * v1.3 通知摘要轮：assistant final 权威行回调（Swift 注册；见 [hubWatchReplyMessage]）——
      * 携带消息正文与附件数，供 Swift 侧生成通知摘要（剥 markdown/纯附件「[图片]×N」）。
+     * 2026-11-15 推送降噪轮扩形：runId = 信封 runId（失败回声行去重锚；用户行回显等无
+     * runId 形态为空串）。
      */
-    private var replyMessageSink: ((conversationId: String, content: String, attachmentCount: Int) -> Unit)? = null
+    private var replyMessageSink: ((conversationId: String, runId: String, content: String, attachmentCount: Int) -> Unit)? = null
 
     /** 投影库句柄进程内唯一（登出清表后复用同一连接，重登从空库 bootstrap）。 */
     private val hubDb: HubDatabase? by lazy { openHubDatabase(createHubDriver()) }
@@ -213,11 +219,16 @@ class AgentBridge {
     /**
      * run 终态事件回调（wp-13 通知面；Swift 启动时注册一次，重复调用覆盖旧回调）：
      * conversationId = 桥侧经 hubConvKeys 映射解析（与投影 resolveConversation 同一通道①；
-     * 未映射会话为空串，调用方不得编造归属）、runId = 信封 runId、status ∈ completed/failed。
-     * 回调在主线程（同步引擎运行于本桥 scope = Dispatchers.Main）。回复通知（v1.3 起）同样
-     * 走本通道 MESSAGE_CREATED 分支（摘要需要消息正文与附件数）；审批走 [hubWatchApprovalRequested]。
+     * 未映射会话为空串，调用方不得编造归属）、runId = 信封 runId、status ∈ completed/failed、
+     * reason = run.failed 载荷 error 字段（缺省空串）、localOrigin = 本端发起判定（RunOriginRegistry）。
+     * 2026-11-15 推送降噪轮（服务端 push/apns.go 同口径）：**失败 run 全量过本通道**——
+     * Swift 侧要为所有失败 run 记回声行去重锚（服务端降噪镜像），本地通知仍只认 localOrigin；
+     * 完成态维持只认本端（桥侧过滤，避免 heartbeat 周期 run 淹没回调）。回复通知（v1.3 起）
+     * 走本通道 MESSAGE_CREATED 分支；审批走 [hubWatchApprovalRequested]。回调在主线程。
      */
-    fun hubWatchRunTerminal(onEvent: (conversationId: String, runId: String, status: String) -> Unit) {
+    fun hubWatchRunTerminal(
+        onEvent: (conversationId: String, runId: String, status: String, reason: String, localOrigin: Boolean) -> Unit,
+    ) {
         runTerminalSink = onEvent
     }
 
@@ -241,7 +252,9 @@ class AgentBridge {
      * conversationId = hubConvKeys 解析（未映射 = 空串，Swift 侧按归属可得性显式降级，不编造）；
      * 载荷形状漂移（缺 role/content）按空值降级，不抛不崩。回调在主线程（同 [hubWatchRunTerminal]）。
      */
-    fun hubWatchReplyMessage(onEvent: (conversationId: String, content: String, attachmentCount: Int) -> Unit) {
+    fun hubWatchReplyMessage(
+        onEvent: (conversationId: String, runId: String, content: String, attachmentCount: Int) -> Unit,
+    ) {
         replyMessageSink = onEvent
     }
 
@@ -268,8 +281,16 @@ class AgentBridge {
                     ?: envelope.data.jsonObject["runId"]?.toString()?.trim('"')?.takeIf { it.isNotEmpty() }
                     ?: return
                 val registry = hubClient?.runOriginRegistry
-                if (registry != null && !registry.isRunLocal(envelope.gatewayId, runId)) return
-                runTerminalSink?.invoke(conversationId, runId, status)
+                val localOrigin = registry != null && registry.isRunLocal(envelope.gatewayId, runId)
+                // 2026-11-15 推送降噪轮：失败 run 全量放行（Swift 记回声行去重锚——服务端
+                // push/apns.go 降噪镜像；heartbeat 等自驱 run 的失败回声行在端上同样不该
+                // 以「新回复」二推）；完成态维持只认本端（通知面语义不变，heartbeat 周期
+                // run 不淹没回调）。失败原因随载荷透传（data.error，缺省空串）。
+                if (!localOrigin && status != "failed") return
+                val reason = if (status == "failed") {
+                    (envelope.data.jsonObject["error"] as? JsonPrimitive)?.contentOrNull ?: ""
+                } else ""
+                runTerminalSink?.invoke(conversationId, runId, status, reason, localOrigin)
             }
             EventEnvelope.APPROVAL_REQUESTED -> approvalRequestedSink?.invoke(conversationId)
             EventEnvelope.MESSAGE_CREATED -> {
@@ -279,13 +300,16 @@ class AgentBridge {
                 // 其他 role fail-closed 不提醒——服务端对 d.Role != "assistant" 一律不推，
                 // 客户端触发面必须镜像，否则桥上行的非 assistant 形态绕过闭值过滤。
                 // 载荷解析宽松降级（缺键/形状漂移 = 空值，与 DefaultEventProjector
-                //「宽松解析、缺键降级」同纪律）。
+                //「宽松解析、缺键降级」同纪律）。runId 透传（2026-11-15 降噪轮：回声行去重锚）。
                 val obj = runCatching { envelope.data.jsonObject }.getOrNull() ?: return
                 val role = (obj["role"] as? JsonPrimitive)?.contentOrNull
                 if (role != "assistant") return
                 val content = (obj["content"] as? JsonPrimitive)?.contentOrNull ?: ""
                 val attachmentCount = (obj["attachments"] as? JsonArray)?.size ?: 0
-                replyMessageSink?.invoke(conversationId, content, attachmentCount)
+                val runId = envelope.runId
+                    ?: envelope.data.jsonObject["runId"]?.toString()?.trim('"')?.takeIf { it.isNotEmpty() }
+                    ?: ""
+                replyMessageSink?.invoke(conversationId, runId, content, attachmentCount)
             }
             else -> Unit // 其余事件不走通知面（回复通知见 MESSAGE_CREATED 分支）
         }

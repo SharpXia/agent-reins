@@ -69,9 +69,12 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
         post(kind: "run", conversationId: conversationId, title: "运行完成", body: "「\(label)」的任务已运行完成")
     }
 
-    /// run 失败（run.failed）。
-    func runFailed(conversationId: String, label: String) {
-        post(kind: "run", conversationId: conversationId, title: "运行失败", body: "「\(label)」的任务运行失败")
+    /// run 失败（run.failed；2026-11-15 推送降噪轮：标题=会话名（displayLabel 链，与服务端
+    /// APNs 标题链 label→agentId 同口径）、body=「运行失败：」+失败原因（run.failed data.error，
+    /// 调用方有界），缺省回退静态文案——与服务端失败推送同款文案，前台/后台单通道呈现一致）。
+    func runFailed(conversationId: String, label: String, reason: String) {
+        let body = reason.isEmpty ? "「\(label)」的任务运行失败" : "运行失败：\(reason)"
+        post(kind: "run", conversationId: conversationId, title: label, body: body)
     }
 
     /// 派发前实时查授权态；未授权/未决定直接丢弃（静默降级，验收硬要求）。

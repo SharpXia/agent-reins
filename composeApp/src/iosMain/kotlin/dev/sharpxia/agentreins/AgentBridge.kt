@@ -19,6 +19,7 @@ import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
 import dev.sharpxia.agentreins.hub.projection.AttachmentRef
 import dev.sharpxia.agentreins.hub.projection.CommandsList
 import dev.sharpxia.agentreins.hub.projection.ModelsList
+import dev.sharpxia.agentreins.hub.projection.SessionsResponse
 import dev.sharpxia.agentreins.hub.projection.EventEnvelope
 import dev.sharpxia.agentreins.hubdb.HubDatabase
 import kotlinx.coroutines.CoroutineScope
@@ -497,15 +498,25 @@ class AgentBridge {
     // ---------- v1.1 新端点（#16–#19） ----------
 
     /**
-     * 新开会话（openclaw 原生指令；wp-11 #16 入口唯一写路径）。#16 聚合语义（2026-11-04 拍板）：
-     * 无主线卡 agent 调用 → 新 session 兜底成卡（入口侧已保证只对无主线卡 agent 开放）；已有
-     * 主线卡 agent 调用 → 新 session 静默（后台任务会话）。结果经回调带回 receipt（null=失败，
-     * 调用方须显式呈现，不静默）；成功后 DefaultHubClient 内部即触发一次会话列表校准，新卡
-     * 秒级入列（兜底成卡的 R4 路径不走周期节拍等待）。
+     * 新开会话（openclaw 原生指令；wp-11 #16 入口唯一写路径）。v1.4.0 多主会话轮（2026-11-16）
+     * 起双旗标透传：[newMainSession] false = mainSession=true **默认主线**（服务端组装
+     * sessionKey=agent:<agentId>:main，Gateway sessions.create 同名 key adopt 不 fork）；true =
+     * 新开一条主线：服务端以请求幂等键确定性派生 agent:<agentId>:main-<idempotencyKey>——重试
+     * 同键 = 同键形 = 同会话（客户端永不拼键，ADR-14）。分流判据在 Swift 侧（HubStore 按
+     * hasMainCard 分流，评审 H2 通道）：无主线卡 agent 传 false（新 session 兜底成卡，2026-11-04
+     * #16 聚合语义）；已有主线卡 agent 传 true（新主线独立成卡，恒不双真——服务端互斥 400）。
+     * 结果经回调带回 receipt（null=失败，调用方须显式呈现，不静默）；成功后 DefaultHubClient
+     * 内部即触发一次会话列表校准，新卡秒级入列（兜底成卡的 R4 路径不走周期节拍等待）。
      */
-    fun hubCreateConversation(gatewayId: String, agentId: String, label: String?, onDone: (String?) -> Unit) {
+    fun hubCreateConversation(
+        gatewayId: String,
+        agentId: String,
+        label: String?,
+        newMainSession: Boolean,
+        onDone: (String?) -> Unit,
+    ) {
         scope.launch {
-            val r = runCatching { hubClient?.createConversation(gatewayId, agentId, label) }
+            val r = runCatching { hubClient?.createConversation(gatewayId, agentId, label, newMainSession) }
             onDone(r.getOrNull()?.commandId)
         }
     }
@@ -518,6 +529,53 @@ class AgentBridge {
     /** 压缩上下文；成功回调 true。 */
     fun hubCompactConversation(conversationId: String, onDone: (Boolean) -> Unit) {
         scope.launch { onDone(runCatching { hubClient?.compactConversation(conversationId) }.isSuccess) }
+    }
+
+    // ---------- v1.4.0 会话管理面（#28/#29 多主会话轮；直调 REST 不走幂等队列） ----------
+
+    /**
+     * 按 Agent 列会话清单（#28，v1.4.0 additive 多主会话轮；**纯读直调不走幂等队列**——管理面
+     * 清单查询，无 CommandReceipt 可追）。onDone page 非 null = 成功：[SessionsResponse] 原样
+     * 透出（管理面视图不收敛、不筛族——dashboard/主线族（含 main-<idempotencyKey> 多主线）/
+     * task/channel/subagent/cron 全键族可见；SessionSummary.isMainSession = 主线族谓词，消费面
+     * rename 门据此判定，评审 M7）；null = 未成功（未登录/网络不可达/Hub FAILED），error = 人读
+     * 失败原因，调用方显式呈现 + 可重试，不静默。
+     */
+    fun hubListAgentSessions(
+        gatewayId: String,
+        agentId: String,
+        onDone: (page: SessionsResponse?, error: String?) -> Unit,
+    ) {
+        scope.launch {
+            val r = runCatching {
+                hubClient?.listAgentSessions(gatewayId, agentId) ?: throw HubException.notLoggedIn()
+            }
+            val page = r.getOrNull()
+            if (page != null) {
+                onDone(page, null)
+            } else {
+                onDone(null, describeError(r.exceptionOrNull()))
+            }
+        }
+    }
+
+    /**
+     * 会话删除（#29，v1.4.0 additive 多主会话轮；**纯 REST 直调不走幂等队列**——Hub 主权
+     * tombstone 为 204 幂等终态，与 [hubDeleteGateway] 同款直调先例，无 CommandReceipt 可追）。
+     * 204 后本地投影行即删（HubClient.deleteConversation 内部落库，observeConversations Flow
+     * 即推；session.removed 事件级联清映射/两跳暂存已在 DefaultEventProjector.onSessionRemoved
+     * ——Swift 侧乐观移除与本路径双路径幂等）。onDone ok true = 删除已成功（对已删除会话再次
+     * DELETE 亦 204）；false = 未成功（未登录/网络不可达），error = 人读失败原因，调用方显式
+     * 呈现 + 可重试，不静默。
+     */
+    fun hubDeleteConversation(conversationId: String, onDone: (ok: Boolean, error: String?) -> Unit) {
+        scope.launch {
+            val r = runCatching {
+                val c = hubClient ?: throw HubException.notLoggedIn()
+                c.deleteConversation(conversationId)
+            }
+            if (r.isSuccess) onDone(true, null) else onDone(false, describeError(r.exceptionOrNull()))
+        }
     }
 
     /**
@@ -568,15 +626,83 @@ class AgentBridge {
         }
     }
 
-    // ---------- Agent 状态（端点 #18，控台轮只读卡片在线点数据面；纯投影查询，无命令无副作用） ----------
+    // ---------- 网关供给面管理（#25/#26/#27 复植轮 2026-11-16；直调 REST 不走幂等队列） ----------
+
+    /**
+     * 注册网关（#25，v1.3.0 additive 多网关轮；与 [hubDevices] 同式：authStack + withBearer
+     * 直调 HubClient 门面）。onDone gatewayId/bridgeToken 非 null = 成功：bridgeToken 为一次性
+     * 明文（服务端只存 SHA-256 摘要、无法再次查看），调用方仅存会话内存、复制给 Bridge 设备
+     * env 用完即弃（**不持久化纪律**，契约 #25 description / HubClient.createGateway 注释）。
+     * null = 未成功（未登录/网络不可达/Hub FAILED），error = 人读失败原因，调用方显式呈现 +
+     * 可重试，不静默。#25 名称不判重、无幂等键——重试安全由调用方按钮防重（提交中禁用）保证。
+     * 成功后触发一次 refreshGateways 回拉，让新网关行尽快入列（Bridge 未拨出前为离线空目录）。
+     */
+    fun hubCreateGateway(
+        name: String,
+        onDone: (gatewayId: String?, bridgeToken: String?, error: String?) -> Unit,
+    ) {
+        scope.launch {
+            val r = runCatching {
+                hubClient?.createGateway(name) ?: throw HubException.notLoggedIn()
+            }
+            val created = r.getOrNull()
+            if (created != null) {
+                hubClient?.refreshGateways()
+                onDone(created.gatewayId, created.bridgeToken, null)
+            } else {
+                onDone(null, null, describeError(r.exceptionOrNull()))
+            }
+        }
+    }
+
+    /**
+     * 轮换网关 bridgeToken（#26，v1.3.0 additive；直调同 [hubCreateGateway]）。onDone
+     * bridgeToken 非 null = 成功：新明文一次性下发（旧 Token 进 24h 宽限，宽限期内新旧双活），
+     * 不持久化纪律同 [hubCreateGateway]。null = 未成功（未登录/网络不可达/目标网关已撤销 401
+     * HUB-AUTH-005 语义拒绝/未知或非属主 404 HUB-BIZ-002 防枚举），error = 人读失败原因。
+     */
+    fun hubRotateBridgeToken(gatewayId: String, onDone: (bridgeToken: String?, error: String?) -> Unit) {
+        scope.launch {
+            val r = runCatching {
+                hubClient?.rotateBridgeToken(gatewayId) ?: throw HubException.notLoggedIn()
+            }
+            val issued = r.getOrNull()
+            if (issued != null) {
+                onDone(issued.bridgeToken, null)
+            } else {
+                onDone(null, describeError(r.exceptionOrNull()))
+            }
+        }
+    }
+
+    /**
+     * 撤销网关（#27，v1.3.0 additive，204 终态且对属主幂等；直调同 [hubDevices] 式）。onDone
+     * error null = 撤销已成功：服务端读面按 status='active' 过滤（该网关自此从目录消失）、
+     * 连接即时收口、历史保留只读、命令不再下发。本地投影行收敛已下沉 HubClient 门面——
+     * deleteGateway 成功即触发 refreshGateways 回拉，pullGatewaysIntoProjection 差集对账
+     * 即时删残留行（复植轮 Swift 呈现面不再自持撤销隐藏集，2026-11-15 死卡修复轮）。非 null =
+     * 未成功（未登录/网络不可达/未知或非属主 404 HUB-BIZ-002），error = 人读失败原因，调用方
+     * 显式呈现 + 可重试，不静默。
+     */
+    fun hubDeleteGateway(gatewayId: String, onDone: (error: String?) -> Unit) {
+        scope.launch {
+            val r = runCatching {
+                val c = hubClient ?: throw HubException.notLoggedIn()
+                c.deleteGateway(gatewayId)
+            }
+            if (r.isSuccess) onDone(null) else onDone(describeError(r.exceptionOrNull()))
+        }
+    }
+
+    // ---------- Agent 状态（端点 #18，只读卡片在线点数据面；纯投影查询，无命令无副作用） ----------
 
     /**
      * Agent 状态（端点 #18，v1.3.0 additive；直调同 [hubDevices] 式：authStack + withBearer 走
      * [DefaultHubClient.agentStatus] 门面）。onDone status 非 null = 成功（gatewayOnline /
      * activeConversations / activeRuns / lastSeenAt 投影快照）；null = 未成功（未登录/网络不可达/
      * Hub FAILED），error = 人读失败原因——调用方按「拉不到不显示」降级（缓存 TTL 与在途去重
-     * 由调用方持有），不阻塞 UI。控台轮（2026-11-11）：网关供给/轮换/撤销三管理桥面已随管理面
-     * 搬服务端控台撤除，本面为客户端余留的 #18 只读读面。
+     * 由调用方持有），不阻塞 UI。复植轮（2026-11-16）：网关供给/轮换/撤销三管理桥面已复植
+     * （见上方管理面段），本面维持 #18 只读读面。
      */
     fun hubAgentStatus(
         gatewayId: String,

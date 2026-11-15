@@ -202,19 +202,28 @@ final class HubStore {
     /// 新建会话提交在途（入口禁用，防重复提交同 agent 双键）。
     private(set) var creatingConversation = false
 
-    /// 新建会话提交失败（hubCreateConversation 回执 null = REST 未成功）——入口页显式降级态 +
-    /// 可重试，不静默（与 wp-9 决策失败同纪律）；成功态不清此值，下次提交前置 nil。
+    /// 新建会话提交失败（hubCreateConversation 回执 null = 提交未送达或被服务端拒绝——网络
+    /// 不可达入队待重放 / 确定性拒绝 FAILED+null）——入口页显式降级态 + 可重试，不静默
+    /// （与 wp-9 决策失败同纪律）；成功态不清此值，下次提交前置 nil。
     private(set) var createConversationError: String?
 
     /// 新建会话已提交成功（PERSISTED 回执已得）：入口页呈「已提交」等待态——卡片出现以校准
-    /// 收敛为准（成功即触发一次校准，秒级；兜底 R4 周期），行在卡出现后自动翻成置灰。
+    /// 收敛为准（成功即触发一次校准，秒级；兜底 R4 周期），行随成卡清瞬态回 IDLE（多主会话
+    /// 轮 2026-11-16：已有卡 agent 成卡后可再次新建主会话，不再永久置灰；watchGateways 减法收敛）。
     private(set) var createdConversationFor: Set<String> = []
 
-    // ---------- 多网关轮：agent 分组偏好（控台轮网关供给/轮换/撤销管理动作已搬服务端控台撤除） ----------
+    // ---------- 多网关轮：agent 分组偏好 + 网关供给面管理（v1.3.0 #25/#26/#27；复植轮 2026-11-16 管理动作复位） ----------
 
     /// agent 分组偏好（设计稿 §4.3；AgentGroupStore 自身 @Observable，视图直接订阅）。
     /// 本地承载跨登出保留（§4.1：投影库可整库丢弃重建，偏好走「投影库外」先例 = 静音集）。
     let agentGroups = AgentGroupStore()
+
+    /// 网关管理动作在途（键 = "create" 或 gatewayId；按钮禁用防重复提交——#25 名称不判重
+    /// 无幂等键，重复提交产生多个网关各持独立 Token）。
+    /// 复植轮不复活 revokedGatewayIds 即时隐藏集：本地投影行收敛已下沉 HubClient
+    /// （deleteGateway 成功即触发 refreshGateways 回拉，pullGatewaysIntoProjection 差集对账
+    /// 即时删残留行——2026-11-15 死卡修复轮），呈现清单即投影库推送原样。
+    private(set) var gatewayActionInFlight: Set<String> = []
 
     /// #2'（2026-11-07 二轮，x总改版）：thinking 帧在途判定——当前打开会话最新阶段帧
     /// phase=thinking（run 终态投影清行，帧存在即在途）。数据链：Gateway thinking 流 →
@@ -484,15 +493,21 @@ final class HubStore {
     }
 
     /// 订阅网关清单（wp-11：与 watchConversations 同模式，纯投影库面、随库变更推送）。
-    /// 控台轮：客户端不再有撤销动作，旧 revokedGatewayIds 即时隐藏集随之撤除——呈现清单
-    /// 即投影库推送原样（已撤销网关行以服务端读面过滤 + 快照整体覆盖收敛）。
+    /// 复植轮（2026-11-16）：网关管理动作复位（#25/#26/#27），但不复活 revokedGatewayIds
+    /// 即时隐藏集——本地投影行收敛已下沉 HubClient（deleteGateway 成功即触发 refreshGateways
+    /// 回拉，pullGatewaysIntoProjection 差集对账即时删残留行，2026-11-15 死卡修复轮），
+    /// 呈现清单即投影库推送原样。
     func watchGateways() {
         bridge.hubWatchGateways { [weak self] list in
             guard let self else { return }
             self.gateways = list
-            // 收敛清理：已兜底成卡的 (gatewayId, agentId) 移出「已提交」瞬态（行翻置灰由主线卡判据接管）
+            // 收敛清理（评审 H3 修复 2026-11-16，对齐桌面 GatewaysPanel LaunchedEffect 同语义）：
+            // 已兜底成卡的 (gatewayId, agentId) 自「已提交」瞬态**减去**（subtract）——旧
+            // formIntersection 与自身注释相反：把仍待校准的提交误清、把已成卡的键反而保留，
+            // 已有卡 agent 成卡后新建入口判据即永久禁用（旧 UI 靠置灰掩盖）。成卡即清瞬态回
+            // IDLE 可再次新建（多主会话轮四态语义）；无卡 agent 提交期间 SUBMITTED 保留。
             let cardKeys = Set(self.conversations.map { Self.entryKey(gatewayId: $0.gatewayId, agentId: $0.agentId) })
-            self.createdConversationFor.formIntersection(cardKeys)
+            self.createdConversationFor.subtract(cardKeys)
         }
     }
 
@@ -510,29 +525,197 @@ final class HubStore {
 
     // ---------- wp-11：#16 新建会话入口 ----------
 
-    /// 主线卡判据（#16 聚合语义 2026-11-04 拍板的客户端判定面）：该 (gatewayId, agentId) 在
-    /// 会话列表已有卡片 = 已有主线（服务端 DISTINCT ON 聚合保证一 agent 至多一卡）。
+    /// 主线卡判据（多主会话轮 2026-11-16 自入口禁用门**降级为分流判据**）：该 (gatewayId,
+    /// agentId) 在会话列表已有卡片 = 已有主线——createConversation 据此分流为 newMainSession=
+    /// true（新建主会话）写路径；false = 默认主线（mainSession=true，adopt 不 fork）。服务端
+    /// DISTINCT ON 聚合保证一 agent 至多一「默认主线」卡。
     func hasMainCard(gatewayId: String, agentId: String) -> Bool {
         conversations.contains { $0.gatewayId == gatewayId && $0.agentId == agentId }
     }
 
     private static func entryKey(gatewayId: String, agentId: String) -> String { "\(gatewayId)|\(agentId)" }
 
-    /// 新建会话（#16）：复用 hubCreateConversation（幂等键 Hub 生成，label 可空）。回执 null =
-    /// 提交失败（REST 未成功），显式降级态可重试；成功即记「已提交」等待态——卡片出现以校准
-    /// 收敛为准（DefaultHubClient 成功后即触发一次校准，秒级），本表行在该 agent 成卡后自动翻置灰。
+    /// 新建会话（#16）：复用 hubCreateConversation（幂等键 Hub 生成，label 可空）。多主会话
+    /// 轮（2026-11-16）签名分流（评审 H2 通道）：无主线卡 = 默认主线（newMainSession=false，
+    /// 服务端 sessionKey=agent:<agentId>:main adopt 不 fork，新 session 兜底成卡）；已有主线卡 =
+    /// 新开一条主线（newMainSession=true，服务端以请求幂等键确定性派生 agent:<agentId>:
+    /// main-<idempotencyKey>——重试同键同会话，客户端永不拼键）。回执 null = 提交未送达或被
+    /// 服务端拒绝（网络不可达入队 PENDING_LOCAL 待 retryUnfinished 自动重放 / 确定性拒绝
+    /// 400/409 走 FAILED+null，DefaultCommandClient.submit）——显式降级态可重试（文案中性，
+    /// 评审 L9），不静默；成功即记「已提交」等待态，卡出现后 watchGateways 减法收敛清瞬态。
     func createConversation(gatewayId: String, agentId: String) {
         let key = Self.entryKey(gatewayId: gatewayId, agentId: agentId)
-        guard !creatingConversation, !hasMainCard(gatewayId: gatewayId, agentId: agentId) else { return }
+        let newMainSession = hasMainCard(gatewayId: gatewayId, agentId: agentId)
+        guard !creatingConversation else { return }
         creatingConversation = true
         createConversationError = nil
-        bridge.hubCreateConversation(gatewayId: gatewayId, agentId: agentId, label: nil) { [weak self] commandId in
+        bridge.hubCreateConversation(gatewayId: gatewayId, agentId: agentId, label: nil, newMainSession: newMainSession) { [weak self] commandId in
             guard let self else { return }
             self.creatingConversation = false
             if commandId == nil || commandId!.isEmpty {
-                self.createConversationError = "提交未送达（可能为网络不可达），可重试"
+                self.createConversationError = "提交未送达或被服务端拒绝（可重试）"
             } else {
                 self.createdConversationFor.insert(key)
+            }
+        }
+    }
+
+    // ---------- 多网关轮：网关供给面管理动作（#25/#26/#27，v1.3.0；复植轮 2026-11-16 复位，桥回调式与 hubDevices 同式） ----------
+
+    /// 注册网关（#25）：一次性明文 bridgeToken 只经回调交付调用方（网关管理 sheet 会话内存
+    /// 持有，**不落任何持久化**——不持久化纪律见 AgentBridge.hubCreateGateway 注释；
+    /// bridgeToken 明文只在创建/轮换响应出现一次，sheet 关闭即丢）。
+    /// onDone gatewayId/bridgeToken 非 nil = 成功（调用方切一次性凭据展示）；nil = 未成功，
+    /// error = 人读失败原因，调用方显式呈现 + 可重试，不静默。
+    func createGateway(name: String, onDone: @escaping (_ gatewayId: String?, _ bridgeToken: String?, _ error: String?) -> Void) {
+        let key = "create"
+        guard !gatewayActionInFlight.contains(key) else { return }
+        gatewayActionInFlight.insert(key)
+        bridge.hubCreateGateway(name: name) { [weak self] gatewayId, bridgeToken, error in
+            guard let self else { return }
+            self.gatewayActionInFlight.remove(key)
+            onDone(gatewayId, bridgeToken, error)
+        }
+    }
+
+    /// 轮换网关 bridgeToken（#26）：新明文一次性经回调交付（不持久化，同 #25 纪律）；旧 Token
+    /// 24h 宽限。onDone bridgeToken nil = 未成功，error = 人读失败原因。
+    func rotateBridgeToken(gatewayId: String, onDone: @escaping (_ bridgeToken: String?, _ error: String?) -> Void) {
+        guard !gatewayActionInFlight.contains(gatewayId) else { return }
+        gatewayActionInFlight.insert(gatewayId)
+        bridge.hubRotateBridgeToken(gatewayId: gatewayId) { [weak self] bridgeToken, error in
+            guard let self else { return }
+            self.gatewayActionInFlight.remove(gatewayId)
+            onDone(bridgeToken, error)
+        }
+    }
+
+    /// 撤销网关（#27，终态且对属主幂等）：成功后收敛走服务端/桥内路径——HubClient.deleteGateway
+    /// 成功即触发 refreshGateways 回拉，pullGatewaysIntoProjection 差集对账即时删本地残留行
+    /// （复植轮不复活 revokedGatewayIds 即时隐藏集）。onDone error nil = 已成功；非 nil =
+    /// 未成功，error = 人读失败原因，调用方显式呈现 + 可重试，不静默。
+    func revokeGateway(gatewayId: String, onDone: @escaping (_ error: String?) -> Void) {
+        guard !gatewayActionInFlight.contains(gatewayId) else { return }
+        gatewayActionInFlight.insert(gatewayId)
+        bridge.hubDeleteGateway(gatewayId: gatewayId) { [weak self] error in
+            guard let self else { return }
+            self.gatewayActionInFlight.remove(gatewayId)
+            onDone(error)
+        }
+    }
+
+    // ---------- v1.4.0：会话管理 sheet（SessionManagerSheet 数据面，#28 清单 / #19 rename / #29 delete） ----------
+
+    /// 当前 agent 的会话清单（#28 管理面视图原样透出——不收敛、不筛族：dashboard/主线族
+    /// （含 main-<idempotencyKey> 多主线）/task/channel/subagent/cron 全键族可见）。nil =
+    /// 未拉取（行呈加载中态；拉取失败置 agentSessionsError 呈降级态）。
+    private(set) var agentSessions: [SessionSummary]?
+
+    /// 会话清单拉取失败（#28 直调未成功）：sheet 显式降级态 + 重试，不静默；成功即清。
+    private(set) var agentSessionsError: String?
+
+    /// 会话清单拉取在途（loading 行；互斥防重复触发）。
+    private(set) var agentSessionsLoading = false
+
+    /// 会话删除在途（conversationId 集合；行级按钮禁用防重复提交）。
+    private(set) var deletingSessionIds: Set<String> = []
+
+    /// 会话删除失败（#29 直调未成功）：sheet 错误行显式呈现 + 可重试，不静默；成功即清。
+    private(set) var sessionDeleteError: String?
+
+    /// 会话重命名在途（conversationId 集合；仅主线族行开放，rename 门见 SessionManagerSheet）。
+    private(set) var renamingSessionIds: Set<String> = []
+
+    /// 会话重命名失败（#19 未成功）：sheet 错误行显式呈现 + 可重试，不静默；成功即清。
+    private(set) var sessionRenameError: String?
+
+    /// 拉取会话清单（#28，纯读直调）。失败置 agentSessionsError 呈「重试」降级态（旧清单保留
+    /// 呈现，错误行并存——与设备管理错误态同式）；成功整表覆盖（管理面无收敛语义，清单即
+    /// 服务端原样）。
+    func listAgentSessions(gatewayId: String, agentId: String) {
+        guard isLoggedIn, !agentSessionsLoading else { return }
+        agentSessionsLoading = true
+        agentSessionsError = nil
+        bridge.hubListAgentSessions(gatewayId: gatewayId, agentId: agentId) { [weak self] page, error in
+            guard let self else { return }
+            self.agentSessionsLoading = false
+            if let page {
+                self.agentSessions = page.sessions
+            } else {
+                self.agentSessionsError = error ?? "会话清单加载失败，可重试"
+            }
+        }
+    }
+
+    /// 关闭 sheet 时清空管理面瞬态（下次进入重新拉清单，防跨 agent 陈旧数据）。
+    func clearSessionManagerState() {
+        agentSessions = nil
+        agentSessionsError = nil
+        agentSessionsLoading = false
+        sessionDeleteError = nil
+        sessionRenameError = nil
+    }
+
+    /// 会话重命名（#19 conversation.rename 幂等队列；**仅主线族行开放**——评审 M7 门：rename
+    /// 服务端经 lookupActiveConversation 只在卡行集内解析（clientaccess/service.go），task/channel
+    /// 行必 404 HUB-BIZ-002，非主线行不给重命名；dashboard 卡行重命名走既有卡 UI 入口）。
+    func renameSession(conversationId: String, to label: String, onDone: ((Bool) -> Void)? = nil) {
+        guard !renamingSessionIds.contains(conversationId) else { return }
+        renamingSessionIds.insert(conversationId)
+        sessionRenameError = nil
+        bridge.hubRenameConversation(conversationId: conversationId, label: label) { [weak self] ok in
+            guard let self else { return }
+            self.renamingSessionIds.remove(conversationId)
+            if ok.boolValue {
+                // 乐观收敛：清单行 label 即时翻新（权威面由投影 session.updated / 下次 #28 重拉
+                // 收敛；PERSISTED 回执即翻行，不等服务端事件回程）。
+                if var sessions = self.agentSessions,
+                   let idx = sessions.firstIndex(where: { $0.conversationId == conversationId }) {
+                    let old = sessions[idx]
+                    sessions[idx] = SessionSummary(
+                        conversationId: old.conversationId,
+                        label: label,
+                        lastActivityAt: old.lastActivityAt,
+                        isMainSession: old.isMainSession
+                    )
+                    self.agentSessions = sessions
+                }
+                onDone?(true)
+            } else {
+                self.sessionRenameError = "重命名未送达或被服务端拒绝（可重试）"
+                onDone?(false)
+            }
+        }
+    }
+
+    /// 会话删除（#29，204 幂等终态直调）：先**乐观移除**——sheet 清单行 + 会话列表卡行即时
+    /// 撤行（正打开该会话则一并关闭）；随后桥直调。乐观删与事件级联（session.removed →
+    /// 投影行删 → Flow 推送）双路径均幂等——验收 L6：乐观删后事件再删不告警不重复。
+    /// 失败（未登录/网络不可达）显式降级态可重试；乐观移除的行由下次 #28 重拉收敛回权威清单。
+    func deleteConversation(_ summary: SessionSummary, onDone: ((Bool) -> Void)? = nil) {
+        let cid = summary.conversationId
+        guard !deletingSessionIds.contains(cid) else { return }
+        deletingSessionIds.insert(cid)
+        sessionDeleteError = nil
+        agentSessions?.removeAll { $0.conversationId == cid } // 乐观移除：sheet 清单行
+        conversations.removeAll { $0.conversationId == cid }  // 乐观移除：会话列表卡行（幂等）
+        if selected?.conversationId == cid {                  // 正打开该会话则一并关闭
+            selected = nil
+            resetMessagesStream()
+            resetPagingState()
+            messages = []
+            chatPush = false
+            workActivity = nil
+            bridge.hubStopWatchingMessages()
+        }
+        bridge.hubDeleteConversation(conversationId: cid) { [weak self] ok, error in
+            guard let self else { return }
+            self.deletingSessionIds.remove(cid)
+            if ok.boolValue {
+                onDone?(true)
+            } else {
+                self.sessionDeleteError = error ?? "删除未送达或被服务端拒绝（可重试）"
+                onDone?(false)
             }
         }
     }
@@ -1598,6 +1781,16 @@ final class HubStore {
         agentStatusCache = [:]
         agentStatusFetchedAt = [:]
         agentStatusInFlight = []
+        // 复植轮：网关管理动作在途随登出清空（#25 提交中态不得跨登出残留）。
+        gatewayActionInFlight = []
+        // v1.4.0 会话管理面瞬态随登出清空（#28/#29）。
+        agentSessions = nil
+        agentSessionsError = nil
+        agentSessionsLoading = false
+        deletingSessionIds = []
+        sessionDeleteError = nil
+        renamingSessionIds = []
+        sessionRenameError = nil
         // #21：动态命令目录随登出清空（重登后从空缓存 bootstrap，下次 "/" 起手重拉）
         commandsCache = [:]
         commandsFetchedAt = [:]

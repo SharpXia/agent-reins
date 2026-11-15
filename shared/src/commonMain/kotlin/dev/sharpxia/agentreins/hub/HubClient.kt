@@ -208,6 +208,11 @@ data class UiGateway(
     val lastSeenAt: String?,
     /** AgentRef 数组解析产物；JSON 解析失败按空清单降级（网关行本体不丢）。 */
     val agents: List<UiAgentRef>,
+    /**
+     * 桥自报供给方标识（v10 provider 落列透出，K2 复植轮；GatewaySummary.provider 透传，如
+     * openclaw/hermes）。未知省略行落 ''（不枚举假设，只读展示）——空串 = 呈现面无徽标。
+     */
+    val provider: String = "",
 )
 
 /**
@@ -580,6 +585,7 @@ class DefaultHubClient(
                     agents = runCatching {
                         agentsJson.decodeFromString(AGENT_REF_LIST, g.agentsJson)
                     }.getOrDefault(emptyList()).map { UiAgentRef(it.agentId, it.label) },
+                    provider = g.provider,
                 )
             }
         }

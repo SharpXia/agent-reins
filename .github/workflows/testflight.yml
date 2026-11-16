@@ -14,6 +14,11 @@ name: TestFlight
 #
 # 2026-10-29 固定证书链路已验证全绿（run 40814210285，build 1793245738 上传成功），
 # beta-* tag 触发已放开。
+#
+# 2026-11-17 增 Mac Catalyst job（macos-catalyst-testflight）：destination platform=macOS
+# variant=Mac Catalyst，导出 method=app-store 产 .pkg，fastlane pilot --pkg 上传；
+# secrets 与 iOS job 完全同源（不新增 secret）。ASC/开发者后台侧的用户操作清单见该 job
+# 头注释；Catalyst 链路首跑未验，跑通前以报错实测为准。落档：协调仓 docs/macos-catalyst-20261116.md。
 on:
   workflow_dispatch:
   push:
@@ -177,3 +182,189 @@ jobs:
       - name: Summary
         run: |
           echo "✅ 已上传 TestFlight（build ${{ env.BUILD_NUMBER }}）。处理约 10–30 分钟后，TestFlight app 内可见/可更新。" >> "$GITHUB_STEP_SUMMARY"
+
+  macos-catalyst-testflight:
+    name: Mac Catalyst → TestFlight
+    runs-on: macos-latest
+    # 2026-11-17 增（路线3 Mac Catalyst 出包）：archive destination=platform=macOS,variant=Mac
+    # Catalyst，导出 method=app-store 产 .pkg（macOS 导出不出 ipa），fastlane pilot --pkg 上传。
+    # build 号沿用 epoch 口径（本 job 独立取 date +%s——与 iOS job 分跑双 runner，两包 build 号
+    # 可能差几秒，分属两条 App 记录互不冲突）。
+    # secrets 口径与 iOS job 完全同源，不新增 secret：DIST_CERT_P12_BASE64 / P12_PASSWORD /
+    # ASC_API_KEY_P8_BASE64 / ASC_API_KEY_ID / ASC_API_ISSUER_ID / APPLE_TEAM_ID / HUB_PUBLIC_HOST。
+    #
+    # 前置依赖（入库门）：Catalyst 接线批次全部入库后才可跑通——pbxproj 的 Compile Kotlin
+    # 脚本段在 IS_MACCATALYST=YES 下调用 scripts/stamp-catalyst-framework.sh（其内调
+    # scripts/patch-static-platform.py），且 composeApp/build.gradle.kts 需撤下
+    # binaryOptions["macabi"]。缺件状态下本 job 必红（iOS job 不受影响）。
+    #
+    # ── 用户操作（ASC / 开发者后台侧，只列清单不代劳）──────────────────────
+    # 1. 开发者后台：注册显式 App ID dev.sharpxia.agentreins.macCatalyst（pbxproj
+    #    PRODUCT_BUNDLE_IDENTIFIER[sdk=macosx*] 的取值，BUNDLE_ID=dev.sharpxia.agentreins
+    #    见 iosApp/Configuration/Config.xcconfig），并启用其 Mac（Catalyst）能力。
+    # 2. 开发者后台：为该 App ID 创建 App Store 分发 profile，名称 agentreins-appstore-maccatalyst
+    #    （下方 Archive 的 PROVISIONING_PROFILE_SPECIFIER 与 ExportOptions provisioningProfiles
+    #    按名引用；实际命名不同则同步改本文件两处，勿改 secret）。
+    # 3. App Store Connect：.macCatalyst 是独立 bundle id → 独立 App 记录（不能挂在 iOS 记录
+    #    的 macOS 平台上），新建 macOS 平台 App 记录并启用 Mac 分发（TestFlight）。
+    # 4. App Store Connect：TestFlight 的 Mac 分发分组与测试员（与 iOS 分组相互独立，需单独建组拉人）。
+    # 5. 证书有效性：沿用同一枚 Apple Distribution .p12（Xcode 11+ 统一证书覆盖 Mac Catalyst
+    #    App Store 分发），确认未被吊销/过期；若实为旧式 iOS 专用证书（iPhone Distribution），
+    #    需重出统一 Apple Distribution 证书并更新 DIST_CERT_P12_BASE64 / P12_PASSWORD
+    #    （secret 名不变，直接覆盖值）。
+    # ─────────────────────────────────────────────────────────────────────
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Write ASC API key to disk
+        run: |
+          echo "${{ secrets.ASC_API_KEY_P8_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+
+      - name: Write Config.local.xcconfig (TEAM_ID + JAVA_HOME + HUB_PUBLIC_HOST)
+        run: |
+          cat > iosApp/Configuration/Config.local.xcconfig <<EOF
+          TEAM_ID=${{ secrets.APPLE_TEAM_ID }}
+          JAVA_HOME=$JAVA_HOME
+          HUB_PUBLIC_HOST=${{ secrets.HUB_PUBLIC_HOST }}
+          EOF
+
+      - name: Build fastlane api key json
+        run: |
+          python3 - <<'PYEOF'
+          import base64, json, os
+          key = base64.b64decode(os.environ["ASC_API_KEY_P8_BASE64"]).decode()
+          cfg = {
+              "key_id": os.environ["ASC_API_KEY_ID"],
+              "issuer_id": os.environ["ASC_API_ISSUER_ID"],
+              "key": key,
+              "in_house": False,
+          }
+          with open(os.environ["RUNNER_TEMP"] + "/asc-key.json", "w") as f:
+              json.dump(cfg, f)
+          PYEOF
+        env:
+          ASC_API_KEY_P8_BASE64: ${{ secrets.ASC_API_KEY_P8_BASE64 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+
+      - name: Import fixed distribution certificate
+        env:
+          DIST_CERT_P12_BASE64: ${{ secrets.DIST_CERT_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+        run: |
+          if [ -z "$DIST_CERT_P12_BASE64" ]; then
+            echo "::error::Secret DIST_CERT_P12_BASE64 未设置——按文件头说明导出 .p12 并 gh secret set"
+            exit 1
+          fi
+          CERT_PATH="$RUNNER_TEMP/dist.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 16)
+          echo "$DIST_CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" > /dev/null
+          # 闸门：没有可签名的分发身份就中止，绝不让 xcodebuild 再去新建证书
+          COUNT=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -cE 'Apple Distribution|iPhone Distribution' || true)
+          if [ "$COUNT" -lt 1 ]; then
+            echo "::error::keychain 中没有有效的分发签名身份——检查 .p12 是否含私钥、P12_PASSWORD 是否正确"
+            exit 1
+          fi
+
+      - name: Archive (Mac Catalyst, App Store signing, build number = epoch seconds)
+        run: |
+          set -o pipefail
+          BUILD=$(date +%s)
+          # 版本号口径与 iOS job 相同：beta-* tag 推导（beta-0.2.22 → 0.2.22），无 tag 回退 0.1.0
+          TAG="${GITHUB_REF_NAME#refs/tags/}"
+          MV="${TAG#beta-}"
+          case "$MV" in *.*) ;; *) MV="0.1.0" ;; esac
+          echo "BUILD_NUMBER=$BUILD" >> "$GITHUB_ENV"
+          echo "MARKETING_VERSION=$MV" >> "$GITHUB_ENV"
+          # manual 直签统一 Apple Distribution 证书（CLI 自动签名强求开发证书，理由同 iOS job）；
+          # Catalyst profile 按名引用（用户操作②）；allowProvisioningUpdates 按名下载/续期 profile
+          # destination=generic 变体：仅出包不跑模拟器，macosx sdk + IS_MACCATALYST=YES →
+          # Compile Kotlin 脚本段走 embedAndSignCatalystAppleFrameworkForXcode + stamp 改写分支
+          xcodebuild \
+            -project iosApp/iosApp.xcodeproj \
+            -scheme iosApp \
+            -configuration Release \
+            -destination 'generic/platform=macOS,variant=Mac Catalyst' \
+            -archivePath build/AgentReins-catalyst.xcarchive \
+            CURRENT_PROJECT_VERSION=$BUILD \
+            MARKETING_VERSION=$MV \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="agentreins-appstore-maccatalyst" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
+            -authenticationKeyID "${{ secrets.ASC_API_KEY_ID }}" \
+            -authenticationKeyIssuerID "${{ secrets.ASC_API_ISSUER_ID }}" \
+            archive 2>&1 | tail -40
+
+      - name: Export PKG (TestFlight / app-store)
+        run: |
+          # macOS 导出产物是 .pkg（不是 ipa）；method=app-store，manual 按名引用 Catalyst profile。
+          # bundle id 键用 .macCatalyst（pbxproj PRODUCT_BUNDLE_IDENTIFIER[sdk=macosx*] 同源）
+          cat > build/ExportOptions-catalyst.plist <<'PLEOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store</string>
+            <key>teamID</key>
+            <string>${{ secrets.APPLE_TEAM_ID }}</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>dev.sharpxia.agentreins.macCatalyst</key>
+              <string>agentreins-appstore-maccatalyst</string>
+            </dict>
+            <key>uploadSymbols</key>
+            <true/>
+          </dict>
+          </plist>
+          PLEOF
+          xcodebuild \
+            -exportArchive \
+            -archivePath build/AgentReins-catalyst.xcarchive \
+            -exportOptionsPlist build/ExportOptions-catalyst.plist \
+            -exportPath build/pkg \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
+            -authenticationKeyID "${{ secrets.ASC_API_KEY_ID }}" \
+            -authenticationKeyIssuerID "${{ secrets.ASC_API_ISSUER_ID }}" \
+            2>&1 | tail -60
+
+      - name: Upload to TestFlight
+        run: |
+          brew install fastlane
+          # macOS pkg 上传：--app_platform osx 强制走 PkgUploadPackageBuilder 分支（fastlane 源码
+          # 实证 pkg 分支判定）；app_identifier 显式给 Catalyst bundle id——pkg 内不自带可查
+          # 的 iOS 式元数据，缺省查找会挂 iOS App 记录
+          fastlane pilot upload \
+            --api_key_path "$RUNNER_TEMP/asc-key.json" \
+            --pkg build/pkg/AgentReins.pkg \
+            --app_platform osx \
+            --app_identifier dev.sharpxia.agentreins.macCatalyst \
+            --skip_waiting
+
+      - name: Cleanup key material
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/build.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/AuthKey.p8" "$RUNNER_TEMP/asc-key.json" "$RUNNER_TEMP/dist.p12"
+
+      - name: Summary
+        run: |
+          echo "✅ 已上传 TestFlight（Mac Catalyst，build ${{ env.BUILD_NUMBER }}）。处理约 10–30 分钟后，TestFlight app（macOS）内可见。" >> "$GITHUB_STEP_SUMMARY"

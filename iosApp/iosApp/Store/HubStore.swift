@@ -707,8 +707,11 @@ final class HubStore {
         guard !deletingSessionIds.contains(cid) else { return }
         deletingSessionIds.insert(cid)
         sessionDeleteError = nil
-        agentSessions?.removeAll { $0.conversationId == cid } // 乐观移除：sheet 清单行
-        conversations.removeAll { $0.conversationId == cid }  // 乐观移除：会话列表卡行（幂等）
+        // 乐观移除（列表/sheet 行移除动画：withAnimation 包裹，List 行消散；幂等）。
+        withAnimation {
+            agentSessions?.removeAll { $0.conversationId == cid } // sheet 清单行
+            conversations.removeAll { $0.conversationId == cid }  // 会话列表卡行
+        }
         if selected?.conversationId == cid {                  // 正打开该会话则一并关闭
             selected = nil
             resetMessagesStream()

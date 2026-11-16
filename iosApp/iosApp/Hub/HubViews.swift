@@ -488,6 +488,9 @@ struct HubChatView: View {
     /// v1.4.0 追补（2026-11-16 用户反馈「没看到删除入口」）：#29 会话删除从管理 sheet 提到
     /// 会话详情页 ellipsis 菜单——终态确认挂本态。
     @State private var deletingConversation = false
+    /// 删除后关页：详情页有两套推栈路径（列表行 NavigationLink 直推 / 通知跳转 chatPush
+    /// 绑定推），store 只复位 chatPush 不影响前者——dismiss() 对两路径统一 pop。
+    @Environment(\.dismiss) private var dismiss
     /// wp-7①：底部锚定态（初始锚定；只被用户驱动的滚动翻转，见 setAtBottom）。
     /// Dev 走查豁免（AGENTREINS_DEV_ATBOTTOM=0）：初始即「用户已上滑离底」态——自动化
     /// 环境无触摸手势翻转不了本态，置 0 模拟真实用户翻历史时的锚定态（贴底跟随让路，
@@ -1241,6 +1244,7 @@ struct HubChatView: View {
         ) {
             Button("删除", role: .destructive) {
                 hub.deleteConversation(conv)
+                dismiss() // NavigationLink 路径的关页（chatPush 路径由 store 复位，二者幂等）
             }
             Button("取消", role: .cancel) {}
         } message: {

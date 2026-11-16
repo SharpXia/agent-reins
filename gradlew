@@ -199,6 +199,29 @@ if "$cygwin" || "$msys" ; then
 fi
 
 
+# --- AgentReins patch（2026-11-17）：剥掉粘在任务名上的全角括号注释尾 ---
+# CI 门禁等调用方会把说明注释连在任务名后传进来（如
+# :composeApp:linkCatalystDebugFrameworkIosSimulatorArm64（配方落地后产出 bin/... 印证））。
+# Gradle 任务名不可能含全角括号「（」，且此类伪任务名含 / 根本无法注册；
+# 对非旗标参数从首个「（」起整段剥除（arg=${arg%%（*}），剥完为空的参数丢弃。
+# 旗标参数（-*）原样保留，其余用法零影响。真正的修法是门禁脚本剥注释后拼任务名。
+first=1
+for arg do
+    case $arg in
+      -*|'')   : ;;                       #(
+      *（*)    arg=${arg%%（*} ;;
+    esac
+    case $arg in
+      '')      : ;;                       # drop annotation-only / empty args
+      *)       if [ "$first" -eq 1 ]; then    #(
+                   set -- "$arg"
+                   first=0
+               else
+                   set -- "$@" "$arg"
+               fi ;;
+    esac
+done
+
 # Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
 DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'
 

@@ -29,6 +29,8 @@
 		1A6FBB000000000000000018 /* MediaSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000018 /* MediaSupport.swift */; };
 		1A6FBB000000000000000019 /* MessageSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000019 /* MessageSummary.swift */; };
 		1A6FBB00000000000000001A /* ImageViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA00000000000000001A /* ImageViewer.swift */; };
+		1A6FBB00000000000000001B /* MacWindowFrame.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA00000000000000001B /* MacWindowFrame.swift */; };
+		1A6FBB00000000000000001C /* MacCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA00000000000000001C /* MacCommands.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -57,6 +59,8 @@
 		1A6FAA000000000000000012 /* RobotAvatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RobotAvatar.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000013 /* ScrollBench.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollBench.swift; sourceTree = "<group>"; };
 		1A6FAA00000000000000000B /* MarkdownView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownView.swift; sourceTree = "<group>"; };
+		1A6FAA00000000000000001B /* MacWindowFrame.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacWindowFrame.swift; sourceTree = "<group>"; };
+		1A6FAA00000000000000001C /* MacCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacCommands.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -107,6 +111,7 @@
 			isa = PBXGroup;
 			children = (
 				1A6FAA000000000000000001 /* App.swift */,
+				1A6FCC00000000000000000B /* Mac */,
 				1A6FCC000000000000000001 /* Store */,
 				1A6FCC000000000000000009 /* Auth */,
 				1A6FCC00000000000000000A /* Hub */,
@@ -123,6 +128,15 @@
 				058557D7273AAEEB004C7B11 /* Preview Content */,
 			);
 			path = iosApp;
+			sourceTree = "<group>";
+		};
+		1A6FCC00000000000000000B /* Mac */ = {
+			isa = PBXGroup;
+			children = (
+				1A6FAA00000000000000001B /* MacWindowFrame.swift */,
+				1A6FAA00000000000000001C /* MacCommands.swift */,
+			);
+			path = Mac;
 			sourceTree = "<group>";
 		};
 		1A6FCC000000000000000001 /* Store */ = {
@@ -331,6 +345,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				1A6FBB000000000000000001 /* App.swift in Sources */,
+				1A6FBB00000000000000001B /* MacWindowFrame.swift in Sources */,
+				1A6FBB00000000000000001C /* MacCommands.swift in Sources */,
 				1A6FBB000000000000000014 /* HubStore.swift in Sources */,
 				1A6FBB000000000000000017 /* NotificationCoordinator.swift in Sources */,
 				1A6FBB000000000000000015 /* LoginView.swift in Sources */,

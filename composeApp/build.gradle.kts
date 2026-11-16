@@ -35,19 +35,22 @@ kotlin {
             isStatic = true
             export(project(":shared"))
         }
-        // Mac Catalyst（实验性，KT-40442 仍 Backlog，JetBrains 已承认的支持路径）：
-        // 同一 iosSimulatorArm64 target 上加「命名框架」承载 macabi 产物——保留默认框架不动，
-        // 模拟器/真机链路零变化；KGP 的 embedAndSignAppleFrameworkForXcode 在 Catalyst
-        // destination（IS_MACCATALYST=YES）下原生映射到本 target（XcodeEnvironment →
-        // AppleSdk.defineNativeTargets：macosx+arm64 → IOS_SIMULATOR_ARM64）。
+        // Mac Catalyst（实验性，KT-40442 仍 Backlog）：同一 iosSimulatorArm64 target 上加
+        // 「命名框架」承载 Catalyst 消费面——保留默认框架不动，模拟器/真机链路零变化；
+        // KGP 的 embedAndSignAppleFrameworkForXcode 在 Catalyst destination（IS_MACCATALYST=YES）
+        // 下原生映射到本 target（XcodeEnvironment → AppleSdk.defineNativeTargets：
+        // macosx+arm64 → IOS_SIMULATOR_ARM64，2026-11-17 反编译实证）。
         binaries.framework("catalyst") {
             baseName = "composeApp"          // 与默认框架同名产品，Xcode 消费面（-framework composeApp）不变
             isStatic = true                  // 与现行静态框架口径一致
             export(project(":shared"))       // SwiftUI 壳经 AgentBridge 消费 shared 类型，必须 export
-            // KGP 经 -Xbinary=macabi=true 传给 K/N（2.4.21 BinaryOptions 已注册该布尔选项），
-            // 产物 Mach-O platform=MACCATALYST。不要用默认（未命名）框架承载 macabi：
-            // ld 拒绝 platform=MACCATALYST(6) 对象进模拟器链接，会毒化现行 iOS 模拟器构建。
-            binaryOptions["macabi"] = "true"
+            // 2026-11-17 撤下 binaryOptions["macabi"]="true"：K/N 2.4.21 对该选项只有半吊子
+            // 支持——klib 依赖缓存成员被编成 MACCATALYST(minos15.0/sdk27.2)，主模块/stdlib
+            // 成员仍是 IOSSIMULATOR(14.0/26.5)，同一档内平台混杂（404 vs 3959）；且 macabi
+            // 口径编译出的 sqliter cinterop 引用 sqlite3_load_extension（macOS SDK
+            // libsqlite3.tbd 不导出），Catalyst ld 直接拒链。撤下后产物与默认框架同为全
+            // IOSSIMULATOR，由 scripts/stamp-catalyst-framework.sh 在 Xcode 侧统一原位
+            // 改写为 MACCATALYST（iossim 与 macabi 同为 arm64，目标码兼容）。
         }
     }
 

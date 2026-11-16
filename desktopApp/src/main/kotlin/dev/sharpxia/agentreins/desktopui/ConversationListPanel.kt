@@ -483,6 +483,9 @@ private fun NewConversationDialog(
     onDismiss: () -> Unit,
 ) {
     val gateways by client.observeGateways().collectAsState(initial = emptyList())
+    // v1.4.0 追补（2026-11-16 用户反馈「新建 agent 会话太容易误触」）：点行先确认再建——
+    // 每次新建都是真建一张独立卡（newMainSession 幂等键派生语义），确认层防手滑连建。
+    var confirmTarget by remember { mutableStateOf<Pair<String, UiAgentRef>?>(null) }
     Dialog(onDismissRequest = onDismiss) {
         Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surface) {
             Column(modifier = Modifier.width(420.dp).heightIn(max = 560.dp).padding(16.dp)) {
@@ -531,7 +534,7 @@ private fun NewConversationDialog(
                                         state = newConversationRowState(
                                             gw.gatewayId, agent.agentId, submittedKeys, creatingKey,
                                         ),
-                                        onCreate = { onSubmit(gw.gatewayId, agent.agentId) },
+                                        onCreate = { confirmTarget = gw.gatewayId to agent },
                                     )
                                 }
                             }
@@ -561,6 +564,44 @@ private fun NewConversationDialog(
                 Spacer(Modifier.height(4.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     TextButton(onClick = onDismiss) { Text("完成") }
+                }
+            }
+        }
+    }
+
+    // 新建确认层（v1.4.0 追补 2026-11-16；iOS confirmationDialog 同文案族）
+    confirmTarget?.let { (gatewayId, agent) ->
+        val newMain = hasMainCard(conversations, gatewayId, agent.agentId)
+        val title = agent.label.ifBlank { agent.agentId }
+        Dialog(onDismissRequest = { confirmTarget = null }) {
+            Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surface) {
+                Column(
+                    modifier = Modifier.width(340.dp).padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(
+                        if (newMain) "为「$title」新建主会话？" else "为「$title」新建会话？",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Text(
+                        "每次新建都会创建一张独立的会话卡（多个主会话互不干扰）。",
+                        fontSize = 12.sp,
+                        color = Color(0xFF888888),
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        TextButton(onClick = { confirmTarget = null }) { Text("取消") }
+                        Spacer(Modifier.width(8.dp))
+                        Button(onClick = {
+                            confirmTarget = null
+                            onSubmit(gatewayId, agent.agentId)
+                        }) {
+                            Text(if (newMain) "新建主会话" else "新建会话")
+                        }
+                    }
                 }
             }
         }

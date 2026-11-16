@@ -379,6 +379,9 @@ private struct NewConversationAgentRow: View {
     @State private var hub = HubStore.shared
     let gateway: UiGateway
     let agent: UiAgentRef
+    /// v1.4.0 追补（2026-11-16 用户反馈「新建 agent 会话太容易误触」）：点行先确认再建——
+    /// 每次新建都是真建一张独立卡（幂等键派生 newMainSession 语义），确认层防手滑连建。
+    @State private var confirming = false
 
     private var hasMainCard: Bool { hub.hasMainCard(gatewayId: gateway.gatewayId, agentId: agent.agentId) }
     private var submitted: Bool {
@@ -389,7 +392,7 @@ private struct NewConversationAgentRow: View {
 
     var body: some View {
         Button {
-            hub.createConversation(gatewayId: gateway.gatewayId, agentId: agent.agentId)
+            confirming = true
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: hasMainCard ? "plus.square.on.square" : "plus.circle.fill")
@@ -415,6 +418,18 @@ private struct NewConversationAgentRow: View {
         .accessibilityHint(submitted
             ? "已提交，等待校准成卡"
             : (hasMainCard ? "新建该 Agent 的一条主线会话" : "新建该 Agent 的会话"))
+        .confirmationDialog(
+            hasMainCard ? "为「\(title)」新建主会话？" : "为「\(title)」新建会话？",
+            isPresented: $confirming,
+            titleVisibility: .visible
+        ) {
+            Button(hasMainCard ? "新建主会话" : "新建会话") {
+                hub.createConversation(gatewayId: gateway.gatewayId, agentId: agent.agentId)
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("每次新建都会创建一张独立的会话卡（多个主会话互不干扰）。")
+        }
     }
 }
 
@@ -2816,6 +2831,11 @@ struct GatewaysView: View {
     @State private var revokeTarget: GatewayRef?
     /// 「管理会话」目标 agent（v1.4.0 SessionManagerSheet）。
     @State private var sessionManagerTarget: AgentRefKey?
+    /// 「新建会话/主会话」确认目标（v1.4.0 追补 2026-11-16：菜单相邻「管理会话」，手滑
+    /// 即真建一张卡——每点一次新幂等键真建，确认层防误触）。
+    @State private var createTarget: AgentRefKey?
+    @State private var createTargetHasMain = false
+    @State private var createTargetTitle = ""
     /// 分组节头改名（alert TextField 载体；nil = 关）。
     @State private var renamingGroupId: String?
     @State private var renameDraft = ""
@@ -2875,6 +2895,26 @@ struct GatewaysView: View {
         }
         .sheet(item: $sessionManagerTarget) { key in
             SessionManagerSheet(target: key)
+        }
+        // 「新建会话/主会话」确认层（v1.4.0 追补 2026-11-16）：与「管理会话…」菜单相邻，
+        // 手滑即真建一张卡——确认后才走 createConversation。
+        .confirmationDialog(
+            createTargetHasMain ? "为「\(createTargetTitle)」新建主会话？" : "为「\(createTargetTitle)」新建会话？",
+            isPresented: Binding(
+                get: { createTarget != nil },
+                set: { if !$0 { createTarget = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button(createTargetHasMain ? "新建主会话" : "新建会话") {
+                if let t = createTarget {
+                    hub.createConversation(gatewayId: t.gatewayId, agentId: t.agentId)
+                }
+                createTarget = nil
+            }
+            Button("取消", role: .cancel) { createTarget = nil }
+        } message: {
+            Text("每次新建都会创建一张独立的会话卡（多个主会话互不干扰）。")
         }
         .alert("分组改名", isPresented: Binding(
             get: { renamingGroupId != nil },
@@ -3054,7 +3094,9 @@ struct GatewaysView: View {
                 } label: { Label("移出分组", systemImage: "folder.badge.minus") }
             }
             Button {
-                hub.createConversation(gatewayId: gateway.gatewayId, agentId: agent.agentId)
+                createTargetHasMain = hub.hasMainCard(gatewayId: gateway.gatewayId, agentId: agent.agentId)
+                createTargetTitle = agent.label.isEmpty ? agent.agentId : agent.label
+                createTarget = AgentRefKey(gatewayId: gateway.gatewayId, agentId: agent.agentId)
             } label: {
                 Label(hub.hasMainCard(gatewayId: gateway.gatewayId, agentId: agent.agentId)
                       ? "新建主会话" : "新建会话",

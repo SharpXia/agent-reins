@@ -15,9 +15,22 @@ struct AgentReinsApp: App {
     }
 
     var body: some Scene {
+        #if targetEnvironment(macCatalyst)
+        // UxPlan item1：Mac 专属窗口面——初始 980×640、最小 720×480（.contentMinSize 以
+        // 内容最小尺寸作窗下限）、菜单栏命令挂载（Mac/MacCommands.swift）。窗口位置大小
+        // 记忆在 Mac/MacWindowFrame.swift（scene delegate 帧存取）。
+        WindowGroup {
+            RootView()
+                .frame(minWidth: 720, minHeight: 480)
+        }
+        .defaultSize(width: 980, height: 640)
+        .windowResizability(.contentMinSize)
+        .commands { MacHubCommands() }
+        #else
         WindowGroup {
             RootView()
         }
+        #endif
     }
 }
 
@@ -36,6 +49,27 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool { true }
+
+    #if targetEnvironment(macCatalyst)
+    /// UxPlan item1 复审修复（high）：SwiftUI App 生命周期**绕过** Info.plist 声明的
+    /// UISceneDelegateClassName（复审最小复现实证：marker 只打 APPDELEGATE / SwiftUI init /
+    /// CONTENT-APPEARED，DELEGATE-willConnect 不出现，双平台同）——MacWindowSceneDelegate
+    /// 必须在 scene 连接时以编程方式注入，窗口帧存取（恢复+三保存点）才有归宿。该配方已由
+    /// 复审复现实证（delegate 回调与 SwiftUI WindowGroup 内容同时正常）。
+    /// iOS 分支不实现本方法：scene 配置走系统默认，行为与改造前零差异。
+    func application(
+        _ application: UIApplication,
+        configurationForConnecting connectingSceneSession: UISceneSession,
+        options: UIScene.ConnectionOptions
+    ) -> UISceneConfiguration {
+        let config = UISceneConfiguration(
+            name: "Default Configuration",
+            sessionRole: connectingSceneSession.role
+        )
+        config.delegateClass = MacWindowSceneDelegate.self
+        return config
+    }
+    #endif
 
     /// 注册成功：deviceToken 转 hex（64 字节 = 128 hex 字符，即契约 token 的实际形态）经桥上报。
     /// 上报失败静默（未登录/网络不可达/设备被撤销 403 都只吞错）——token 上报是尽力而为的
@@ -80,6 +114,10 @@ struct RootView: View {
             }
         }
         .inkTheme()
+        // UxPlan item1：live resize 期间的窗口帧防抖存档（仅 Catalyst；见 MacWindowFrame.swift）。
+        #if targetEnvironment(macCatalyst)
+        .macWindowFrameSaver()
+        #endif
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { BackSwipe.attach() }
             // 崩溃防护（2026-11-07 UX 轮，0.5.4 真机锁屏解锁 SIGABRT）：离开前台即优雅断开

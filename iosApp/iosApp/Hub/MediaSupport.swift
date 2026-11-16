@@ -193,9 +193,41 @@ struct MessageAttachmentView: View {
     var body: some View {
         if attachment.source == "hub", let mediaId = attachment.mediaId {
             HubMediaThumbnail(mediaId: mediaId, fileName: attachment.fileName)
+                .contextMenu {
+                    // UxPlan item4（评审修正⑦(b)）：拷贝图片——走 HubMediaLoader（NSCache 命中
+                    // 或 #24 重取后解码，MediaSupport.swift:119-149），不是压缩管线
+                    //（:32-74 为上传前 MediaImageProcessing，不持展示位图）。
+                    // 双平台生效：iOS 长按同款，作为有意接受的 iOS 增益（与会话行右键同决策）。
+                    Button {
+                        Task { @MainActor in
+                            if let image = await HubMediaLoader.shared.image(for: mediaId) {
+                                UIPasteboard.general.image = image
+                            }
+                        }
+                    } label: {
+                        Label("拷贝图片", systemImage: "doc.on.doc")
+                    }
+                }
         } else if let url = externalURL {
             if url.scheme?.lowercased() == "https" {
                 RemoteImageView(url: url)
+                    .contextMenu {
+                        // UxPlan item4：外链图右键（拷贝图片 / 拷贝图片链接）。
+                        Button {
+                            Task { @MainActor in
+                                if let image = await RemoteImageLoader.shared.image(for: url) {
+                                    UIPasteboard.general.image = image
+                                }
+                            }
+                        } label: {
+                            Label("拷贝图片", systemImage: "doc.on.doc")
+                        }
+                        Button {
+                            UIPasteboard.general.string = url.absoluteString
+                        } label: {
+                            Label("拷贝图片链接", systemImage: "link")
+                        }
+                    }
             } else {
                 ExternalLinkChip(url: url)
             }

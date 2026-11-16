@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import PhotosUI
+import UniformTypeIdentifiers
 import composeApp
 
 /// Hub 主界面（P3 最小闭环，P4 起为唯一界面：网关直连面已退役）：会话 / 设置-设备。
@@ -79,6 +80,19 @@ struct HubRootView: View {
             if ProcessInfo.processInfo.environment["AGENTREINS_DEV_EARLIER"] == "1" {
                 await devEarlierWalk(hub)
             }
+        }
+        // UxPlan item2/item4：会话重命名 alert 提升至根视图——列表行右键与详情页 ellipsis
+        // 菜单共用同一目标态（hub.renameTarget）与文案；挂根视图两 tab 均可达。
+        .alert("重命名会话", isPresented: Binding(
+            get: { hub.renameTarget != nil },
+            set: { if !$0 { hub.cancelRename() } }
+        )) {
+            TextField("会话名称", text: Binding(
+                get: { hub.renameDraft },
+                set: { hub.renameDraft = $0 }
+            ))
+            Button("保存") { hub.submitRename() }
+            Button("取消", role: .cancel) { hub.cancelRename() }
         }
     }
 }
@@ -228,7 +242,8 @@ struct HubSyncPhaseBanner: View {
 /// wp-11：工具栏「新建」入口按 #16 聚合语义开放（无主线卡 agent 可新建、已有主线卡 agent 置灰说明）。
 struct HubHomeView: View {
     @State private var hub = HubStore.shared
-    @State private var showNewConversation = false
+    /// UxPlan item2：新建会话 sheet 态提升至 store（showNewConversation）——菜单 ⌘N 与
+    /// 本工具栏共用同一入口（iOS 行为不变）。
     /// v1.4.0 追补（2026-11-16 用户反馈「没看到删除入口」）：列表行长按删除目标（nil=关）。
     @State private var deleteTarget: UiConversation?
 
@@ -246,6 +261,22 @@ struct HubHomeView: View {
                         HubConversationRow(c: c)
                     }
                     .contextMenu {
+                        // UxPlan item4：右键补缺到详情页 ellipsis 菜单 parity（静音/重命名）。
+                        // 双平台生效：contextMenu 在 iOS 即长按菜单——作为有意接受的 iOS 增益
+                        //（评审修正⑦(a)：与详情页菜单同动作、同文案，不单独门控）。
+                        Button {
+                            hub.beginRename(c)
+                        } label: {
+                            Label("重命名", systemImage: "pencil")
+                        }
+                        Button {
+                            hub.setMuted(!hub.mutedConversations.contains(c.conversationId),
+                                         conversationId: c.conversationId)
+                        } label: {
+                            Label(hub.mutedConversations.contains(c.conversationId) ? "取消静音" : "静音此会话",
+                                  systemImage: hub.mutedConversations.contains(c.conversationId) ? "bell.fill" : "bell.slash")
+                        }
+                        Divider()
                         Button(role: .destructive) {
                             deleteTarget = c
                         } label: {
@@ -262,14 +293,14 @@ struct HubHomeView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
-                    showNewConversation = true
+                    hub.showNewConversation = true
                 } label: {
                     Image(systemName: "plus.message")
                 }
                 .accessibilityLabel("新建会话")
             }
         }
-        .sheet(isPresented: $showNewConversation) {
+        .sheet(isPresented: $hub.showNewConversation) {
             NewConversationSheet()
         }
         // #29 会话删除（v1.4.0 追补入口）：与详情页/管理 sheet 同款终态确认。
@@ -364,7 +395,10 @@ private struct NewConversationSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
+                    // UxPlan item3：Esc 关 sheet（本 sheet 无独立取消钮——Esc 直落完成/关闭；
+                    // iPad 硬件键盘同生效，行为增益非回归）。
                     Button("完成") { dismiss() }
+                        .keyboardShortcut(.cancelAction)
                 }
             }
         }
@@ -497,8 +531,8 @@ struct HubChatView: View {
     @State private var hub = HubStore.shared
     // v1.3 发送链：草稿文本与 pending 附件住在 HubStore 会话草稿层（可存活模型层，per
     // conversationId）——视图重建/切后台/滚动往返不丢（验收④），本视图只持 picker 选中态。
-    @State private var renaming = false
-    @State private var renameDraft = ""
+    // UxPlan item2/4：重命名态提升至 store（renameTarget/renameDraft，alert 挂 HubRootView）
+    // ——列表行右键与本页 ellipsis 菜单共用同一 alert 面与文案。
     @State private var compacting = false
     /// v1.4.0 追补（2026-11-16 用户反馈「没看到删除入口」）：#29 会话删除从管理 sheet 提到
     /// 会话详情页 ellipsis 菜单——终态确认挂本态。
@@ -940,6 +974,15 @@ struct HubChatView: View {
                 guard atBottom || ownSend else { return }
                 proxy.scrollTo("bottom", anchor: .bottom)
             }
+            .onChange(of: hub.jumpToBottomToken) { _, _ in
+                // UxPlan item2：菜单 ⌘↓ 回底——**立即滚动**（评审修正⑥：不经 tailSignature
+                // 通道、不依赖 atBottom；token 自增保连续触发每次都翻变），与回底按钮同路径
+                // （钉底在途逐帧重放兜底必到底）。
+                bottomJumpActive = true
+                withAnimation(.smooth(duration: 0.3)) {
+                    proxy.scrollTo("bottom", anchor: .bottom)
+                }
+            }
             .onChange(of: interactiveCard?.messageId) { _, newId in
                 // 交互卡挂到回复行（内容替换渲染，行高变化）出现时用户在底部即贴底；上翻
                 // 阅读中不打扰。
@@ -1014,6 +1057,7 @@ struct HubChatView: View {
                             .padding(9)
                             .background(Circle().fill(.thinMaterial))
                             .overlay(Circle().stroke(ink.borderTertiary, lineWidth: 1))
+                            .hoverCircle()
                     }
                     .padding(.trailing, 12)
                     .padding(.bottom, 6)
@@ -1114,6 +1158,19 @@ struct HubChatView: View {
             // #2'（2026-11-07 二轮）：原「运行中发送将排队」composer 提示移除——排队语义
             // 上移为发送消息自身的「排队中」状态徽标（信息在消息现场，不再占 composer 行）。
             HStack(spacing: 10) {
+                // UxPlan item8（评审修正③收口）：Mac 粘贴图片入口——onPasteCommand 在
+                // Catalyst 不可用（编译门禁实证），Cmd+V 图片收口为 PasteButton：系统托管
+                // 剪贴板读取与启停（无权限横幅噪声），非图内容（纯文本）忽略不建槽。
+                // 仅 Catalyst 增列，iOS composer 零变化。
+                #if targetEnvironment(macCatalyst)
+                PasteButton(payloadType: Data.self) { items in
+                    for data in items where UIImage(data: data) != nil {
+                        hub.addImageBytes(conversationId: conv.conversationId, data: data)
+                    }
+                }
+                .controlSize(.small)
+                .buttonBorderShape(.capsule)
+                #endif
                 // v1.3 发送链：图片选择入口（PHPicker 出程式面板，无需相册权限）；多选上限
                 // 9 张（契约 v1.2.1 attachments maxItems）。上传/失败细节在 pending 预览区呈现。
                 PhotosPicker(
@@ -1147,6 +1204,10 @@ struct HubChatView: View {
                         Image(systemName: "stop.circle.fill").font(.title2)
                     }
                     .accessibilityLabel("停止生成")
+                    // UxPlan item3：⌘. 停止生成（macOS 惯例的中止键），仅 Catalyst。
+                    #if targetEnvironment(macCatalyst)
+                    .keyboardShortcut(".", modifiers: .command)
+                    #endif
                 } else {
                     // #3 修复轮（2026-11-08）：防死锁——run 活跃但 activeRunId 缺失（映射未学习/
                     // 服务端聚合分叉）时**不再让禁用态 Stop 独占键位**：发送键照常可用（发送照常
@@ -1168,6 +1229,13 @@ struct HubChatView: View {
                             Image(systemName: "arrow.up.circle.fill").font(.title2)
                         }
                         .disabled(!draftHasContent)
+                        // UxPlan item3：⌘Return 发送——multiline TextField(axis:.vertical) 的
+                        // plain Return 即换行、onSubmit 不触发，「Enter 直发」需 composer 换
+                        // NSTextView（本轮 deferred）；⌘Return 与换行零冲突。仅 Catalyst 挂
+                        //（iPad 硬件键盘无此惯例，不引入歧义）。
+                        #if targetEnvironment(macCatalyst)
+                        .keyboardShortcut(.return, modifiers: .command)
+                        #endif
                     }
                     if isRunActive && !canCancelRun {
                         Text("结束中")
@@ -1219,8 +1287,7 @@ struct HubChatView: View {
                               systemImage: hub.mutedConversations.contains(conv.conversationId) ? "bell.fill" : "bell.slash")
                     }
                     Button {
-                        renameDraft = conv.label
-                        renaming = true
+                        hub.beginRename(conv)
                     } label: {
                         Label("重命名", systemImage: "pencil")
                     }
@@ -1241,15 +1308,7 @@ struct HubChatView: View {
                 }
             }
         }
-        .alert("重命名会话", isPresented: $renaming) {
-            TextField("会话名称", text: $renameDraft)
-            Button("保存") {
-                let t = renameDraft.trimmingCharacters(in: .whitespaces)
-                guard !t.isEmpty else { return }
-                hub.rename(conv, to: t)
-            }
-            Button("取消", role: .cancel) {}
-        }
+        // 重命名 alert 已提升至 HubRootView（UxPlan item2/item4）。
         // #29 会话删除（v1.4.0 追补入口）：同管理 sheet 终态确认文案；删除成功由 store
         // 乐观关页（selected=nil + chatPush=false）退回列表。
         .confirmationDialog(
@@ -1285,6 +1344,22 @@ struct HubChatView: View {
         }
         .onAppear { hub.open(conv) }
         .onDisappear { if hub.selected?.conversationId == conv.conversationId { hub.closeConversation() } }
+        // UxPlan item2：菜单 ⌘⌫ 删除请求消费——复用本页既有终态确认弹层（deletingConversation）
+        // 与 dismiss 关页链；确认语义留在视图层，store 只置位（Mac/MacCommands.swift 触发）。
+        .onChange(of: hub.menuDeleteRequested) { _, requested in
+            guard requested else { return }
+            hub.menuDeleteRequested = false
+            deletingConversation = true
+        }
+        #if targetEnvironment(macCatalyst)
+        // UxPlan item8：Mac 拖图入列（hub.addImageBytes，与 PhotosPicker 同槽位链，压缩上限
+        // 沿用 MediaSupport R9）。粘贴通道收口见 composer 内 PasteButton——onPasteCommand
+        // 在 Catalyst 不可用（编译门禁实证：'onPasteCommand(of:perform:)' 标 iOS 域 unavailable）。
+        .onDrop(of: [UTType.image], isTargeted: nil) { providers in
+            hubIngestImages(from: providers)
+            return true
+        }
+        #endif
         // wp-12：持续已读上报（桌面 maxRenderedSeq 驱动 LaunchedEffect 同型，替代旧
         // appear+400ms 单次取值）——onAppear 首报（首帧慢于旧 400ms 定时器也照报，快照
         // 先到不漏）+ onChange 增量推进（会话打开期间新 final/streaming 行渲染即上报，
@@ -1363,6 +1438,29 @@ struct HubChatView: View {
         }
         guard !fresh.isEmpty else { return }
         hub.addPickedImages(conversationId: conv.conversationId, items: fresh)
+    }
+
+    /// UxPlan item8：拖拽图片统一入列（Catalyst-only 消费）——hub.addImageBytes
+    /// （Data 型槽位链，评审修正④）；只对本页会话生效（其他页面拖入无效）。
+    private func hubIngestImages(from providers: [NSItemProvider]) {
+        guard hub.isLoggedIn,
+              hub.selected?.conversationId == conv.conversationId else { return }
+        for provider in providers {
+            // UX 复审意见③：通用 UTType.image.identifier 对具体注册类型（public.png /
+            // public.heic 等）的符合性匹配未实证——先读 registeredTypeIdentifiers 按
+            // 具体图片类型取数，无命中再退通用 image identifier；单 provider 取数失败
+            // 静默跳过（guard return），不影响其余拖入项。实机走查（Finder PNG/HEIC、
+            // 浏览器拖图）仍为待验项。
+            let typeID = provider.registeredTypeIdentifiers.first {
+                UTType($0)?.conforms(to: .image) == true
+            } ?? UTType.image.identifier
+            provider.loadDataRepresentation(forTypeIdentifier: typeID) { data, _ in
+                guard let data, !data.isEmpty else { return }
+                Task { @MainActor in
+                    hub.addImageBytes(conversationId: conv.conversationId, data: data)
+                }
+            }
+        }
     }
 
     /// v1.4 查看器统一打开面：页集非空才弹（空集不动作——附件全为降级 chip/失败态时
@@ -1452,6 +1550,7 @@ private struct DraftAttachmentChipsRow: View {
             .accessibilityLabel(d.error != nil
                 ? "图片上传失败，点按重试"
                 : (d.uploading ? "图片上传中" : "已选图片附件，点按查看"))
+            .hoverHighlight(cornerRadius: 10)
             // ✕ 撤除角标
             Button {
                 onRemove(d.id)
@@ -1586,6 +1685,7 @@ private struct SlashCommandPanel: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .hoverHighlight(cornerRadius: 9)
                         .accessibilityLabel("\(cmd.name)：\(cmd.summary)（点按直接发送）")
                         // 2026-11-08 修复轮：行尾 ✎ = 预填续写参数（原「带参命令点行预填」
                         // 行为移到此处，点行语义让位给直接发送）。
@@ -1599,6 +1699,7 @@ private struct SlashCommandPanel: View {
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .hoverHighlight(cornerRadius: 9)
                         .accessibilityLabel("把 \(cmd.name) 填入输入框续写参数")
                     }
                     if index < suggestions.count - 1 {
@@ -1723,6 +1824,7 @@ private struct ModelsInteractiveCard: View {
         .buttonStyle(.plain)
         .disabled(!available)
         .opacity(available ? 1 : 0.45)
+        .hoverHighlight(cornerRadius: 8)
         .accessibilityLabel("切换模型到 \(item.name)\(isCurrent ? "（当前）" : "")\(available ? "" : "（不可用）")")
     }
 }
@@ -1810,6 +1912,7 @@ private struct CommandOptionsCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .hoverHighlight(cornerRadius: 8)
         .accessibilityLabel("\(command.name) 设为 \(choice.label)")
     }
 }
@@ -1992,6 +2095,12 @@ private final class ScrollProbeBox {
                             .foregroundStyle(.red.opacity(0.85))
                     }
                 }
+                // 评审补充项（原清单遗漏）：宽窗气泡/正文 maxWidth 帽——Mac 全屏 ~1500pt+
+                // 下长回复一行拉满全宽是首屏即撞的观感坑。640pt 帽 Catalyst-only（iPad 布局
+                // 不动，硬边界）；alignment 保住用户行右贴/助手行左贴的原有落位。
+                #if targetEnvironment(macCatalyst)
+                .frame(maxWidth: 640, alignment: m.role == "user" ? .trailing : .leading)
+                #endif
                 .contextMenu { messageContextMenu }
                 if m.role != "user" { Spacer(minLength: 40) }
             }
@@ -2361,13 +2470,17 @@ private struct AddGatewaySheet: View {
                 }
                 .disabled(!nameValid || submitting)
                 .accessibilityHint("创建后展示一次性 Bridge Token")
+                // UxPlan item3：Return = 创建（valid 时）。
+                .keyboardShortcut(.defaultAction)
             }
         }
         .navigationTitle("添加网关")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
+                // UxPlan item3：Esc 关 sheet。
                 Button("取消") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
             }
         }
     }
@@ -2410,7 +2523,9 @@ private struct AddGatewaySheet: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
+                // UxPlan item3：Esc 关 sheet。
                 Button("完成") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
             }
         }
     }
@@ -2467,12 +2582,18 @@ private struct RotateBridgeTokenSheet: View {
                     }
                 }
                 .disabled(submitting)
+                // UxPlan item3：Return = 轮换提交。
+                .keyboardShortcut(.defaultAction)
             }
         }
         .navigationTitle("轮换 Token")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+            ToolbarItem(placement: .cancellationAction) {
+                // UxPlan item3：Esc 关 sheet。
+                Button("取消") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
         }
     }
 
@@ -2512,7 +2633,11 @@ private struct RotateBridgeTokenSheet: View {
         .navigationTitle("轮换 Token")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } }
+            ToolbarItem(placement: .confirmationAction) {
+                // UxPlan item3：Esc 关 sheet。
+                Button("完成") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
         }
     }
 }
@@ -2570,7 +2695,11 @@ private struct RevokeGatewaySheet: View {
             .navigationTitle("撤销网关")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) {
+                    // UxPlan item3：Esc 关 sheet（撤销为破坏性钮，不挂 Return 默认键）。
+                    Button("取消") { dismiss() }
+                        .keyboardShortcut(.cancelAction)
+                }
             }
         }
         .presentationDetents([.medium])
@@ -2652,7 +2781,9 @@ private struct SessionManagerSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
+                    // UxPlan item3：Esc 关 sheet。
                     Button("完成") { dismiss() }
+                        .keyboardShortcut(.cancelAction)
                 }
             }
         }
@@ -2802,7 +2933,11 @@ private struct GroupPickerSheet: View {
             .navigationTitle("加入分组")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) {
+                    // UxPlan item3：Esc 关 sheet。
+                    Button("取消") { dismiss() }
+                        .keyboardShortcut(.cancelAction)
+                }
             }
         }
         .presentationDetents([.medium])
@@ -3438,5 +3573,50 @@ private struct AgentOnlineDot: View {
             }
         }
         .onAppear { hub.fetchAgentStatusIfNeeded(gatewayId: gatewayId, agentId: agentId) }
+    }
+}
+
+// ── UxPlan item7：自绘按钮面 hover 反馈（指针设备高亮；触屏无 hover 事件即空转，跨平台
+//    无害，故不作 Catalyst 门控）——Catalyst 系统控件自动 hover，.buttonStyle(.plain) 自绘
+//    面需补。半透明 primary 覆盖层压在既有底色上，allowsHitTesting 关闭不抢手势。 ──
+
+private struct HoverFillModifier: ViewModifier {
+    @State private var hovering = false
+    var cornerRadius: CGFloat
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .fill(Color.primary.opacity(hovering ? 0.07 : 0))
+                    .allowsHitTesting(false)
+            )
+            .onHover { hovering = $0 }
+    }
+}
+
+private struct HoverCircleModifier: ViewModifier {
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(
+                Circle()
+                    .fill(Color.primary.opacity(hovering ? 0.07 : 0))
+                    .allowsHitTesting(false)
+            )
+            .onHover { hovering = $0 }
+    }
+}
+
+private extension View {
+    /// 矩形交互面 hover 高亮（斜杠面板行/交互卡按钮/附件 chip）。
+    func hoverHighlight(cornerRadius: CGFloat) -> some View {
+        modifier(HoverFillModifier(cornerRadius: cornerRadius))
+    }
+
+    /// 圆形交互面 hover 高亮（回底悬浮按钮）。
+    func hoverCircle() -> some View {
+        modifier(HoverCircleModifier())
     }
 }

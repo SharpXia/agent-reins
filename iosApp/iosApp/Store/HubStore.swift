@@ -464,6 +464,48 @@ final class HubStore {
     /// 跨登出保留——静音是本地用户偏好，非账号数据）。
     private(set) var mutedConversations: Set<String> = HubStore.loadMutedConversations()
 
+    // ---------- UxPlan item2/item4：Mac 菜单与命令面（Catalyst 消费；状态在 store 供
+    //    菜单栏 Commands 与视图层共用同一入口；iOS 行为不变——只是态搬家） ----------
+
+    /// 新建会话 sheet 开关（提升自 HubHomeView 本地 @State）：菜单 ⌘N 与列表工具栏「+」
+    /// 共用同一 sheet 挂载点（同一 sheet 同一入口）。
+    var showNewConversation = false
+
+    /// 回底请求 token（菜单 ⌘↓）：**自增计数器**——评审修正⑥：own-send 信号在
+    /// onChange(tailSignature) 里随下一条消息变化才消费（回底必须即时）、且 Bool 信号重复
+    /// 触发不翻变（连续两次 ⌘↓ 第二次失效），故用 token。HubChatView onChange 立即消费滚动。
+    private(set) var jumpToBottomToken = 0
+    func requestJumpToBottom() { jumpToBottomToken += 1 }
+
+    /// 会话重命名目标（提升自 HubChatView 本地 @State）：列表行右键与详情页 ellipsis 菜单
+    /// 共用同一 alert 面与文案（防两份文案漂移）；alert 挂 HubRootView（两 tab 均可达）。
+    var renameTarget: UiConversation?
+    var renameDraft = ""
+
+    /// 打开重命名（预填当前 label）。
+    func beginRename(_ conv: UiConversation) {
+        renameDraft = conv.label
+        renameTarget = conv
+    }
+
+    /// 提交重命名（alert「保存」）：空串静默不提交（与旧详情页口径一致）。
+    func submitRename() {
+        guard let conv = renameTarget else { return }
+        renameTarget = nil
+        let t = renameDraft.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty else { return }
+        rename(conv, to: t)
+    }
+
+    /// 关闭重命名（alert「取消」/ Esc / 点外部）。
+    func cancelRename() {
+        renameTarget = nil
+    }
+
+    /// 菜单栏删除请求（⌘⌫）：置位后由 HubChatView onChange 消费——复用其既有终态确认弹层
+    /// 与 dismiss 关页链（确认语义留在视图层，store 侧不直接删）。
+    var menuDeleteRequested = false
+
     /// （v1.3 通知摘要轮：回复通知触发面自会话列表 unread 差异迁移到 message.created 事件
     /// 旁路——摘要需要消息正文与附件数（剥 markdown / 纯附件「[图片]×N」），卡片 preview
     /// 只是裸 content 给不出附件计数；见 noteReplyMessage。旧 unread 差异面随之退役。）
@@ -1029,6 +1071,33 @@ final class HubStore {
         }
     }
 
+    /// 图片字节入列（UxPlan item8：Mac 粘贴/拖拽路径；评审修正④）：来源无 PhotosPickerItem
+    /// 可包——直接建「上传中」槽 + 走与 PhotosPicker 同一压缩/上传链（见
+    /// prepareAndUploadSlot），pending 区/补传发送/撤选既有链零改动。槽位双 nil 标识
+    ///（无 picker 来源）；去重不做（粘贴/拖拽无稳定标识，调用方保证同一次手势只投递一次）；
+    /// 槽位满 maxDraftAttachments 静默忽略溢出（与 addPickedImages 同口径）。
+    @MainActor
+    func addImageBytes(conversationId: String, data: Data) {
+        guard isLoggedIn else { return }
+        var d = draft(for: conversationId)
+        guard d.attachments.count < Self.maxDraftAttachments else { return }
+        let slot = DraftAttachment(
+            id: UUID(), pickerItemIdentifier: nil, pickerItemHash: nil,
+            preview: nil, fileName: Self.draftFileName(), upload: nil, error: nil,
+            uploading: true, sourceData: nil,
+        )
+        d.attachments.append(slot)
+        drafts[conversationId] = d
+        let task = Task { @MainActor () -> UiMediaUpload? in
+            guard !data.isEmpty else {
+                self.failSlot(conversationId, slotId: slot.id, "无法读取所选图片")
+                return nil
+            }
+            return await self.prepareAndUploadSlot(conversationId, slotId: slot.id, raw: data)
+        }
+        draftUploadTasks[slot.id] = task
+    }
+
     /// 槽位 ✕ 撤除（撤除在途/失败/就绪槽均可；在途 #23 请求不撤回，回调落空槽为 no-op）。
     /// 草稿随之全空时同步清残留发送失败提示。
     func removeDraftAttachment(_ conversationId: String, slotId: UUID) {
@@ -1153,6 +1222,7 @@ final class HubStore {
 
     /// 选图期槽处理（store 承接原视图侧链）：拷入字节 → 压缩（R9）→ 预览/字节落位 →
     /// #23 上传 → 就绪/失败落位。失败呈显式失败态（不静默），可点重试/发送时补传。
+    /// 压缩/落位/上传三步抽 prepareAndUploadSlot 共享（Mac 粘贴/拖拽路径同链）。
     @MainActor
     private func processDraftSlot(_ conversationId: String, slotId: UUID, item: PhotosPickerItem) {
         let task = Task { @MainActor () -> UiMediaUpload? in
@@ -1160,20 +1230,26 @@ final class HubStore {
                 self.failSlot(conversationId, slotId: slotId, "无法读取所选图片")
                 return nil
             }
-            guard let prepared = MediaImageProcessing.prepare(raw, fileName: Self.draftFileName()) else {
-                self.failSlot(conversationId, slotId: slotId, "无法识别的图片格式")
-                return nil
-            }
-            self.mutateSlot(conversationId, slotId: slotId) {
-                $0.preview = MediaImageProcessing.decodeForDisplay(prepared.data, maxPixel: 512)
-                $0.sourceData = prepared.data
-                $0.fileName = prepared.fileName
-            }
-            return await self.performUpload(conversationId, slotId: slotId, data: prepared.data,
-                                            mime: prepared.mime, fileName: prepared.fileName,
-                                            width: prepared.width, height: prepared.height)
+            return await self.prepareAndUploadSlot(conversationId, slotId: slotId, raw: raw)
         }
         draftUploadTasks[slotId] = task
+    }
+
+    /// 压缩→落位→上传共享核（PhotosPicker 路径与 Mac 粘贴/拖拽路径共用；链路逐字节一致）。
+    @MainActor
+    private func prepareAndUploadSlot(_ conversationId: String, slotId: UUID, raw: Data) async -> UiMediaUpload? {
+        guard let prepared = MediaImageProcessing.prepare(raw, fileName: Self.draftFileName()) else {
+            self.failSlot(conversationId, slotId: slotId, "无法识别的图片格式")
+            return nil
+        }
+        self.mutateSlot(conversationId, slotId: slotId) {
+            $0.preview = MediaImageProcessing.decodeForDisplay(prepared.data, maxPixel: 512)
+            $0.sourceData = prepared.data
+            $0.fileName = prepared.fileName
+        }
+        return await self.performUpload(conversationId, slotId: slotId, data: prepared.data,
+                                        mime: prepared.mime, fileName: prepared.fileName,
+                                        width: prepared.width, height: prepared.height)
     }
 
     /// #23 上传执行（选图/重试/发送补传三路共用；完成落 upload/error 态，不动用户已见槽序）。

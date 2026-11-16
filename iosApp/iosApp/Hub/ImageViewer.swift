@@ -114,6 +114,8 @@ struct ImageViewerView: View {
             .onChange(of: index) { _, _ in resetToken += 1 }
 
             // 右上关闭按钮（验收）。黑底白字，半透明圆底。
+            // UxPlan item6：Esc 关闭查看器（.cancelAction；鼠标下拉关闭的实机手感走查
+            // 为待验项，手势面本轮不动）。
             Button {
                 onDismiss()
             } label: {
@@ -123,6 +125,7 @@ struct ImageViewerView: View {
                     .frame(width: 32, height: 32)
                     .background(Circle().fill(.white.opacity(0.18)))
             }
+            .keyboardShortcut(.cancelAction)
             .padding(.trailing, 16)
             .padding(.top, 8)
             .accessibilityLabel("关闭图片查看器")

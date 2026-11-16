@@ -229,6 +229,8 @@ struct HubSyncPhaseBanner: View {
 struct HubHomeView: View {
     @State private var hub = HubStore.shared
     @State private var showNewConversation = false
+    /// v1.4.0 追补（2026-11-16 用户反馈「没看到删除入口」）：列表行长按删除目标（nil=关）。
+    @State private var deleteTarget: UiConversation?
 
     var body: some View {
         Group {
@@ -242,6 +244,13 @@ struct HubHomeView: View {
                         HubChatView(conv: c)
                     } label: {
                         HubConversationRow(c: c)
+                    }
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            deleteTarget = c
+                        } label: {
+                            Label("删除会话…", systemImage: "trash")
+                        }
                     }
                 }
             }
@@ -262,6 +271,23 @@ struct HubHomeView: View {
         }
         .sheet(isPresented: $showNewConversation) {
             NewConversationSheet()
+        }
+        // #29 会话删除（v1.4.0 追补入口）：与详情页/管理 sheet 同款终态确认。
+        .confirmationDialog(
+            "删除该会话？",
+            isPresented: Binding(
+                get: { deleteTarget != nil },
+                set: { if !$0 { deleteTarget = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("删除", role: .destructive) {
+                if let t = deleteTarget { hub.deleteConversation(t) }
+                deleteTarget = nil
+            }
+            Button("取消", role: .cancel) { deleteTarget = nil }
+        } message: {
+            Text("删除为终态：会话消息与后台任务一并删除，不可恢复。")
         }
         .task { hub.watchConversations(); hub.watchGateways() }
     }
@@ -459,6 +485,9 @@ struct HubChatView: View {
     @State private var renaming = false
     @State private var renameDraft = ""
     @State private var compacting = false
+    /// v1.4.0 追补（2026-11-16 用户反馈「没看到删除入口」）：#29 会话删除从管理 sheet 提到
+    /// 会话详情页 ellipsis 菜单——终态确认挂本态。
+    @State private var deletingConversation = false
     /// wp-7①：底部锚定态（初始锚定；只被用户驱动的滚动翻转，见 setAtBottom）。
     /// Dev 走查豁免（AGENTREINS_DEV_ATBOTTOM=0）：初始即「用户已上滑离底」态——自动化
     /// 环境无触摸手势翻转不了本态，置 0 模拟真实用户翻历史时的锚定态（贴底跟随让路，
@@ -1184,6 +1213,11 @@ struct HubChatView: View {
                         Label(compacting ? "压缩中…" : "压缩上下文", systemImage: "rectangle.compress.vertical")
                     }
                     .disabled(compacting || conv.hasActiveRun)
+                    Button(role: .destructive) {
+                        deletingConversation = true
+                    } label: {
+                        Label("删除会话…", systemImage: "trash")
+                    }
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
@@ -1197,6 +1231,20 @@ struct HubChatView: View {
                 hub.rename(conv, to: t)
             }
             Button("取消", role: .cancel) {}
+        }
+        // #29 会话删除（v1.4.0 追补入口）：同管理 sheet 终态确认文案；删除成功由 store
+        // 乐观关页（selected=nil + chatPush=false）退回列表。
+        .confirmationDialog(
+            "删除该会话？",
+            isPresented: $deletingConversation,
+            titleVisibility: .visible
+        ) {
+            Button("删除", role: .destructive) {
+                hub.deleteConversation(conv)
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("删除为终态：会话消息与后台任务一并删除，不可恢复。")
         }
         // #3（2026-11-07 UX 轮）：本地删除二次确认——仅清本机投影行（脏数据清理出口），
         // 不影响服务端历史；服务端数据经快照/校准回流可能重新出现（弹层文案明示）。

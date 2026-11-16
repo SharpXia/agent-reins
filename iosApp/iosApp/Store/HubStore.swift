@@ -692,6 +692,16 @@ final class HubStore {
     /// 撤行（正打开该会话则一并关闭）；随后桥直调。乐观删与事件级联（session.removed →
     /// 投影行删 → Flow 推送）双路径均幂等——验收 L6：乐观删后事件再删不告警不重复。
     /// 失败（未登录/网络不可达）显式降级态可重试；乐观移除的行由下次 #28 重拉收敛回权威清单。
+    /// 会话删除入口包装（2026-11-16 追补：会话详情页菜单/列表行 contextMenu）：UiConversation →
+    /// SessionSummary（isMainSession 不参与删除判定，占位 false；删除判定只用 conversationId）。
+    func deleteConversation(_ conv: UiConversation, onDone: ((Bool) -> Void)? = nil) {
+        deleteConversation(
+            SessionSummary(conversationId: conv.conversationId, label: conv.label,
+                           lastActivityAt: conv.lastActiveAt, isMainSession: false),
+            onDone: onDone
+        )
+    }
+
     func deleteConversation(_ summary: SessionSummary, onDone: ((Bool) -> Void)? = nil) {
         let cid = summary.conversationId
         guard !deletingSessionIds.contains(cid) else { return }

@@ -321,7 +321,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "cd \"$SRCROOT/..\"\n./gradlew :composeApp:embedAndSignAppleFrameworkForXcode";
+			shellScript = "cd \"$SRCROOT/..\"\nif [ \"$IS_MACCATALYST\" = \"YES\" ]; then\n\t./gradlew :composeApp:embedAndSignCatalystAppleFrameworkForXcode\n\t# K/N 2.4.21 无 macabi 产物面（binaryOptions[\"macabi\"] 落到编译器是未知选项、无效），\n\t# embed 产出成员平台是 IOSSIMULATOR，Catalyst ld 拒链。把嵌入式静态框架成员平台\n\t# 原位改写为 MACCATALYST；仅 Catalyst 链路执行，iOS/模拟器分支零变化。\n\t# 细节见 scripts/stamp-catalyst-framework.sh（幂等：哨兵未过期即跳过）。\n\tFRAMEWORK_BIN=\"composeApp/build/xcode-frameworks/$CONFIGURATION/$SDK_NAME/composeApp.framework/composeApp\"\n\tif [ ! -f \"$FRAMEWORK_BIN\" ]; then\n\t\tFRAMEWORK_BIN=$(ls composeApp/build/xcode-frameworks/$CONFIGURATION/macosx*/composeApp.framework/composeApp 2>/dev/null | head -1)\n\tfi\n\tbash \"$SRCROOT/../scripts/stamp-catalyst-framework.sh\" \"$FRAMEWORK_BIN\"\nelse\n\t./gradlew :composeApp:embedAndSignAppleFrameworkForXcode\nfi";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -480,6 +480,14 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "\"iosApp/Preview Content\"";
 				ENABLE_PREVIEWS = YES;
+				/* Mac Catalyst（实验性）：Kotlin 框架经命名 catalyst 框架（全 IOSSIMULATOR 平台）
+				   在 Catalyst destination（SDK_NAME=macosx + IS_MACCATALYST=YES）下由
+				   embedAndSignCatalystAppleFrameworkForXcode 提供，再由 Compile Kotlin 脚本段的
+				   scripts/stamp-catalyst-framework.sh 把成员平台统一原位改写为 MACCATALYST。
+				   ARCHS 锁 arm64：Catalyst 默认 universal（arm64+x86_64）会要 iosX64 target，本仓未建。 */
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				SUPPORTS_MACCATALYST = YES;
+				"PRODUCT_BUNDLE_IDENTIFIER[sdk=macosx*]" = "$(BUNDLE_ID).macCatalyst";
 				MARKETING_VERSION = 0.1.0;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
@@ -500,7 +508,12 @@
 				PRODUCT_NAME = "${APP_NAME}";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				/* iOS 链接行本就带 -dead_strip（Xcode 默认），Catalyst (macosx SDK) 默认不带；
+				   K/N 静态框架的 klib 缓存成员经 __Konan_init_* 全量拉入，无 dead_strip 时
+				   sqliter cinterop 里从未被调用的 sqlite3_load_extension 包装（macOS SDK
+				   libsqlite3.tbd 不导出该符号）会成为未解析符号拒链。显式声明=两平台同口径。 */
+				DEAD_CODE_STRIPPING = YES;
+				TARGETED_DEVICE_FAMILY = "1,2,6";
 			};
 			name = Debug;
 		};
@@ -513,6 +526,14 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "\"iosApp/Preview Content\"";
 				ENABLE_PREVIEWS = YES;
+				/* Mac Catalyst（实验性）：Kotlin 框架经命名 catalyst 框架（全 IOSSIMULATOR 平台）
+				   在 Catalyst destination（SDK_NAME=macosx + IS_MACCATALYST=YES）下由
+				   embedAndSignCatalystAppleFrameworkForXcode 提供，再由 Compile Kotlin 脚本段的
+				   scripts/stamp-catalyst-framework.sh 把成员平台统一原位改写为 MACCATALYST。
+				   ARCHS 锁 arm64：Catalyst 默认 universal（arm64+x86_64）会要 iosX64 target，本仓未建。 */
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				SUPPORTS_MACCATALYST = YES;
+				"PRODUCT_BUNDLE_IDENTIFIER[sdk=macosx*]" = "$(BUNDLE_ID).macCatalyst";
 				MARKETING_VERSION = 0.1.0;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
@@ -533,7 +554,12 @@
 				PRODUCT_NAME = "${APP_NAME}";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				/* iOS 链接行本就带 -dead_strip（Xcode 默认），Catalyst (macosx SDK) 默认不带；
+				   K/N 静态框架的 klib 缓存成员经 __Konan_init_* 全量拉入，无 dead_strip 时
+				   sqliter cinterop 里从未被调用的 sqlite3_load_extension 包装（macOS SDK
+				   libsqlite3.tbd 不导出该符号）会成为未解析符号拒链。显式声明=两平台同口径。 */
+				DEAD_CODE_STRIPPING = YES;
+				TARGETED_DEVICE_FAMILY = "1,2,6";
 			};
 			name = Release;
 		};

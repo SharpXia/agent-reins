@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.dtd.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Mac Catalyst 专用（2026-11-17 §8-3 收口）：与 AgentReins.entitlements 同构，
+	     仅 keychain 访问组跟 Catalyst bundle id——Catalyst 分发 profile 只授权
+	     .macCatalyst 组，沿用 iOS 组签名即被拒（运行期 -34018 同族）。
+	     接线 = pbxproj CODE_SIGN_ENTITLEMENTS[sdk=macosx*]，iOS 面零变化。 -->
+	<key>aps-environment</key>
+	<string>development</string>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)dev.sharpxia.agentreins.macCatalyst</string>
+	</array>
+</dict>
+</plist>

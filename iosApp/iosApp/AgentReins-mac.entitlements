@@ -5,7 +5,15 @@
 	<!-- Mac Catalyst 专用（2026-11-17 §8-3 收口）：与 AgentReins.entitlements 同构，
 	     仅 keychain 访问组跟 Catalyst bundle id——Catalyst 分发 profile 只授权
 	     .macCatalyst 组，沿用 iOS 组签名即被拒（运行期 -34018 同族）。
-	     接线 = pbxproj CODE_SIGN_ENTITLEMENTS[sdk=macosx*]，iOS 面零变化。 -->
+	     接线 = pbxproj CODE_SIGN_ENTITLEMENTS[sdk=macosx*]，iOS 面零变化。
+	     2026-11-18 增 App Sandbox 组：Mac App Store/TestFlight 上传硬性要求
+	     （altool 90296）；网络出站与用户选文件为沙箱白名单面。 -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
 	<key>aps-environment</key>
 	<string>development</string>
 	<key>keychain-access-groups</key>

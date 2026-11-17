@@ -312,6 +312,22 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             archive 2>&1 | tail -40
 
+      - name: Re-sign app with App Sandbox entitlements (distribution)
+        run: |
+          # export 对 macOS 不重签内层 app（只做 pkg 包装），entitlements 必须在 archive
+          # 后自己补：App Sandbox 是 Mac App Store/TestFlight 硬性要求（altool 90296）。
+          # 直接 codesign 不做构建设置替换——$(AppIdentifierPrefix) 显式展开为 TEAM_ID；
+          # aps-environment 按分发面惯例落 production（development 仅开发签名用）。
+          # 本机实证：sed 产物 lint 过 + 签名后 DER entitlements 六键齐（sandbox/aps/
+          # network.client/user-selected/keychain 组）。
+          sed -e "s/\$(AppIdentifierPrefix)/${{ secrets.APPLE_TEAM_ID }}\./" \
+              -e "s|<string>development</string>|<string>production</string>|" \
+              iosApp/iosApp/AgentReins-mac.entitlements > "$RUNNER_TEMP/entitlements-dist.plist"
+          plutil -lint "$RUNNER_TEMP/entitlements-dist.plist"
+          codesign --force --sign "Apple Distribution" \
+            --entitlements "$RUNNER_TEMP/entitlements-dist.plist" \
+            "build/AgentReins-catalyst.xcarchive/Products/Applications/AgentReins.app"
+
       - name: Export PKG (TestFlight / app-store)
         run: |
           # macOS 导出产物是 .pkg（不是 ipa）；method=app-store + automatic 签名——

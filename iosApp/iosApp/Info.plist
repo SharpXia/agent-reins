@@ -24,6 +24,9 @@
 	<false/>
 	<key>HubDefaultBaseURL</key>
 	<string>https://$(HUB_PUBLIC_HOST)/v1</string>
+	<key>LSApplicationCategoryType</key>
+	<!-- Mac App Store/TestFlight 上传硬性要求（altool 90242）；iOS 忽略此键 -->
+	<string>public.app-category.productivity</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>

@@ -289,10 +289,12 @@ jobs:
           case "$MV" in *.*) ;; *) MV="0.1.0" ;; esac
           echo "BUILD_NUMBER=$BUILD" >> "$GITHUB_ENV"
           echo "MARKETING_VERSION=$MV" >> "$GITHUB_ENV"
-          # automatic 签名（iOS job 走 manual 的理由不适用于 Catalyst：manual 按名引用被
-          # provisioning 解析器恒判无匹配——profile ACTIVE/绑定正确仍被过滤，本机与 CI 双实证；
-          # 自动签名 API key 会话本机实证直接解析成功），分发证书沿用 keychain 已导入的
-          # Apple Distribution，allowProvisioningUpdates 经 API key 建/取 profile。
+          # archive 不签名（CODE_SIGNING_ALLOWED=NO）：CLI archive 的签名评估是死结——
+          # manual 按名引用被 provisioning 解析器恒判无匹配（profile ACTIVE/绑定正确仍被过滤，
+          # CI+本机双实证）、automatic 按「开发模式」评估讨要 Mac Development 证书（CI 只导
+          # Apple Distribution）。签名全责移交 export：export 是分发面评估，Xcode 自动管理
+          # profile + Apple Distribution 重签，本机从未签名 archive 到出已签 .pkg 全链实证
+          # （pkg 验签=3rd Party Mac Developer Installer 分发证书）。
           # ARCHS=arm64：generic destination 缺省 arm64+x86_64 双架构，而 iosSimulatorArm64
           # target 只有 arm64（KGP 报 Requested Architecture Not Configured）；Catalyst 产物
           # 仅 Apple Silicon 可跑（本技术栈约束）。
@@ -306,13 +308,8 @@ jobs:
             -archivePath build/AgentReins-catalyst.xcarchive \
             CURRENT_PROJECT_VERSION=$BUILD \
             MARKETING_VERSION=$MV \
-            CODE_SIGN_STYLE=Automatic \
-            DEVELOPMENT_TEAM=${{ secrets.APPLE_TEAM_ID }} \
             ARCHS=arm64 \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
-            -authenticationKeyID "${{ secrets.ASC_API_KEY_ID }}" \
-            -authenticationKeyIssuerID "${{ secrets.ASC_API_ISSUER_ID }}" \
+            CODE_SIGNING_ALLOWED=NO \
             archive 2>&1 | tail -40
 
       - name: Export PKG (TestFlight / app-store)

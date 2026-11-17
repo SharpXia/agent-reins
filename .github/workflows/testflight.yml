@@ -289,8 +289,13 @@ jobs:
           case "$MV" in *.*) ;; *) MV="0.1.0" ;; esac
           echo "BUILD_NUMBER=$BUILD" >> "$GITHUB_ENV"
           echo "MARKETING_VERSION=$MV" >> "$GITHUB_ENV"
-          # manual 直签统一 Apple Distribution 证书（CLI 自动签名强求开发证书，理由同 iOS job）；
-          # Catalyst profile 按名引用（用户操作②）；allowProvisioningUpdates 按名下载/续期 profile
+          # automatic 签名（iOS job 走 manual 的理由不适用于 Catalyst：manual 按名引用被
+          # provisioning 解析器恒判无匹配——profile ACTIVE/绑定正确仍被过滤，本机与 CI 双实证；
+          # 自动签名 API key 会话本机实证直接解析成功），分发证书沿用 keychain 已导入的
+          # Apple Distribution，allowProvisioningUpdates 经 API key 建/取 profile。
+          # ARCHS=arm64：generic destination 缺省 arm64+x86_64 双架构，而 iosSimulatorArm64
+          # target 只有 arm64（KGP 报 Requested Architecture Not Configured）；Catalyst 产物
+          # 仅 Apple Silicon 可跑（本技术栈约束）。
           # destination=generic 变体：仅出包不跑模拟器，macosx sdk + IS_MACCATALYST=YES →
           # Compile Kotlin 脚本段走 embedAndSignCatalystAppleFrameworkForXcode + stamp 改写分支
           xcodebuild \
@@ -301,9 +306,9 @@ jobs:
             -archivePath build/AgentReins-catalyst.xcarchive \
             CURRENT_PROJECT_VERSION=$BUILD \
             MARKETING_VERSION=$MV \
-            CODE_SIGN_STYLE=Manual \
-            CODE_SIGN_IDENTITY="Apple Distribution" \
-            PROVISIONING_PROFILE_SPECIFIER="agentreins-appstore-maccatalyst" \
+            CODE_SIGN_STYLE=Automatic \
+            DEVELOPMENT_TEAM=${{ secrets.APPLE_TEAM_ID }} \
+            ARCHS=arm64 \
             -allowProvisioningUpdates \
             -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
             -authenticationKeyID "${{ secrets.ASC_API_KEY_ID }}" \
@@ -312,8 +317,10 @@ jobs:
 
       - name: Export PKG (TestFlight / app-store)
         run: |
-          # macOS 导出产物是 .pkg（不是 ipa）；method=app-store，manual 按名引用 Catalyst profile。
-          # bundle id 键用 .macCatalyst（pbxproj PRODUCT_BUNDLE_IDENTIFIER[sdk=macosx*] 同源）
+          # macOS 导出产物是 .pkg（不是 ipa）；method=app-store + automatic 签名——
+          # 实测 manual 按名引用在 Catalyst destination 下 provisioning 解析器恒判「无匹配」
+          # （profile 本体 ACTIVE/绑定正确仍被过滤；自动签名本机实证直接解析成功），改走
+          # Xcode 自动管理（allowProvisioningUpdates 按 API key 会话建/取 profile）。
           cat > build/ExportOptions-catalyst.plist <<'PLEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -324,12 +331,7 @@ jobs:
             <key>teamID</key>
             <string>${{ secrets.APPLE_TEAM_ID }}</string>
             <key>signingStyle</key>
-            <string>manual</string>
-            <key>provisioningProfiles</key>
-            <dict>
-              <key>dev.sharpxia.agentreins.macCatalyst</key>
-              <string>agentreins-appstore-maccatalyst</string>
-            </dict>
+            <string>automatic</string>
             <key>uploadSymbols</key>
             <true/>
           </dict>

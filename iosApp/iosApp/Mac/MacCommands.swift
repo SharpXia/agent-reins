@@ -34,6 +34,18 @@ struct MacHubCommands: Commands {
             .keyboardShortcut("n", modifiers: .command)
             .disabled(!hub.isLoggedIn)
         }
+        // View 菜单：切换边栏 ⌃⌘S（feature/mac-bigscreen-20261118 补完项①）——**替换**
+        // 系统 Toggle Sidebar 项（.sidebar 位即系统该项所在，替换防双项/⌃⌘S 键位冲突），
+        // 翻转 hub.sidebarVisible：与 MacSplitRoot 的 columnVisibility 绑定、侧栏折叠钮
+        // 三方同一 store 入口，无第二事实源；持久化在 store didSet。固定文案同系统
+        // Toggle Sidebar 口径（不随状态翻 Hide/Show，与仓内菜单文案常量风格一致）。
+        CommandGroup(replacing: .sidebar) {
+            Button("切换边栏") {
+                hub.sidebarVisible.toggle()
+            }
+            .keyboardShortcut("s", modifiers: [.control, .command])
+            .disabled(!hub.isLoggedIn)
+        }
         // 会话菜单：作用于当前打开会话（hub.selected 非空 = 会话页在场）。
         CommandMenu("会话") {
             Button(muteLabel) {

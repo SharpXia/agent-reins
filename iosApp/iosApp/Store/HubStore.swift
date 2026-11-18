@@ -480,6 +480,17 @@ final class HubStore {
     /// 共用同一 sheet 挂载点（同一 sheet 同一入口）。
     var showNewConversation = false
 
+    /// Mac 侧栏可见态（feature/mac-bigscreen-20261118，仅 Catalyst 消费）：MacSplitRoot 的
+    /// NavigationSplitView columnVisibility 由本 Bool 映射 .all/.detailOnly，View 菜单
+    /// 「切换边栏 ⌃⌘S」（MacCommands）与系统折叠钮共用同一入口。态进 store 同
+    /// showNewConversation 先例（Commands 与视图层共用）；iOS 面无消费者，零行为。
+    /// 折叠态 UserDefaults 持久化（macOS 惯例：侧栏展开/收起跨启动保持）——写侧 didSet、
+    /// 读侧缺键回落 true（object(forKey:) 而非 bool(forKey:)，防缺键误读 false）；iOS 上
+    /// 无人写、仅初始化读一次，零行为。
+    var sidebarVisible: Bool = UserDefaults.standard.object(forKey: "mac.sidebarVisible") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(sidebarVisible, forKey: "mac.sidebarVisible") }
+    }
+
     /// 回底请求 token（菜单 ⌘↓）：**自增计数器**——评审修正⑥：own-send 信号在
     /// onChange(tailSignature) 里随下一条消息变化才消费（回底必须即时）、且 Bool 信号重复
     /// 触发不翻变（连续两次 ⌘↓ 第二次失效），故用 token。HubChatView onChange 立即消费滚动。

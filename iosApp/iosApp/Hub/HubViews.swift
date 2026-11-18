@@ -22,6 +22,13 @@ struct HubRootView: View {
             // tab 态在 HubStore（wp-13：通知点按需从任意 tab 带回会话栈），此处只绑定。
             // #3（2026-11-07 二轮）：提示条改去抖显示（syncBannerVisible）——解锁/回前台的
             // 快速重连（1–2s 追平）不再逐次弹条；首次登录 bootstrap / 真断线等慢同步照常显示。
+            // Mac 大屏面（feature/mac-bigscreen-20261118）：真 NavigationSplitView 侧栏 +
+            // 居中内容列（Mac/MacSplitRoot.swift，文件级 Catalyst 门控）——选中态复用 store
+            // 既有 selectedTab/selected，⌘,/⌘N、通知点跳、dev 探针四路入口零改动直通；
+            // #else 分支 TabView 原文逐字保留，iPad/iPhone 编译走原文零变化。
+            #if targetEnvironment(macCatalyst)
+            MacSplitRoot()
+            #else
             TabView(selection: $hub.selectedTab) {
                 NavigationStack { HubHomeView() }
                     .tabItem { Label("会话", systemImage: "bubble.left.and.bubble.right.fill") }
@@ -30,6 +37,7 @@ struct HubRootView: View {
                     .tabItem { Label("设置", systemImage: "gearshape.fill") }
                     .tag(1)
             }
+            #endif
         }
         .environment(hub)
         .task {
@@ -332,7 +340,9 @@ struct HubHomeView: View {
 ///   幂等键确定性派生 agent:<agentId>:main-<idempotencyKey>，新主线独立成卡）；
 /// - 分流判据在 HubStore.createConversation（hasMainCard），本页行按判据换文案与图标；
 /// - 提交失败（回执 null = 提交未送达或被服务端拒绝）显式降级态可重试，不静默。
-private struct NewConversationSheet: View {
+// private→internal（feature/mac-bigscreen-20261118）：sheet 挂载点随 Mac 分栏根迁移，
+// Mac/MacSplitRoot.swift 需跨文件复用本类型——纯可见性放宽，零行为差。
+struct NewConversationSheet: View {
     @State private var hub = HubStore.shared
     @Environment(\.dismiss) private var dismiss
 
@@ -467,7 +477,9 @@ private struct NewConversationAgentRow: View {
     }
 }
 
-private struct HubConversationRow: View {
+// private→internal（feature/mac-bigscreen-20261118）：Mac 侧栏行复用本行（MacSplitRoot
+// List 行 = 本行 + tag），纯可见性放宽，零行为差。
+struct HubConversationRow: View {
     @State private var hub = HubStore.shared
     let c: UiConversation
 
@@ -1249,6 +1261,12 @@ struct HubChatView: View {
                 consumePickedItems(items)
             }
         }
+        // item2（feature/mac-bigscreen-20261118）：Mac 内容列居中帽（668 = 气泡 640 帽 +
+        // 时间线水平 padding 14×2，同一测度；modifier 本体在 Mac/MacSplitRoot.swift Catalyst
+        // 门控域）——与 HubMessageRow 气泡帽同款 postfix #if 写法，iOS 编译期整段剔除零变化。
+        #if targetEnvironment(macCatalyst)
+        .macContentColumn()
+        #endif
         .navigationBarTitleDisplayMode(.inline)
         // #2（2026-11-07 UX 轮）：会话详情页隐藏底部 Tab 栏——IM 详情页惯例（聊天内容+输入区
         // 独占全屏），pop 回列表自动恢复；详情仍走 NavigationStack 推栈，导航纪律不变
@@ -3560,6 +3578,14 @@ struct HubSettingsView: View {
             Button("退出登录", role: .destructive) { hub.logout() }
             Button("取消", role: .cancel) {}
         }
+        // item2 补完（feature/mac-bigscreen-20261118，拍板 (b)）：设置页与聊天页同测度列帽
+        //（macContentColumn 668，双页宽窗测度一致；modifier 本体在 Mac/MacSplitRoot.swift
+        // Catalyst 门控域）——同 HubChatView postfix #if 写法，iOS 编译期整段剔除零变化。
+        // 推栈子页（GatewaysView/ServerSettingsView 等）由 NavigationStack 渲染不受本帽
+        // 束缚，宽窗全宽是 macOS 详情页惯例（走查留观，如需同帽后续逐页挂）。
+        #if targetEnvironment(macCatalyst)
+        .macContentColumn()
+        #endif
     }
 }
 

@@ -31,6 +31,7 @@
 		1A6FBB00000000000000001A /* ImageViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA00000000000000001A /* ImageViewer.swift */; };
 		1A6FBB00000000000000001B /* MacWindowFrame.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA00000000000000001B /* MacWindowFrame.swift */; };
 		1A6FBB00000000000000001C /* MacCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA00000000000000001C /* MacCommands.swift */; };
+		1A6FBB00000000000000001D /* MacSplitRoot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA00000000000000001D /* MacSplitRoot.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -61,6 +62,7 @@
 		1A6FAA00000000000000000B /* MarkdownView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownView.swift; sourceTree = "<group>"; };
 		1A6FAA00000000000000001B /* MacWindowFrame.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacWindowFrame.swift; sourceTree = "<group>"; };
 		1A6FAA00000000000000001C /* MacCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacCommands.swift; sourceTree = "<group>"; };
+		1A6FAA00000000000000001D /* MacSplitRoot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacSplitRoot.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -135,6 +137,7 @@
 			children = (
 				1A6FAA00000000000000001B /* MacWindowFrame.swift */,
 				1A6FAA00000000000000001C /* MacCommands.swift */,
+				1A6FAA00000000000000001D /* MacSplitRoot.swift */,
 			);
 			path = Mac;
 			sourceTree = "<group>";
@@ -347,6 +350,7 @@
 				1A6FBB000000000000000001 /* App.swift in Sources */,
 				1A6FBB00000000000000001B /* MacWindowFrame.swift in Sources */,
 				1A6FBB00000000000000001C /* MacCommands.swift in Sources */,
+				1A6FBB00000000000000001D /* MacSplitRoot.swift in Sources */,
 				1A6FBB000000000000000014 /* HubStore.swift in Sources */,
 				1A6FBB000000000000000017 /* NotificationCoordinator.swift in Sources */,
 				1A6FBB000000000000000015 /* LoginView.swift in Sources */,

@@ -42,6 +42,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -138,6 +139,10 @@ private suspend fun fetchSlashCommands(client: DefaultHubClient, conversationId:
 private object ModelsCache {
     private val entries = mutableMapOf<String, Pair<ModelsList, Long>>()
 
+    /** 拉取失败标记（2026-11-18 hermes 模型卡挂死修复轮）：卡显式降级不再永转圈；成功即清除。
+     *  快照状态 map——失败落标记即触发重组（否则纯 map 变更无重组信号，卡停在进度态）。 */
+    private val failures = mutableStateMapOf<String, Long>()
+
     /** 未过期返回目录，否则 null（过期与缺失同口径，调用方重拉）。 */
     @Synchronized
     fun valid(conversationId: String, nowMs: Long = System.currentTimeMillis()): ModelsList? =
@@ -148,7 +153,16 @@ private object ModelsCache {
     @Synchronized
     fun put(conversationId: String, list: ModelsList, nowMs: Long = System.currentTimeMillis()) {
         entries[conversationId] = list to nowMs
+        failures.remove(conversationId)
     }
+
+    @Synchronized
+    fun markFailed(conversationId: String, nowMs: Long = System.currentTimeMillis()) {
+        failures[conversationId] = nowMs
+    }
+
+    @Synchronized
+    fun failed(conversationId: String): Boolean = failures.containsKey(conversationId)
 }
 
 /**
@@ -612,6 +626,7 @@ internal fun ConversationScreen(
         // 模型目录在位（model 卡数据面；choices 卡目录由下方候选信号触发）
         if (ModelsCache.valid(conversationId) == null) {
             fetchModels(client, conversationId)?.let { ModelsCache.put(conversationId, it) }
+                ?: ModelsCache.markFailed(conversationId)
         }
     }
     // choices/think 卡数据面鸡生蛋修复：用户可能不经 "/" 草稿直接发出交互命令——每条新
@@ -624,6 +639,7 @@ internal fun ConversationScreen(
         }
         if (ModelsCache.valid(conversationId) == null) {
             fetchModels(client, conversationId)?.let { ModelsCache.put(conversationId, it) }
+                ?: ModelsCache.markFailed(conversationId)
         }
     }
 
@@ -1247,6 +1263,14 @@ private fun ModelsInteractiveCard(
                         }
                     }
                 }
+            } else if (ModelsCache.failed(conversationId)) {
+                // 失败显式降级（2026-11-18 hermes 模型卡挂死修复轮）：#22 目录面对该网关
+                // 缺席（桥 fail-closed），转圈无出口——指引用法直切（桥 /model <名> 已通）。
+                Text(
+                    "模型目录不可用（该网关未提供）；可直接发送 /model <模型名> 切换",
+                    fontSize = 12.sp,
+                    color = Color(0xFF999999),
+                )
             } else {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)

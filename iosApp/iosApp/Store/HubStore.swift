@@ -344,8 +344,13 @@ final class HubStore {
     /// 在途去重：同会话并发触发只发一次请求（列表类限流每设备 60 次/分钟）。
     private var modelsInFlight: Set<String> = []
 
+    /// 拉取失败标记（conversationId，2026-11-18 hermes 模型卡挂死修复轮）：失败后交互卡
+    /// 显式降级（「目录不可用」+ 用法指引），不再无限转圈；下次卡出现即重试（无 TTL 阻挡
+    /// ——modelsFetchedAt 失败不落，卡出现频率远低于逐键，列表类限流 60 次/分安全）。
+    private(set) var modelsFailed: Set<String> = []
+
     /// 触发面 = 交互卡出现判定为真时（会话页 timeline 组合侧调用）；缓存新鲜即空转。
-    /// 失败静默吞（onResult null 不入缓存），与 fetchCommandsIfNeeded 同纪律。
+    /// 失败落 modelsFailed 标记（卡显式降级），与 fetchCommandsIfNeeded 同纪律。
     func fetchModelsIfNeeded(conversationId: String) {
         guard isLoggedIn else { return }
         if let fetchedAt = modelsFetchedAt[conversationId],
@@ -355,7 +360,11 @@ final class HubStore {
         bridge.hubModels(conversationId: conversationId) { [weak self] list in
             guard let self else { return }
             self.modelsInFlight.remove(conversationId)
-            guard let list else { return }
+            guard let list else {
+                self.modelsFailed.insert(conversationId)
+                return
+            }
+            self.modelsFailed.remove(conversationId)
             self.modelsCache[conversationId] = list
             self.modelsFetchedAt[conversationId] = Date()
         }
@@ -1890,6 +1899,7 @@ final class HubStore {
         modelsCache = [:]
         modelsFetchedAt = [:]
         modelsInFlight = []
+        modelsFailed = []
         chatPush = false
         // wp-10：连接相位复位（同步栈已停转，重登后 watchPhase 重新挂订阅）
         syncPhase = "catching"

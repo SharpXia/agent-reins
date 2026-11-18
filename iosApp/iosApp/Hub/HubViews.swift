@@ -1775,6 +1775,12 @@ private struct ModelsInteractiveCard: View {
                         modelButton(item)
                     }
                 }
+            } else if hub.modelsFailed.contains(conversationId) {
+                // 失败显式降级（2026-11-18 hermes 模型卡挂死修复轮）：#22 目录面对该网关
+                // 缺席（桥 fail-closed），转圈无出口——指引用法直切（桥 /model <名> 已通）。
+                Text("模型目录不可用（该网关未提供）；可直接发送 /model <模型名> 切换")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             } else {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)

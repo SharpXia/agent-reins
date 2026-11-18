@@ -53,6 +53,21 @@ struct MacSplitRoot: View {
         } message: {
             Text("删除为终态：会话消息与后台任务一并删除，不可恢复。")
         }
+        // 侧栏删除失败显式呈现（2026-11-18 low 债清账②）：sessionDeleteError 原全仓唯一
+        // 呈现点在 SessionManagerSheet（Mac 主路径不经过）——行乐观消失后失败静默、由下次
+        // 重拉悄然复活。macOS 惯例 alert 呈现 + 明确可重试文案；关弹层即清
+        // （clearSessionDeleteError），下次删除入口重走同链路。
+        .alert(
+            "删除会话失败",
+            isPresented: Binding(
+                get: { hub.sessionDeleteError != nil },
+                set: { if !$0 { hub.clearSessionDeleteError() } }
+            )
+        ) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(hub.sessionDeleteError ?? "删除未送达或被服务端拒绝（可重试）。")
+        }
         // 数据订阅（镜像 HubHomeView.task：watchConversations + watchGateways）——漏挂则
         // 侧栏永久空（数据面无订阅、无报错）。
         .task { hub.watchConversations(); hub.watchGateways() }
@@ -164,7 +179,7 @@ struct MacSplitRoot: View {
                     .id(c.conversationId)
             } else {
                 ContentUnavailableView("未选择会话", systemImage: "bubble.left.and.bubble.right",
-                                       description: Text("从左侧边栏选择一个会话，或点右上角新建"))
+                                       description: Text(emptyStateHint))
             }
         }
         .toolbar {
@@ -186,6 +201,13 @@ struct MacSplitRoot: View {
             get: { hub.sidebarVisible ? .all : .detailOnly },
             set: { hub.sidebarVisible = ($0 != .detailOnly) }
         )
+    }
+
+    /// 未选择占位指路文案随侧栏可见态分支（2026-11-18 low 债清账④）：折叠态「左侧边栏」
+    /// 不可见，原指路失效——可见时才点名左侧边栏。
+    private var emptyStateHint: String {
+        hub.sidebarVisible ? "从左侧边栏选择一个会话，或点右上角新建"
+                           : "选择一个会话，或点右上角新建"
     }
 }
 

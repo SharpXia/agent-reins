@@ -3429,6 +3429,9 @@ struct HubSettingsView: View {
                 // 0 时入口保留（空态由清单页呈现），避免入口随计数闪烁。
                 NavigationLink {
                     PendingApprovalsView()
+                    #if targetEnvironment(macCatalyst)
+                        .macContentColumn()
+                    #endif
                 } label: {
                     HStack {
                         Text("待审批")
@@ -3493,6 +3496,9 @@ struct HubSettingsView: View {
                 // 投影库维护，行随库变更推送。
                 NavigationLink {
                     GatewaysView()
+                    #if targetEnvironment(macCatalyst)
+                        .macContentColumn()
+                    #endif
                 } label: {
                     HStack {
                         Text("网关与 Agent")
@@ -3551,6 +3557,9 @@ struct HubSettingsView: View {
             Section("接入") {
                 NavigationLink {
                     ServerSettingsView()
+                    #if targetEnvironment(macCatalyst)
+                        .macContentColumn()
+                    #endif
                 } label: {
                     LabeledContent("服务器", value: URL(string: hub.baseUrl)?.host ?? hub.baseUrl)
                 }
@@ -3581,8 +3590,8 @@ struct HubSettingsView: View {
         // item2 补完（feature/mac-bigscreen-20261118，拍板 (b)）：设置页与聊天页同测度列帽
         //（macContentColumn 668，双页宽窗测度一致；modifier 本体在 Mac/MacSplitRoot.swift
         // Catalyst 门控域）——同 HubChatView postfix #if 写法，iOS 编译期整段剔除零变化。
-        // 推栈子页（GatewaysView/ServerSettingsView 等）由 NavigationStack 渲染不受本帽
-        // 束缚，宽窗全宽是 macOS 详情页惯例（走查留观，如需同帽后续逐页挂）。
+        // 推栈子页（待审批/网关与 Agent/服务器）已同帽（2026-11-18 low 债清账③）：三处
+        // NavigationLink 目的地逐页 postfix（见各链接处），宽窗父/子页测度一致不跳变。
         #if targetEnvironment(macCatalyst)
         .macContentColumn()
         #endif

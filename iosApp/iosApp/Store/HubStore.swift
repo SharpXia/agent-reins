@@ -483,13 +483,17 @@ final class HubStore {
     /// Mac 侧栏可见态（feature/mac-bigscreen-20261118，仅 Catalyst 消费）：MacSplitRoot 的
     /// NavigationSplitView columnVisibility 由本 Bool 映射 .all/.detailOnly，View 菜单
     /// 「切换边栏 ⌃⌘S」（MacCommands）与系统折叠钮共用同一入口。态进 store 同
-    /// showNewConversation 先例（Commands 与视图层共用）；iOS 面无消费者，零行为。
+    /// showNewConversation 先例（Commands 与视图层共用）。
     /// 折叠态 UserDefaults 持久化（macOS 惯例：侧栏展开/收起跨启动保持）——写侧 didSet、
-    /// 读侧缺键回落 true（object(forKey:) 而非 bool(forKey:)，防缺键误读 false）；iOS 上
-    /// 无人写、仅初始化读一次，零行为。
+    /// 读侧缺键回落 true（object(forKey:) 而非 bool(forKey:)，防缺键误读 false）。
+    /// 2026-11-18 low 债清账⑤：整段收进 Catalyst 门——消费者（MacCommands/MacSplitRoot）
+    /// 均为文件级门内文件，iOS 编译期整段剔除；此前 iOS 上仍有「初始化读一次 UserDefaults」
+    /// 的无行为残留，收口后连这一读也不再执行。
+    #if targetEnvironment(macCatalyst)
     var sidebarVisible: Bool = UserDefaults.standard.object(forKey: "mac.sidebarVisible") as? Bool ?? true {
         didSet { UserDefaults.standard.set(sidebarVisible, forKey: "mac.sidebarVisible") }
     }
+    #endif
 
     /// 回底请求 token（菜单 ⌘↓）：**自增计数器**——评审修正⑥：own-send 信号在
     /// onChange(tailSignature) 里随下一条消息变化才消费（回底必须即时）、且 Bool 信号重复
@@ -684,6 +688,10 @@ final class HubStore {
 
     /// 会话删除失败（#29 直调未成功）：sheet 错误行显式呈现 + 可重试，不静默；成功即清。
     private(set) var sessionDeleteError: String?
+
+    /// Mac 侧栏删除失败 alert 的关闭入口（2026-11-18 low 债清账②）：alert isPresented 的
+    /// set 侧清态，防关弹层后非 nil 复现；下次 deleteConversation 入口亦会重置。
+    func clearSessionDeleteError() { sessionDeleteError = nil }
 
     /// 会话重命名在途（conversationId 集合；仅主线族行开放，rename 门见 SessionManagerSheet）。
     private(set) var renamingSessionIds: Set<String> = []

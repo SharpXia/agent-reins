@@ -37,10 +37,11 @@ struct MacHubCommands: Commands {
         // View 菜单：切换边栏 ⌃⌘S（feature/mac-bigscreen-20261118 补完项①）——**替换**
         // 系统 Toggle Sidebar 项（.sidebar 位即系统该项所在，替换防双项/⌃⌘S 键位冲突），
         // 翻转 hub.sidebarVisible：与 MacSplitRoot 的 columnVisibility 绑定、侧栏折叠钮
-        // 三方同一 store 入口，无第二事实源；持久化在 store didSet。固定文案同系统
-        // Toggle Sidebar 口径（不随状态翻 Hide/Show，与仓内菜单文案常量风格一致）。
+        // 三方同一 store 入口，无第二事实源；持久化在 store didSet。文案随状态翻转
+        // 「隐藏边栏/显示边栏」（2026-11-18 low 债清账①：系统 Toggle Sidebar 即两态翻转
+        // 标签，原固定文案与系统口径不符；手法同下方 muteLabel）。
         CommandGroup(replacing: .sidebar) {
-            Button("切换边栏") {
+            Button(sidebarLabel) {
                 hub.sidebarVisible.toggle()
             }
             .keyboardShortcut("s", modifiers: [.control, .command])
@@ -93,6 +94,12 @@ struct MacHubCommands: Commands {
     private var muteLabel: String {
         guard let c = hub.selected else { return "静音此会话" }
         return hub.mutedConversations.contains(c.conversationId) ? "取消静音" : "静音此会话"
+    }
+
+    /// 边栏项文案随状态翻转（2026-11-18 low 债清账①）：可见态=「隐藏边栏」、折叠态=
+    /// 「显示边栏」，同系统 Toggle Sidebar 惯例与 muteLabel 手法（@Observable 跟踪）。
+    private var sidebarLabel: String {
+        hub.sidebarVisible ? "隐藏边栏" : "显示边栏"
     }
 }
 

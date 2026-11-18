@@ -69,6 +69,9 @@ internal fun DesktopHubApp(windowPrefs: DesktopWindowPreferences? = null) {
     // 不可用时降级为纯内存态，不崩）。lambda 注入 = 协调器决策时实时读取，右键/设置页
     // 改动即时生效，无重建协调器。
     val mutePrefs = remember { DesktopMutePreferences() }
+    // 2026-11-19：显示偏好（流式输出/思考中指示，用户级持久化跨登出保留；Preferences 不可用
+    // 时降级纯内存态不崩）——同一实例喂 HubShell（UI 镜像权威），缺省 true = 保持既有行为。
+    val displayPrefs = remember { DesktopDisplayPreferences() }
     // 多网关轮（v1.3.0，设计稿 §4.3）：agent 分组本地偏好（java.util.prefs，§4.2 JSON，
     // 与 iOS UserDefaults 各自持久互不同步；登出 wipeLocalData 不触碰——投影库外偏好）。
     // 同一实例喂 GatewaysPanel（分组三段式）与组员资格呈现，写随读刷。
@@ -124,7 +127,7 @@ internal fun DesktopHubApp(windowPrefs: DesktopWindowPreferences? = null) {
     MaterialTheme {
         when {
             authState is HubAuthState.LoggedIn -> {
-                HubShell(client, authState as HubAuthState.LoggedIn, coordinator, mutePrefs, windowPrefs, agentGroups)
+                HubShell(client, authState as HubAuthState.LoggedIn, coordinator, mutePrefs, displayPrefs, windowPrefs, agentGroups)
             }
             authState is HubAuthState.NeedsLogin ||
                 (authState is HubAuthState.Idle && restoreAttempted) || submitting -> {
@@ -169,6 +172,8 @@ private fun HubShell(
     session: HubAuthState.LoggedIn,
     coordinator: DesktopNotificationCoordinator,
     mutePrefs: DesktopMutePreferences,
+    /** 2026-11-19：显示偏好（流式输出/思考中指示）权威实例——UI 镜像只喂会话页渲染与设置页开关。 */
+    displayPrefs: DesktopDisplayPreferences,
     windowPrefs: DesktopWindowPreferences?,
     agentGroups: DesktopAgentGroupStore,
 ) {
@@ -197,6 +202,18 @@ private fun HubShell(
     fun setMinimizeToTrayOnClose(enabled: Boolean) {
         windowPrefs?.setMinimizeToTrayOnClose(enabled)
         minimizeToTrayOnClose = windowPrefs?.minimizeToTrayOnClose ?: enabled
+    }
+    // 2026-11-19：显示偏好（流式输出/思考中指示）UI 镜像（权威在 displayPrefs，镜像只喂
+    // 会话页渲染与设置页开关——同上 windowPrefs 既有注释纪律）。
+    var streamingPlayback by remember { mutableStateOf(displayPrefs.streamingPlayback) }
+    var thinkingIndicator by remember { mutableStateOf(displayPrefs.thinkingIndicator) }
+    fun setStreamingPlayback(enabled: Boolean) {
+        displayPrefs.setStreamingPlayback(enabled)
+        streamingPlayback = displayPrefs.streamingPlayback
+    }
+    fun setThinkingIndicator(enabled: Boolean) {
+        displayPrefs.setThinkingIndicator(enabled)
+        thinkingIndicator = displayPrefs.thinkingIndicator
     }
     // wp-18 通知规则数据面：会话列表推送喂回复差异面（unread 增量）；当前打开会话供
     // 「非当前打开」判定（iOS HubStore.selected 同口径）。规则态由协调器消费协程独占，
@@ -273,6 +290,11 @@ private fun HubShell(
                             // wp-14：关闭行为开关（缺省关窗最小化到托盘；windowPrefs = null 不挂卡）
                             minimizeToTrayOnClose = minimizeToTrayOnClose,
                             onMinimizeToTrayOnClose = ::setMinimizeToTrayOnClose.takeIf { windowPrefs != null },
+                            // 2026-11-19：显示偏好开关（缺省 true = 保持既有行为；写 store 后刷镜像）
+                            streamingPlayback = streamingPlayback,
+                            onStreamingPlayback = ::setStreamingPlayback,
+                            thinkingIndicator = thinkingIndicator,
+                            onThinkingIndicator = ::setThinkingIndicator,
                         )
                         // wp-11：网关与 Agent 独立页（observeGateways 零消费 → 结构化清单呈现）；
                         // 多网关轮：三段式分组（agentGroups 本地偏好 + AgentRefRow 新建会话 action）
@@ -290,6 +312,9 @@ private fun HubShell(
                                         // 错挂进任意会话页，只在设置页待审批清单出现
                                         approvals = pendingApprovals.filter { it.conversationId == selected.conversationId },
                                         decisions = decisions,
+                                        // 2026-11-19：显示偏好两开关（key(conversationId) 重挂时取镜像现值）
+                                        streamingPlayback = streamingPlayback,
+                                        thinkingIndicator = thinkingIndicator,
                                     )
                                 }
                             } else {

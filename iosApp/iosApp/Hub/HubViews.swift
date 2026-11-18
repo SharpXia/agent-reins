@@ -1281,7 +1281,7 @@ struct HubChatView: View {
                     Text(title(conv))
                         .fontWeight(.semibold)
                         .lineLimit(1)
-                    if agentBusy {
+                    if agentBusy && hub.thinkingIndicator {
                         Text(hub.isThinkingNow ? "思考中" : "处理中")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
@@ -1289,7 +1289,7 @@ struct HubChatView: View {
                     }
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel(agentBusy
+                .accessibilityLabel(agentBusy && hub.thinkingIndicator
                     ? "\(title(conv))，\(hub.isThinkingNow ? "正在思考" : "正在处理")"
                     : title(conv))
             }
@@ -1989,11 +1989,13 @@ private final class ScrollProbeBox {
     @Environment(\.inkColors) private var ink
 
     var body: some View {
-        if m.role == "assistant" && m.state == "streaming" && m.content.isEmpty {
+        if m.role == "assistant" && m.state == "streaming" && (m.content.isEmpty || !hub.streamingPlayback) {
             // #3（2026-11-08 UX 轮，用户改版）：空正文流式占位行不再渲染——进行中信号移至
             // 标题栏（标题旁小字 + 动画省略号，见 HubChatView principal）。思考期时间线只留
             // 已送达的用户行（✓ 徽标语义不变）；正文返回即由 typewriter/Markdown 行承接
             //（dstream 占位行同此口径——首 delta 前隐藏）。
+            // 纯显示偏好「流式输出」关（hub.streamingPlayback，数据面不动）：非空增量行也
+            // 走本早退——流式逐字揭示整段撤显示，等 final 权威行落库时整段接管。
             Color.clear.frame(height: 0)
         } else if m.role == "" {
             // 合成行（v1.1 additive：role="" = compaction/reset 标记行，无正文语义）渲染为分隔条
@@ -3563,6 +3565,22 @@ struct HubSettingsView: View {
                 } label: {
                     LabeledContent("服务器", value: URL(string: hub.baseUrl)?.host ?? hub.baseUrl)
                 }
+            }
+            Section("显示") {
+                // 纯显示偏好（hub.streamingPlayback/thinkingIndicator，UserDefaults 持久化跨登出
+                // 保留）——**数据面不动**：流式 delta 照常入投影库、已读水位照常推进，开关只裁
+                // 渲染分支；@Observable 属性级追踪，翻转即会话页/标题栏即时重渲。
+                Toggle("流式输出", isOn: Binding(
+                    get: { hub.streamingPlayback },
+                    set: { hub.streamingPlayback = $0 }
+                ))
+                Toggle("思考中指示", isOn: Binding(
+                    get: { hub.thinkingIndicator },
+                    set: { hub.thinkingIndicator = $0 }
+                ))
+                Text("关闭后流式回复等生成完成一次呈现、思考提示不再显示；生成与数据不受影响，停止按钮照常可用。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Section {
                 Button("退出登录", role: .destructive) { confirmLogout = true }

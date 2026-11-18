@@ -250,6 +250,10 @@ internal fun ConversationScreen(
     conversations: List<UiConversation>,
     approvals: List<UiApproval>,
     decisions: ApprovalDecisionState,
+    // 纯显示偏好（2026-11-19）：流式输出/思考中指示——权威在 DesktopDisplayPreferences，
+    // HubShell 持镜像喂入；**数据面不动**，只裁渲染分支（streamingRowPresentation 决策）。
+    streamingPlayback: Boolean,
+    thinkingIndicator: Boolean,
 ) {
     val messages by client.observeMessages(conversationId).collectAsState(initial = emptyList())
     // wp-15：工作过程披露条数据面（hubToolEvents + hubRunStatus 两表合流快照）——此前零消费，
@@ -767,6 +771,8 @@ internal fun ConversationScreen(
                         scope,
                         thinkingNow = workActivity.phases.lastOrNull()?.phase == "thinking",
                         agentLabel = label.ifBlank { "Agent" },
+                        streamingPlayback = streamingPlayback,
+                        thinkingIndicator = thinkingIndicator,
                         interactiveCommand = anchorCmd,
                         onModelSelect = { item ->
                             input = TextFieldValue("")
@@ -968,6 +974,9 @@ private fun MessageRow(
     /** 2026-11-07 二轮：thinking 帧在途 + agent 显示名（占位行动画文案用，见流式空行分支）。 */
     thinkingNow: Boolean,
     agentLabel: String,
+    /** 纯显示偏好（2026-11-19）：流式输出/思考中指示（streamingRowPresentation 决策消费）。 */
+    streamingPlayback: Boolean,
+    thinkingIndicator: Boolean,
     /** 交互卡泛化（2026-11-08）：非 null = 本行是最新一次裸交互命令交换的回复行（model/带选项命令）。 */
     interactiveCommand: SlashCommand?,
     onModelSelect: (ModelOptionItem) -> Unit,
@@ -1002,7 +1011,7 @@ private fun MessageRow(
             ) {
                 when {
                     m.role == "user" -> UserMessageRow(m)
-                    else -> AssistantMessageRow(m, conversationId, thinkingNow, agentLabel, interactiveCommand, onModelSelect, onOptionSelect)
+                    else -> AssistantMessageRow(m, conversationId, thinkingNow, agentLabel, streamingPlayback, thinkingIndicator, interactiveCommand, onModelSelect, onOptionSelect)
                 }
             }
         }
@@ -1054,16 +1063,55 @@ private fun UserMessageRow(m: UiMessage) {
     }
 }
 
+/**
+ * 2026-11-19 纯显示偏好（流式输出/思考中指示）：助手流式行呈现决策纯函数（desktopTest
+ * 回归锚锁行为不只锁存取——TimelineScroll.kt 纯函数同纪律；桌面↔iOS parity：iOS
+ * HubMessageRow 早退分支 + HubStore.streamingPlayback/thinkingIndicator 同语义）：
+ * - state ≠ "streaming" → null：final/failed 行不进占位决策、照常整段渲染（重进会话不丢
+ *   数据的 UI 面）；
+ * - 流式行在「正文空 或 流式输出关」→ thinkingIndicator 开 = Placeholder（占位文案，2026-11-08
+ *   UX 轮「进行中信号收敛到回复占位行」既有口径）、关 = Silent（整行含时间戳行撤显示，
+ *   Stop 键/「结束中」旁注等功能面不动）；
+ * - 其余（流式开且正文非空）→ Progressive（▌ 光标 + 「流式生成中」chip，现状）。
+ */
+internal enum class StreamingRowPresentation { Placeholder, Progressive, Silent }
+
+internal fun streamingRowPresentation(
+    state: String,
+    contentBlank: Boolean,
+    streamingPlayback: Boolean,
+    thinkingIndicator: Boolean,
+): StreamingRowPresentation? {
+    if (state != "streaming") return null
+    if (contentBlank || !streamingPlayback) {
+        return if (thinkingIndicator) StreamingRowPresentation.Placeholder else StreamingRowPresentation.Silent
+    }
+    return StreamingRowPresentation.Progressive
+}
+
+/** 占位文案（2026-11-07 二轮回复占位行内联文案逐字提取，desktopTest 两态逐字锁）。 */
+internal fun assistantPlaceholderText(thinkingNow: Boolean, agentLabel: String): String =
+    (if (thinkingNow) "正在思考…" else "$agentLabel 正在处理中…") + "▌"
+
 @Composable
 private fun AssistantMessageRow(
     m: UiMessage,
     conversationId: String,
     thinkingNow: Boolean,
     agentLabel: String,
+    /** 纯显示偏好（2026-11-19）：流式输出/思考中指示（呈现决策见 streamingRowPresentation）。 */
+    streamingPlayback: Boolean,
+    thinkingIndicator: Boolean,
     interactiveCommand: SlashCommand?,
     onModelSelect: (ModelOptionItem) -> Unit,
     onOptionSelect: (SlashCommand, String) -> Unit,
 ) {
+    // Silent = 整行撤显示（含时间戳行），等 final 权威行落库时整段接管——数据面不动，delta
+    // 照常入投影库、已读水位照常推进（iOS HubMessageRow 早退 Color.clear 同口径 parity）。
+    val presentation = streamingRowPresentation(m.state, m.content.isBlank(), streamingPlayback, thinkingIndicator)
+    if (presentation == StreamingRowPresentation.Silent) {
+        return
+    }
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.Start,
@@ -1084,8 +1132,10 @@ private fun AssistantMessageRow(
                 // 2026-11-07 二轮（x总改版，iOS 同口径）：工作过程条撤显示——进行中信号收敛到
                 // 回复占位行：thinking 帧在途呈「正在思考…」，否则「<agent> 正在处理中…」；
                 // 正文返回即被 Markdown 路径替换（05 §3.11：流式行允许跳过 delta，终态由 created 收敛）
-                m.state == "streaming" && m.content.isBlank() -> Text(
-                    (if (thinkingNow) "正在思考…" else "$agentLabel 正在处理中…") + "▌",
+                // 2026-11-19 纯显示偏好：占位与否改由 streamingRowPresentation 决策——流式输出
+                // 关的非空增量行同样回落占位（文案经 assistantPlaceholderText 提取，逐字锁）。
+                presentation == StreamingRowPresentation.Placeholder -> Text(
+                    assistantPlaceholderText(thinkingNow, agentLabel),
                     fontStyle = FontStyle.Italic,
                     color = Color(0xFF999999),
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
@@ -1121,7 +1171,9 @@ private fun AssistantMessageRow(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(formatTs(m.ts), fontSize = 11.sp, color = Color(0xFF999999))
-            if (m.state == "streaming") {
+            // 2026-11-19 纯显示偏好：流式输出关的非空行呈占位文案时不再挂「流式生成中」chip
+            //（MarkdownText showCursor 不动——仅 Progressive 分支可达 true，语义自洽）。
+            if (m.state == "streaming" && streamingPlayback) {
                 TagChip("流式生成中", Color(0xFF2B6CB0), Modifier.padding(start = 6.dp))
             }
         }

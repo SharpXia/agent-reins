@@ -495,6 +495,25 @@ final class HubStore {
     }
     #endif
 
+    // ---------- 显示偏好（流式输出/思考中指示）：纯显示面，**数据面不动**——流式 delta
+    //    照常入投影库、已读水位照常推进，两开关只裁渲染分支（消费位 HubViews） ----------
+
+    /// 「流式输出」开关：开 = 现状（流式行 typewriter 逐字揭示）；关 = 流式增量不渲染、
+    /// 等 final 权威行落库时整段接管（HubMessageRow 早退分支）。纯显示偏好，跨登出保留
+    /// （同静音集先例：本地用户偏好非账号数据）——写侧 didSet、读侧缺键回落 true
+    /// （object(forKey:) 而非 bool(forKey:)，防缺键误读 false）。不进 Catalyst 门：
+    /// 两端会话页每行 body 都读，iOS 上同样消费。
+    var streamingPlayback: Bool = UserDefaults.standard.object(forKey: "hub.streamingPlayback") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(streamingPlayback, forKey: "hub.streamingPlayback") }
+    }
+
+    /// 「思考中指示」开关：开 = 现状（标题栏「思考中/处理中」小字 + 动画省略号）；关 =
+    /// 信号撤显示（Stop 键/「结束中」旁注等功能面不动）。其余口径同 streamingPlayback
+    /// （纯显示、跨登出保留、缺键回落 true）。
+    var thinkingIndicator: Bool = UserDefaults.standard.object(forKey: "hub.thinkingIndicator") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(thinkingIndicator, forKey: "hub.thinkingIndicator") }
+    }
+
     /// 回底请求 token（菜单 ⌘↓）：**自增计数器**——评审修正⑥：own-send 信号在
     /// onChange(tailSignature) 里随下一条消息变化才消费（回底必须即时）、且 Bool 信号重复
     /// 触发不翻变（连续两次 ⌘↓ 第二次失效），故用 token。HubChatView onChange 立即消费滚动。

@@ -80,6 +80,12 @@ internal fun SettingsScreen(
     // wp-14：关闭行为开关（onMinimizeToTrayOnClose = null = 不挂卡，旧装配兼容）
     minimizeToTrayOnClose: Boolean = true,
     onMinimizeToTrayOnClose: ((Boolean) -> Unit)? = null,
+    // 2026-11-19：显示偏好开关（流式输出/思考中指示；on* = null = 不挂卡，旧装配兼容——
+    // 仿上两行 minimizeToTrayOnClose 先例；缺省 true = 保持既有行为）
+    streamingPlayback: Boolean = true,
+    onStreamingPlayback: ((Boolean) -> Unit)? = null,
+    thinkingIndicator: Boolean = true,
+    onThinkingIndicator: ((Boolean) -> Unit)? = null,
 ) {
     val scope = rememberCoroutineScope()
     var devices by remember { mutableStateOf<List<DeviceInfo>?>(null) }
@@ -211,6 +217,19 @@ internal fun SettingsScreen(
                 onUnmute = onUnmute,
             )
 
+            // 2026-11-19：显示偏好卡（流式输出/思考中指示，纯显示面——数据面不动，iOS 设置页
+            // 「显示」Section parity；handler 非 null 判定仿下条 closeBehaviorHandler 写法）
+            val streamingPlaybackHandler = onStreamingPlayback
+            val thinkingIndicatorHandler = onThinkingIndicator
+            if (streamingPlaybackHandler != null && thinkingIndicatorHandler != null) {
+                DisplayPreferencesCard(
+                    streamingPlayback = streamingPlayback,
+                    onStreamingPlayback = streamingPlaybackHandler,
+                    thinkingIndicator = thinkingIndicator,
+                    onThinkingIndicator = thinkingIndicatorHandler,
+                )
+            }
+
             // wp-14：关闭行为卡（开 = 关窗最小化到托盘，进程与同步/通知面保持运行，托盘
             // 「显示主窗」唤回；关 = 关窗直接退出进程。托盘「退出」菜单始终真退出）。
             val closeBehaviorHandler = onMinimizeToTrayOnClose
@@ -306,6 +325,53 @@ private fun CloseBehaviorCard(
             Text(
                 "开启后点窗口关闭按钮会隐藏到系统托盘（后台同步与通知保持运行，托盘「显示主窗」" +
                     "可唤回，菜单「退出」真正退出）；关闭后关窗将直接退出应用。",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF777777),
+            )
+        }
+    }
+}
+
+/**
+ * 2026-11-19：显示偏好卡——「流式输出」（开 = 流式行逐字揭示 + ▌ 光标 + 「流式生成中」标签，
+ * 现状；关 = 流式增量不渲染、AI 回复等 final 权威行落库时一次呈现，生成过程与数据不受影响、
+ * 已读水位照常推进）与「思考中指示」（开 = 回复占位文案「正在思考…/<agent> 正在处理中…」，
+ * 现状；关 = 占位信号撤显示，停止按钮等功能面不受影响）。行为是本地用户偏好
+ * （DesktopDisplayPreferences，跨登出保留，权威由 HubShell 镜像读取，开关即时生效）；
+ * iOS HubSettingsView「显示」Section 同口径 parity。
+ */
+@Composable
+private fun DisplayPreferencesCard(
+    streamingPlayback: Boolean,
+    onStreamingPlayback: (Boolean) -> Unit,
+    thinkingIndicator: Boolean,
+    onThinkingIndicator: (Boolean) -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("流式输出", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                Text(
+                    if (streamingPlayback) "逐字显示" else "完成后一次显示",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (streamingPlayback) Color(0xFF2E9E44) else Color(0xFF999999),
+                )
+                Spacer(Modifier.width(8.dp))
+                Switch(checked = streamingPlayback, onCheckedChange = onStreamingPlayback)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("思考中指示", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                Text(
+                    if (thinkingIndicator) "已开启" else "已关闭",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (thinkingIndicator) Color(0xFF2E9E44) else Color(0xFF999999),
+                )
+                Spacer(Modifier.width(8.dp))
+                Switch(checked = thinkingIndicator, onCheckedChange = onThinkingIndicator)
+            }
+            Text(
+                "流式输出关闭后，AI 回复将在生成完成后一次呈现（生成过程与数据不丢失，已读状态" +
+                    "照常推进）；思考中指示关闭后仅撤去占位提示，停止按钮等功能不受影响。",
                 style = MaterialTheme.typography.bodySmall,
                 color = Color(0xFF777777),
             )

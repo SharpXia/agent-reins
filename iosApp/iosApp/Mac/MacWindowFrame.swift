@@ -33,6 +33,19 @@ final class MacWindowSceneDelegate: NSObject, UIWindowSceneDelegate {
     ) {
         #if targetEnvironment(macCatalyst)
         guard let windowScene = scene as? UIWindowScene else { return }
+        // 窗口 sizing 能力显式恢复（2026-11-19 窗口锁死修复轮）：delegateClass 注入接管了
+        // scene 连接路径，SwiftUI WindowGroup 的 windowResizability 设置不再落地——
+        // sizeRestrictions min==max 即窗口锁死（拖边缘不能缩放 / zoom 按钮灰致双击标题栏
+        // 无效 / 窗口停在 defaultSize，三症状同源）。UIKit 文档化 API（UISceneSizeRestrictions，
+        // iOS 13+ / allowsFullScreen Catalyst 16+）显式放开：min=App.swift 内容下限，max=
+        // CGFLOAT_MAX（系统按屏幕 clamp）。windowingBehaviors 的 closable/miniaturizable
+        // 系统默认已开，不动。
+        if let restrictions = windowScene.sizeRestrictions {
+            restrictions.minimumSize = CGSize(width: 720, height: 480)
+            restrictions.maximumSize = CGSize(width: CGFloat.greatestFiniteMagnitude,
+                                              height: CGFloat.greatestFiniteMagnitude)
+            restrictions.allowsFullScreen = true
+        }
         guard let frame = Self.loadSavedFrame() else { return }
         // 有效性校验（评审修正①同款）：非退化尺寸 + 与任一屏幕相交——全离屏帧不恢复，
         // 防窗口落到可视区外（拔显示器/分辨率变化后的陈旧存档）。

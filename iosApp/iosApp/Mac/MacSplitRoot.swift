@@ -110,7 +110,9 @@ struct MacSplitRoot: View {
     }
 
     /// 侧栏列（分栏自动提供系统折叠钮 → 与工具栏/标题区融合；折叠态经 columnVisibility
-    /// 落 hub.sidebarVisible，供备选菜单项共用）。
+    /// 落 hub.sidebarVisible，供备选菜单项共用）。行内全语义字体（HubConversationRow
+    /// .title3/.caption2/.footnote），List 级环境放大一级适配 Mac 观感（2026-11-19 窗口
+    /// 锁死修复轮用户反馈「侧栏字体偏小」；只挂本列，iOS/iPad 树无此视图零影响）。
     private var sidebarList: some View {
         List(selection: sidebarSelection) {
             Section("会话") {
@@ -152,6 +154,8 @@ struct MacSplitRoot: View {
                     .tag(MacSidebarEntry.settings)
             }
         }
+        // 字号环境放大（见 sidebarList 注）：语义字体随环境放大一级，Section 头/系统行同效。
+        .environment(\.dynamicTypeSize, .large)
         // 「新建」钮已迁 detail 列（补完项③）：原挂本列 .toolbar，侧栏折叠（detailOnly）
         // 后按钮随列隐藏，折叠态动作面只剩菜单栏 ⌘N——现挂 detailColumn 的 NavigationStack，
         // 折叠态常驻窗口工具栏（见 detailColumn 注）。

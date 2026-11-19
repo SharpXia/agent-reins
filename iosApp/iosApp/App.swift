@@ -16,14 +16,15 @@ struct AgentReinsApp: App {
 
     var body: some Scene {
         #if targetEnvironment(macCatalyst)
-        // UxPlan item1：Mac 专属窗口面——初始 980×640、最小 720×480（.contentMinSize 以
-        // 内容最小尺寸作窗下限）、菜单栏命令挂载（Mac/MacCommands.swift）。窗口位置大小
-        // 记忆在 Mac/MacWindowFrame.swift（scene delegate 帧存取）。
+        // UxPlan item1：Mac 专属窗口面——初始 1280×820（2026-11-19 窗口锁死修复轮：980×640
+        // 在外接高分屏显小）、最小 720×480（.contentMinSize 以内容最小尺寸作窗下限）、
+        // 菜单栏命令挂载（Mac/MacCommands.swift）。窗口位置大小记忆在 Mac/MacWindowFrame.swift
+        //（scene delegate 帧存取）；resize/zoom 能力恢复同文件 willConnect（sizingOptions）。
         WindowGroup {
             RootView()
                 .frame(minWidth: 720, minHeight: 480)
         }
-        .defaultSize(width: 980, height: 640)
+        .defaultSize(width: 1280, height: 820)
         .windowResizability(.contentMinSize)
         .commands { MacHubCommands() }
         #else

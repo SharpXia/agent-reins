@@ -298,6 +298,10 @@ jobs:
           # ARCHS=arm64：generic destination 缺省 arm64+x86_64 双架构，而 iosSimulatorArm64
           # target 只有 arm64（KGP 报 Requested Architecture Not Configured）；Catalyst 产物
           # 仅 Apple Silicon 可跑（本技术栈约束）。
+          # SWIFT_COMPILATION_MODE=singlefile（2026-11-19 beta-0.5.20b）：WMO 全模块编译在
+          # runner 上对现源文件集非确定 frontend 崩（exit 65 无 error 行，同 commit 首跑绿
+          # rerun 连挂×2）——singlefile 每文件独立 frontend 进程绕开 WMO 编译器 bug 面，
+          # 优化等级 -O 不变仅拆编译单元。
           # destination=generic 变体：仅出包不跑模拟器，macosx sdk + IS_MACCATALYST=YES →
           # Compile Kotlin 脚本段走 embedAndSignCatalystAppleFrameworkForXcode + stamp 改写分支
           xcodebuild \
@@ -309,6 +313,7 @@ jobs:
             CURRENT_PROJECT_VERSION=$BUILD \
             MARKETING_VERSION=$MV \
             ARCHS=arm64 \
+            SWIFT_COMPILATION_MODE=singlefile \
             CODE_SIGNING_ALLOWED=NO \
             archive 2>&1 | tail -40
 

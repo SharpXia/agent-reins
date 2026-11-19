@@ -15,7 +15,7 @@ import java.util.prefs.Preferences
  * - **本地承载**（§4.1 承载裁定）：投影库外偏好（不进 Hub.sq——全表可整库丢弃重建，登出
  *   wipeLocalData 不触碰），跨登出/重启保留，与静音集同形态；两端各自持久、互不同步。
  * - **数据形状一处定义**（§4.2）：单 JSON blob，key = "agentGroups.v1"（编码/解码规则在
- *   [agentGroupsParse]/[agentGroupsSerialize]，desktopTest 回归锚 AgentGroupRulesTest）。
+ *   [agentGroupsParse]/[agentGroupsSerialize]，:desktopApp:test 回归锚 AgentGroupRulesTest）。
  * - 响应面：groups/members 为 Compose State（内存权威）——GatewaysPanel 订阅即随写随刷，
  *   与静音偏好的「lambda 实时读」形态不同（分组是面板主呈现面，状态订阅更直接）。
  *

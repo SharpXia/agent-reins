@@ -8,7 +8,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * 多网关轮（v1.3.0）桌面 agent 分组偏好存储单测（desktopTest）：java.util.prefs 读写往返
+ * 多网关轮（v1.3.0）桌面 agent 分组偏好存储单测（:desktopApp:test）：java.util.prefs 读写往返
  * （跨实例 = 重启后回落语义）+ 组员资格二元组纪律 + 改名不动成员/解散成员回未分组 + 覆盖换组
  * + 未知未来版本档只读不写。用独立 probe 节点（随机 UUID）隔离，finally removeNode 清理，
  * 不污染用户真实偏好（DesktopMutePreferencesTest 同款纪律）。

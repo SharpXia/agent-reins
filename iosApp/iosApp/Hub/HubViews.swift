@@ -1988,14 +1988,23 @@ private final class ScrollProbeBox {
     @State private var hub = HubStore.shared
     @Environment(\.inkColors) private var ink
 
+    /// 会话活跃 run 现值（liveSelected 列表现值，同 Stop 态 wp-8② 口径）：僵尸流式行门控共用
+    ///（2026-11-19 清账①，桌面 streamingRowPresentation runActive 分支同语义 parity）。
+    private var runActive: Bool { hub.liveSelected?.hasActiveRun == true }
+
     var body: some View {
-        if m.role == "assistant" && m.state == "streaming" && (m.content.isEmpty || !hub.streamingPlayback) {
+        // 空白判据与桌面 contentBlank=m.content.isBlank() 同语义（2026-11-19 清账②拉齐：桌面
+        // isBlank 含纯空白、iOS 旧 isEmpty 纯空白流式行走 typewriter 分叉）。
+        if m.role == "assistant" && m.state == "streaming"
+            && (m.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (runActive && !hub.streamingPlayback)) {
             // #3（2026-11-08 UX 轮，用户改版）：空正文流式占位行不再渲染——进行中信号移至
             // 标题栏（标题旁小字 + 动画省略号，见 HubChatView principal）。思考期时间线只留
             // 已送达的用户行（✓ 徽标语义不变）；正文返回即由 typewriter/Markdown 行承接
             //（dstream 占位行同此口径——首 delta 前隐藏）。
-            // 纯显示偏好「流式输出」关（hub.streamingPlayback，数据面不动）：非空增量行也
-            // 走本早退——流式逐字揭示整段撤显示，等 final 权威行落库时整段接管。
+            // 纯显示偏好「流式输出」关（hub.streamingPlayback，数据面不动）：活跃 run 下的
+            // 非空增量行也走本早退——流式逐字揭示整段撤显示，等 final 权威行落库时整段接管。
+            // 僵尸流式行（runActive=false）：非空正文不走本早退也不走 typewriter/waveform
+            //（见下两处门控）——按普通内容整段静态渲染，不挂任何进行中信号（清账①）。
             Color.clear.frame(height: 0)
         } else if m.role == "" {
             // 合成行（v1.1 additive：role="" = compaction/reset 标记行，无正文语义）渲染为分隔条
@@ -2043,8 +2052,9 @@ private final class ScrollProbeBox {
                                 Text("…")
                                     .foregroundStyle(Color.secondary)
                             }
-                        } else if m.state == "streaming" {
+                        } else if m.state == "streaming" && runActive {
                             // wp-7 可选增强：流式行 typewriter 渐进揭示——数据 2s 一块、渲染逐字放出
+                            //（runActive 门控：僵尸流式行走下方 Markdown 静态渲染，2026-11-19 清账①）
                             // v1.4 查看器：流式期已成块的 ![...](url) 图块同样可点开查看（入口 b）
                             StreamingTypewriter(
                                 content: m.content,
@@ -2206,7 +2216,8 @@ private final class ScrollProbeBox {
                 // run 也染上排队，且水位=0 时波及全会话历史行）。
                 Image(systemName: "hourglass").font(.caption2)
                 Text("排队中").font(.caption2)
-            } else if m.state == "streaming" {
+            } else if m.state == "streaming" && runActive {
+                // runActive 门控（2026-11-19 清账①）：僵尸流式行不再挂「生成中」波形徽标
                 Image(systemName: "waveform").font(.caption2)
             } else if ui == "sending" {
                 Image(systemName: "clock").font(.caption2)

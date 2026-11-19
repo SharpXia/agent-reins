@@ -239,7 +239,7 @@ internal fun thinkCommand(modelsList: ModelsList?): SlashCommand? {
  *   resolveEnterKey；IME 组合中的 Enter 属提交候选词，不触发）；
  * - 活跃 run 期间「运行中发送将排队」提示（iOS wp-14 同文案同语义：chat.send 不透传
  *   queueMode，发送照常、按 Gateway 默认队列语义排队；发送键位仍是 wp-8② Stop）。
- * 判定纯函数在 TimelineScroll.kt（desktopTest 回归锚），composer 规则纯函数在
+ * 判定纯函数在 TimelineScroll.kt（:desktopApp:test 回归锚），composer 规则纯函数在
  * SlashCommandRules.kt（同回归锚纪律）。
  */
 @Composable
@@ -773,6 +773,7 @@ internal fun ConversationScreen(
                         agentLabel = label.ifBlank { "Agent" },
                         streamingPlayback = streamingPlayback,
                         thinkingIndicator = thinkingIndicator,
+                        runActive = isRunActive,
                         interactiveCommand = anchorCmd,
                         onModelSelect = { item ->
                             input = TextFieldValue("")
@@ -977,6 +978,8 @@ private fun MessageRow(
     /** 纯显示偏好（2026-11-19）：流式输出/思考中指示（streamingRowPresentation 决策消费）。 */
     streamingPlayback: Boolean,
     thinkingIndicator: Boolean,
+    /** 会话活跃 run 现值（isRunActive 透传）：僵尸流式行门控（2026-11-19 清账①）。 */
+    runActive: Boolean,
     /** 交互卡泛化（2026-11-08）：非 null = 本行是最新一次裸交互命令交换的回复行（model/带选项命令）。 */
     interactiveCommand: SlashCommand?,
     onModelSelect: (ModelOptionItem) -> Unit,
@@ -1011,7 +1014,7 @@ private fun MessageRow(
             ) {
                 when {
                     m.role == "user" -> UserMessageRow(m)
-                    else -> AssistantMessageRow(m, conversationId, thinkingNow, agentLabel, streamingPlayback, thinkingIndicator, interactiveCommand, onModelSelect, onOptionSelect)
+                    else -> AssistantMessageRow(m, conversationId, thinkingNow, agentLabel, streamingPlayback, thinkingIndicator, runActive, interactiveCommand, onModelSelect, onOptionSelect)
                 }
             }
         }
@@ -1064,14 +1067,18 @@ private fun UserMessageRow(m: UiMessage) {
 }
 
 /**
- * 2026-11-19 纯显示偏好（流式输出/思考中指示）：助手流式行呈现决策纯函数（desktopTest
+ * 2026-11-19 纯显示偏好（流式输出/思考中指示）：助手流式行呈现决策纯函数（:desktopApp:test
  * 回归锚锁行为不只锁存取——TimelineScroll.kt 纯函数同纪律；桌面↔iOS parity：iOS
  * HubMessageRow 早退分支 + HubStore.streamingPlayback/thinkingIndicator 同语义）：
  * - state ≠ "streaming" → null：final/failed 行不进占位决策、照常整段渲染（重进会话不丢
  *   数据的 UI 面）；
- * - 流式行在「正文空 或 流式输出关」→ thinkingIndicator 开 = Placeholder（占位文案，2026-11-08
- *   UX 轮「进行中信号收敛到回复占位行」既有口径）、关 = Silent（整行含时间戳行撤显示，
- *   Stop 键/「结束中」旁注等功能面不动）；
+ * - 流式行 + 会话无活跃 run（runActive=false）→ 僵尸流式行（run 终态事件未达或终态后迟到
+ *   delta 重建行，2026-11-19 清账①）：不挂任何进行中信号——空正文 = Silent 整行撤显示，
+ *   非空正文 = null 按普通内容整段渲染（调用侧光标/chip 随 presentation 门控，无 ▌ 无
+ *   「流式生成中」），等 final 权威行或用户新意图收敛；
+ * - 流式行 + runActive：正文空 或 流式输出关 → thinkingIndicator 开 = Placeholder（占位
+ *   文案，2026-11-08 UX 轮「进行中信号收敛到回复占位行」既有口径）、关 = Silent（整行含
+ *   时间戳行撤显示，Stop 键/「结束中」旁注等功能面不动）；
  * - 其余（流式开且正文非空）→ Progressive（▌ 光标 + 「流式生成中」chip，现状）。
  */
 internal enum class StreamingRowPresentation { Placeholder, Progressive, Silent }
@@ -1081,15 +1088,19 @@ internal fun streamingRowPresentation(
     contentBlank: Boolean,
     streamingPlayback: Boolean,
     thinkingIndicator: Boolean,
+    runActive: Boolean,
 ): StreamingRowPresentation? {
     if (state != "streaming") return null
+    if (!runActive) {
+        return if (contentBlank) StreamingRowPresentation.Silent else null
+    }
     if (contentBlank || !streamingPlayback) {
         return if (thinkingIndicator) StreamingRowPresentation.Placeholder else StreamingRowPresentation.Silent
     }
     return StreamingRowPresentation.Progressive
 }
 
-/** 占位文案（2026-11-07 二轮回复占位行内联文案逐字提取，desktopTest 两态逐字锁）。 */
+/** 占位文案（2026-11-07 二轮回复占位行内联文案逐字提取，:desktopApp:test 两态逐字锁）。 */
 internal fun assistantPlaceholderText(thinkingNow: Boolean, agentLabel: String): String =
     (if (thinkingNow) "正在思考…" else "$agentLabel 正在处理中…") + "▌"
 
@@ -1102,13 +1113,16 @@ private fun AssistantMessageRow(
     /** 纯显示偏好（2026-11-19）：流式输出/思考中指示（呈现决策见 streamingRowPresentation）。 */
     streamingPlayback: Boolean,
     thinkingIndicator: Boolean,
+    /** 会话活跃 run 现值：僵尸流式行门控（2026-11-19 清账①）。 */
+    runActive: Boolean,
     interactiveCommand: SlashCommand?,
     onModelSelect: (ModelOptionItem) -> Unit,
     onOptionSelect: (SlashCommand, String) -> Unit,
 ) {
     // Silent = 整行撤显示（含时间戳行），等 final 权威行落库时整段接管——数据面不动，delta
     // 照常入投影库、已读水位照常推进（iOS HubMessageRow 早退 Color.clear 同口径 parity）。
-    val presentation = streamingRowPresentation(m.state, m.content.isBlank(), streamingPlayback, thinkingIndicator)
+    // runActive 透传（liveConv.hasActiveRun 现值）：僵尸流式行不挂进行中信号（清账①）。
+    val presentation = streamingRowPresentation(m.state, m.content.isBlank(), streamingPlayback, thinkingIndicator, runActive)
     if (presentation == StreamingRowPresentation.Silent) {
         return
     }
@@ -1159,9 +1173,10 @@ private fun AssistantMessageRow(
                 }
                 // wp-18：助手行走轻量 Markdown 渲染器（标题/列表/代码块/粗斜体，流式行尾随
                 // ▌ 光标）；无 Markdown 语素或解析异常时内置回退 wp-6 纯文本路径
+                // 光标随 presentation 门控（=Progressive）：僵尸流式行无 ▌（2026-11-19 清账①）。
                 else -> MarkdownText(
                     content = m.content,
-                    showCursor = m.state == "streaming",
+                    showCursor = presentation == StreamingRowPresentation.Progressive,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                 )
             }
@@ -1171,9 +1186,9 @@ private fun AssistantMessageRow(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(formatTs(m.ts), fontSize = 11.sp, color = Color(0xFF999999))
-            // 2026-11-19 纯显示偏好：流式输出关的非空行呈占位文案时不再挂「流式生成中」chip
-            //（MarkdownText showCursor 不动——仅 Progressive 分支可达 true，语义自洽）。
-            if (m.state == "streaming" && streamingPlayback) {
+            // 2026-11-19 纯显示偏好：chip 与 MarkdownText 光标同门（=Progressive）——流式输出关
+            // 的非空行呈占位文案不挂 chip；僵尸流式行（runActive=false）同样不挂（清账①）。
+            if (presentation == StreamingRowPresentation.Progressive) {
                 TagChip("流式生成中", Color(0xFF2B6CB0), Modifier.padding(start = 6.dp))
             }
         }

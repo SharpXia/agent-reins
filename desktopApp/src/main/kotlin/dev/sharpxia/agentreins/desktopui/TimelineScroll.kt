@@ -4,7 +4,7 @@ import dev.sharpxia.agentreins.hub.UiMessage
 
 /**
  * 桌面时间线滚动/翻页判定纯函数（wp-5 桌面时间线补齐；iOS wp-7① 滚动锚定 + wp-12 历史翻页
- * 同型）。全部无副作用、无 Compose 依赖，desktopTest 逐例回归；口径与 iOS HubStore /
+ * 同型）。全部无副作用、无 Compose 依赖，:desktopApp:test 逐例回归；口径与 iOS HubStore /
  * HubViews 对应实现一一锚定，回归锚 = 桌面↔iOS parity 不漂移。
  */
 

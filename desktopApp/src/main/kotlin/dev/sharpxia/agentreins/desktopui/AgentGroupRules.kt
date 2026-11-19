@@ -16,7 +16,7 @@ import dev.sharpxia.agentreins.hub.UiGateway
  * 多网关轮（v1.3.0，设计稿 multi-gateway-design-20261110 r3）桌面 agent 分组的**纯规则层**：
  * §4.2 数据模型（单 JSON blob，键 = Preferences "agentGroups.v1"，形状两端一处定义、解析各自
  * 实现——iOS AgentGroupsBlob Codable 同形）+ §3.2/§4.3 呈现规则（网关显示名、组员资格与目录
- * 取交集）。无 Compose 无 Preferences 依赖，desktopTest 回归锚 [AgentGroupRulesTest]。
+ * 取交集）。无 Compose 无 Preferences 依赖，:desktopApp:test 回归锚 [AgentGroupRulesTest]。
  *
  * 键纪律（§4.2）：组员键 = **(gatewayId, agentId) 二元组**——agentId 只在网关内唯一
  * （agents_native_uq），跨网关同名 agentId 是不同实体（ADR-14）；跨网关混组是一等能力。

@@ -8,7 +8,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * wp-9 桌面按会话静音偏好存储单测（desktopTest）：静音集与总开关的内存权威读写 + 持久化
+ * wp-9 桌面按会话静音偏好存储单测（:desktopApp:test）：静音集与总开关的内存权威读写 + 持久化
  * 往返（跨实例读取 = 重启后回落语义）+ 静音键前缀隔离（总开关键不混入静音集）。
  * 用独立 probe 节点（随机 UUID）隔离，finally removeNode 清理，不污染用户真实偏好。
  */

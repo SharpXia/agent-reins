@@ -16,16 +16,18 @@ struct AgentReinsApp: App {
 
     var body: some Scene {
         #if targetEnvironment(macCatalyst)
-        // UxPlan item1：Mac 专属窗口面——初始 1280×820（2026-11-19 窗口锁死修复轮：980×640
-        // 在外接高分屏显小）、最小 720×480（.contentMinSize 以内容最小尺寸作窗下限）、
-        // 菜单栏命令挂载（Mac/MacCommands.swift）。窗口位置大小记忆在 Mac/MacWindowFrame.swift
-        //（scene delegate 帧存取）；resize/zoom 能力恢复同文件 willConnect（sizingOptions）。
+        // UxPlan item1：Mac 专属窗口面——菜单栏命令挂载（Mac/MacCommands.swift）。窗口位置
+        // 大小记忆在 Mac/MacWindowFrame.swift（scene delegate 帧存取）。
+        // **windowResizability 与 defaultSize 均已撤（beta-0.5.20 修复轮，本地探针实证）**：
+        // SwiftUI WindowGroup 会把 scene 的 sizeRestrictions 持续重写为其 scene 配置推导值
+        //（contentMinSize → {contentMin,…}；defaultSize → {default,default} min==max 即锁死），
+        // 自定义 scene delegate 的手设全被覆盖（v19/v20 两版装机+探针双证）。撤除两者后
+        // SwiftUI 无 sizing 语义可写；初始帧与 min 帽由 MacWindowFrame 全权接管
+        //（存档/首启 1280×820 + sizeRestrictions min 720×480），RootView frame(min) 保底。
         WindowGroup {
             RootView()
                 .frame(minWidth: 720, minHeight: 480)
         }
-        .defaultSize(width: 1280, height: 820)
-        .windowResizability(.contentMinSize)
         .commands { MacHubCommands() }
         #else
         WindowGroup {

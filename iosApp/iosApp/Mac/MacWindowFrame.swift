@@ -18,10 +18,73 @@ import UIKit
 final class MacWindowSceneDelegate: NSObject, UIWindowSceneDelegate {
 
     #if targetEnvironment(macCatalyst)
-    private static let frameKey = "mac.windowFrame.v1"
+    /// v2（beta-0.5.20 修复轮）：v1 存档是「窗口锁死时代」的产物（980×640 小帧非用户
+    /// 偏好），键升级一次性作废——新装首启走 defaultSize 1280×820，本版起重新积累。
+    private static let frameKey = "mac.windowFrame.v2"
     /// 存档有效性下限：窄于最小可用窗（App.swift minWidth/minHeight = 720/480）的帧不恢复
     /// 不保存，防异常几何污染存档。
     private static let minValidSize: CGFloat = 480
+    /// 窗口 sizing 下限（与 App.swift RootView frame(minWidth/minHeight) 同测度）。
+    private static let minWindowSize = CGSize(width: 720, height: 480)
+
+    /// 显式钉窗口 sizeRestrictions（min 下限放开 max）：SwiftUI 退出 sizing 管辖
+    /// （App.swift 已撤 windowResizability）后，这里是窗口 resizable 的唯一权威面。
+    /// willConnect 首钉 + didBecomeActive 重钉（防 SwiftUI/系统后续改写，日志留痕）。
+    @MainActor
+    static func applySizeRestrictions(_ windowScene: UIWindowScene) {
+        guard let restrictions = windowScene.sizeRestrictions else {
+            NSLog("[MacWindowFrame] sizeRestrictions unavailable")
+            return
+        }
+        NSLog("[MacWindowFrame] sizeRestrictions before: \\(restrictions.minimumSize) → set min \\(minWindowSize) max ∞")
+        restrictions.minimumSize = minWindowSize
+        restrictions.maximumSize = CGSize(width: CGFloat.greatestFiniteMagnitude,
+                                          height: CGFloat.greatestFiniteMagnitude)
+        restrictions.allowsFullScreen = true
+    }
+
+    /// DEBUG 探针（beta-0.5.20 本地验证轮）：启动稳定后自证窗口 sizing 链——窗口数、初始
+    /// 帧、sizeRestrictions 现值，再主动 requestGeometryUpdate 到 1400×900（与用户拖拽同
+    /// 一条系统路径）读回 effectiveGeometry 判「可缩放」真伪。结果写沙箱容器 Caches
+    /// probe-report.json（宿主直读，绕开无屏幕录制/辅助功能权限的验证盲区）。#if DEBUG：
+    /// TF Release 包零残留。
+    #if DEBUG
+    @MainActor
+    static func verifyWindowBehavior(_ windowScene: UIWindowScene) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            var report: [String: Any] = [:]
+            report["windowCount"] = windowScene.windows.count
+            report["effectiveFrame"] = NSStringFromRect(windowScene.effectiveGeometry.systemFrame)
+            if let r = windowScene.sizeRestrictions {
+                report["restrictions"] = ["min": NSStringFromSize(r.minimumSize),
+                                          "max": NSStringFromSize(r.maximumSize),
+                                          "allowsFullScreen": r.allowsFullScreen]
+            } else {
+                report["restrictions"] = "nil"
+            }
+            report["windowingBehaviors"] = [
+                "closable": windowScene.windowingBehaviors?.isClosable as Any,
+                "miniaturizable": windowScene.windowingBehaviors?.isMiniaturizable as Any,
+            ]
+            let target = CGRect(x: 120, y: 120, width: 1400, height: 900)
+            windowScene.requestGeometryUpdate(
+                UIWindowScene.GeometryPreferences.Mac(systemFrame: target)
+            ) { error in
+                report["resizeRequestError"] = error.localizedDescription
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                let after = windowScene.effectiveGeometry.systemFrame
+                report["frameAfterResizeRequest"] = NSStringFromRect(after)
+                report["resizeAccepted"] = (abs(after.width - target.width) < 40 && abs(after.height - target.height) < 40)
+                if let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
+                    try? JSONSerialization.data(withJSONObject: report).write(
+                        to: dir.appendingPathComponent("probe-report.json"))
+                }
+                NSLog("[MacWindowFrame] probe: \\(report)")
+            }
+        }
+    }
+    #endif
     #endif
 
     // MARK: - UISceneDelegate（iOS 构建为空壳；逻辑仅 Catalyst）
@@ -33,28 +96,32 @@ final class MacWindowSceneDelegate: NSObject, UIWindowSceneDelegate {
     ) {
         #if targetEnvironment(macCatalyst)
         guard let windowScene = scene as? UIWindowScene else { return }
-        // 窗口 sizing 能力显式恢复（2026-11-19 窗口锁死修复轮）：delegateClass 注入接管了
-        // scene 连接路径，SwiftUI WindowGroup 的 windowResizability 设置不再落地——
-        // sizeRestrictions min==max 即窗口锁死（拖边缘不能缩放 / zoom 按钮灰致双击标题栏
-        // 无效 / 窗口停在 defaultSize，三症状同源）。UIKit 文档化 API（UISceneSizeRestrictions，
-        // iOS 13+ / allowsFullScreen Catalyst 16+）显式放开：min=App.swift 内容下限，max=
-        // CGFLOAT_MAX（系统按屏幕 clamp）。windowingBehaviors 的 closable/miniaturizable
-        // 系统默认已开，不动。
-        if let restrictions = windowScene.sizeRestrictions {
-            restrictions.minimumSize = CGSize(width: 720, height: 480)
-            restrictions.maximumSize = CGSize(width: CGFloat.greatestFiniteMagnitude,
-                                              height: CGFloat.greatestFiniteMagnitude)
-            restrictions.allowsFullScreen = true
+        // 窗口 sizing 首钉 + 期望帧恢复（beta-0.5.20 修复轮）。App.swift 已撤
+        // windowResizability/defaultSize——本地探针实证 SwiftUI 把 sizeRestrictions 持续
+        // 重写为其 scene 配置推导值（defaultSize → min==max 钉死即锁死根源），撤除后 sizing
+        // 权威在本 delegate：restrictions min 720×480/max 放开 + 期望帧（v2 存档或首启
+        // 1280×820 居中）。didBecomeActive 再做一轮权威对齐（时序最稳，见该回调）。
+        Self.applySizeRestrictions(windowScene)
+        if let frame = Self.preferredFrame() {
+            Self.requestFrame(frame, on: windowScene)
         }
-        guard let frame = Self.loadSavedFrame() else { return }
-        // 有效性校验（评审修正①同款）：非退化尺寸 + 与任一屏幕相交——全离屏帧不恢复，
-        // 防窗口落到可视区外（拔显示器/分辨率变化后的陈旧存档）。
-        guard frame.width >= Self.minValidSize, frame.height >= Self.minValidSize,
-              Self.onScreen(frame) else { return }
-        windowScene.requestGeometryUpdate(
-            UIWindowScene.GeometryPreferences.Mac(systemFrame: frame)
-        ) { error in
-            NSLog("[MacWindowFrame] restore failed: \(error.localizedDescription)")
+        #endif
+    }
+
+    func sceneDidBecomeActive(_ scene: UIScene) {
+        #if targetEnvironment(macCatalyst)
+        // 权威对齐（beta-0.5.20）：SwiftUI 初始 layout 已完成的时点，重钉 restrictions + 把
+        // 窗口对齐到期望帧（当前 effective 与期望尺寸偏差大时才请求，避免每次激活都跳位）。
+        // 本地探针实证 willConnect 时点的手设会被 SwiftUI 覆盖，此回调时点在其之后。
+        if let windowScene = scene as? UIWindowScene {
+            Self.applySizeRestrictions(windowScene)
+            if let preferred = Self.preferredFrame() {
+                let current = windowScene.effectiveGeometry.systemFrame
+                if abs(current.width - preferred.width) > 1 || abs(current.height - preferred.height) > 1 {
+                    Self.requestFrame(preferred, on: windowScene)
+                }
+            }
+            Self.verifyWindowBehavior(windowScene)
         }
         #endif
     }
@@ -96,6 +163,35 @@ final class MacWindowSceneDelegate: NSObject, UIWindowSceneDelegate {
               let w = dict["w"] as? Double, let h = dict["h"] as? Double,
               w > 0, h > 0 else { return nil }
         return CGRect(x: x, y: y, width: w, height: h)
+    }
+
+    /// 期望帧（beta-0.5.20）：v2 存档有效（非退化 + 在屏）则恢复存档；否则首启帧
+    /// 1280×820 主屏居中（替代已撤的 .defaultSize；坐标近似用 UIScreen iOS 域，系统会
+    /// clamp 到可视区）。
+    @MainActor
+    static func preferredFrame() -> CGRect? {
+        if let saved = loadSavedFrame(),
+           saved.width >= minValidSize, saved.height >= minValidSize,
+           onScreen(saved) {
+            return saved
+        }
+        let screen = UIScreen.main.bounds
+        guard screen.width >= 1280 || screen.height >= 820 else {
+            return CGRect(x: max(0, (screen.width - 1280) / 2),
+                          y: max(0, (screen.height - 820) / 2), width: 1280, height: 820)
+        }
+        return CGRect(x: (screen.width - 1280) / 2, y: (screen.height - 820) / 2,
+                      width: 1280, height: 820)
+    }
+
+    /// 请求窗口帧到 system 坐标（失败只留日志，窗口保持系统布局——恢复是增强面不是主路径）。
+    @MainActor
+    static func requestFrame(_ frame: CGRect, on windowScene: UIWindowScene) {
+        windowScene.requestGeometryUpdate(
+            UIWindowScene.GeometryPreferences.Mac(systemFrame: frame)
+        ) { error in
+            NSLog("[MacWindowFrame] request frame failed: \\(error.localizedDescription)")
+        }
     }
 
     /// 存档（主线程调用）：读 effectiveGeometry.systemFrame（Catalyst 17+，部署目标 macOS 15）。

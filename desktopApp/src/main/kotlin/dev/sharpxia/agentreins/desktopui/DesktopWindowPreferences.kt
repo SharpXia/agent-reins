@@ -1,12 +1,16 @@
 package dev.sharpxia.agentreins.desktopui
 
+import dev.sharpxia.agentreins.hub.avatar.AvatarProfile
+import dev.sharpxia.agentreins.hub.avatar.avatarUpdatedAtNewer
+import dev.sharpxia.agentreins.hub.avatar.encodeJson
+import dev.sharpxia.agentreins.hub.avatar.parseAvatarProfileJson
 import java.util.prefs.Preferences
 
 /**
- * wp-14：桌面窗口/显示偏好存储——本文件挂两班偏好（同 DesktopMutePreferences 挂协调器
+ * wp-14：桌面窗口/显示偏好存储——本文件挂三班偏好（同 DesktopMutePreferences 挂协调器
  * 文件的先例）：[DesktopWindowPreferences]（设置页「关闭行为」开关 = 关窗最小化到托盘 /
- * 关窗退出进程）与 [DesktopDisplayPreferences]（2026-11-19 纯显示偏好轮：设置页「流式输出」
- * /「思考中指示」两开关）。
+ * 关窗退出进程）、[DesktopDisplayPreferences]（2026-11-19 纯显示偏好轮：设置页「流式输出」
+ * /「思考中指示」两开关）与 [DesktopAvatarPreferences]（v1.5.0 个性化形象轮：形象档缓存）。
  *
  * 关窗行为：生产消费位 = main.kt 窗口 onCloseRequest（决策时实时读 [minimizeToTrayOnClose]，
  * 改开关即时生效，无重建）+ SettingsScreen「关闭行为」开关（UI 镜像由 HubShell 持有，权威在此，
@@ -120,5 +124,78 @@ internal class DesktopDisplayPreferences(node: Preferences? = null) {
 
         /** 「思考中指示」键（缺省 true = 信号显示，保持现状）。 */
         private const val KEY_THINKING_INDICATOR = "hub.thinkingIndicator"
+    }
+}
+
+/**
+ * v1.5.0 个性化形象轮：桌面形象档缓存（第三班偏好，DesktopWindowPreferences/DesktopDisplayPreferences
+ * 同文件多班惯例）。存规范化 JSON 串（shared AvatarProfile.encodeJson 同形，键 `hub.avatarProfile.v1`
+ * ——同节点键族不重叠；iOS UserDefaults 同名键 parity）。
+ *
+ * 口径：形象档缓存是**平台偏好不入投影库**（Hub.sq/HubDriver 红线零触碰），跨登出保留；
+ * 服务端/契约不感知缓存。缺省（无键/坏 JSON/Preferences 不可用）= shared 默认档常量
+ * （12×1.00 正圆 + GRAY + standard + epoch 哨兵，双端同源——断网启动/登录前显示该档）。
+ * 存储纪律完全同 [DesktopWindowPreferences]：内存镜像权威 + best-effort persist（任何
+ * Preferences I/O 失败静默降级纯内存态）+ node = null 全程内存态，不抛不崩。
+ *
+ * 收敛（[mergeRemote]）：updatedAt 大者胜（last-write-wins），同值幂等跳过（发起设备自收
+ * avatar.updated 帧防回环）——与 shared [convergeAvatarProfile] 同规则；编辑冲突（表单在途
+ * 不覆盖）由 UI 层裁决，缓存层只做时序收敛。
+ */
+internal class DesktopAvatarPreferences(node: Preferences? = null) {
+
+    private val node: Preferences? = node ?: runCatching { Preferences.userRoot().node(NODE_NAME) }.getOrNull()
+
+    private val lock = Any()
+    private var profileInMemory: AvatarProfile
+
+    init {
+        var loaded: AvatarProfile? = null
+        node?.let { n ->
+            loaded = runCatching { parseAvatarProfileJson(n.get(KEY_AVATAR_PROFILE, null)) }.getOrNull()
+        }
+        profileInMemory = loaded ?: DEFAULT
+    }
+
+    /** 当前形象档（无缓存 = 默认档常量；坏 JSON 静默回落默认档不抛）。 */
+    val profile: AvatarProfile
+        get() = synchronized(lock) { profileInMemory }
+
+    /** 显式覆盖缓存（PUT 成功回填/远端收敛后调用；持久化 best-effort）。 */
+    fun setProfile(profile: AvatarProfile) {
+        synchronized(lock) { profileInMemory = profile }
+        node?.let { n ->
+            runCatching { n.put(KEY_AVATAR_PROFILE, profile.encodeJsonSafe()) }
+        } // 持久化失败 = 内存态降级（进程内生效，重启后回落上次持久化值）
+    }
+
+    /**
+     * 远端收敛（WSS avatar.updated 帧 / 回拉响应）：incoming updatedAt 严格新于本地才接受
+     * 并持久化——同值幂等跳过（发起设备自收帧防回环）、旧值丢弃。返回 true = 已合并（调用方
+     * 据此刷新 UI 镜像）。
+     */
+    fun mergeRemote(incoming: AvatarProfile): Boolean {
+        val accept = synchronized(lock) { avatarUpdatedAtNewer(incoming.updatedAt, profileInMemory.updatedAt) }
+        if (accept) setProfile(incoming)
+        return accept
+    }
+
+    /** 编码降级链：编码失败回退默认档串（缓存行本体不丢——与 agentsJson 编码降级对称）。 */
+    private fun AvatarProfile.encodeJsonSafe(): String =
+        runCatching { encodeJson() }.getOrDefault(DEFAULT_JSON)
+
+    internal companion object {
+        /** 用户级偏好节点（java.util.prefs；与同文件两班偏好同节点，键族不重叠）。 */
+        private const val NODE_NAME = "dev/sharpxia/agentreins/hub"
+
+        /** 形象档缓存键（`hub.<feature>` 键族；不撞 hub.muted. 前缀/两班 Bool 键）。 */
+        const val KEY_AVATAR_PROFILE = "hub.avatarProfile.v1"
+
+        /** 默认档 JSON 串（编码降级兜底；与 shared DEFAULT_AVATAR_PROFILE 同形）。 */
+        private const val DEFAULT_JSON =
+            """{"faceFactors":[1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0],"paletteId":"GRAY","motionLevel":"standard","updatedAt":"1970-01-01T00:00:00.000Z"}"""
+
+        /** 默认档常量（shared DEFAULT_AVATAR_PROFILE 直引，双端同源）。 */
+        private val DEFAULT = dev.sharpxia.agentreins.hub.avatar.DEFAULT_AVATAR_PROFILE
     }
 }

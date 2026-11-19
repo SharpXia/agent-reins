@@ -8,6 +8,8 @@ import dev.sharpxia.agentreins.hub.auth.LoginOk
 import dev.sharpxia.agentreins.hub.auth.LoginRequest
 import dev.sharpxia.agentreins.hub.auth.RefreshOk
 import dev.sharpxia.agentreins.hub.auth.RefreshRequest
+import dev.sharpxia.agentreins.hub.avatar.AvatarProfile
+import dev.sharpxia.agentreins.hub.avatar.AvatarProfileRequest
 import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
 import dev.sharpxia.agentreins.hub.projection.ApprovalDecisionRequest
 import dev.sharpxia.agentreins.hub.projection.BridgeTokenIssuedResponse
@@ -39,6 +41,7 @@ import io.ktor.client.request.header
 import io.ktor.client.request.patch
 import io.ktor.client.request.parameter
 import io.ktor.client.request.post
+import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.request.forms.submitFormWithBinaryData
 import io.ktor.client.statement.HttpResponse
@@ -46,6 +49,7 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.Headers
 import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpMethod
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
@@ -240,6 +244,31 @@ class DefaultHubApi(
             parameter("cursor", cursor)
             parameter("limit", limit)
         }
+
+    // ── v1.5.0 用户形象档（#30/#31；路径无参数直拼 /v1/me/avatar-profile，无用户自由文本） ──
+
+    /**
+     * #30（v1.5.0 additive）：形象档读取——纯投影读，200 回 [AvatarProfile]（未设置过 =
+     * 默认档 + epoch 哨兵，无 404 语义）；get JSON decode 样板与 get gateways 同式。
+     * 收侧宽松解析（未知枚举回落/越界回退正圆）在 [AvatarProfile] 序列化器内完成。
+     */
+    override suspend fun getAvatarProfile(): AvatarProfile =
+        get("/me/avatar-profile")
+
+    /**
+     * #31（v1.5.0 additive）：形象档保存——幂等覆盖写，**200 回服务端权威档**（updatedAt
+     * 直接回填，客户端无二程 GET；与 apns-token 204 形不同、幂等语义同源）。请求体
+     * [AvatarProfileRequest] 三可编辑字段全量覆盖（updatedAt 不入请求）；http.put 直拼 +
+     * ensureSuccess，与 deleteConversation 直拼形同源（Ktor HttpMethod.Put 现成）。
+     */
+    override suspend fun putAvatarProfile(req: AvatarProfileRequest): AvatarProfile {
+        val resp = http.put(config.baseUrl + "/me/avatar-profile") {
+            bearer()
+            contentType(ContentType.Application.Json)
+            setBody(req)
+        }
+        return decode(resp)
+    }
 
     // ── 内部 ─────────────────────────────────────────────────────────────
 

@@ -75,6 +75,8 @@ kotlin {
             dependencies {
                 implementation(libs.sqldelight.sqlite.driver)
                 implementation(libs.kotlinx.coroutines.test)
+                // v1.5.0 形象档轮：REST #30/#31 路径断言用 MockEngine 实管线（test-only）
+                implementation(libs.ktor.client.mock)
             }
         }
     }

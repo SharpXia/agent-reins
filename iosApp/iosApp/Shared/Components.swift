@@ -22,6 +22,8 @@ struct UnreadBadge: View {
 /// agent 头像：黏土 blob Canvas 薄壳（RobotAvatar 渲染，face-sculpt §1/§2）。
 /// 首字符圆底旧实现整段删除、不留双轨；name 参数仅为保签名兼容。
 /// faceFactors 必须由调用点解析后显式传入（渲染器零解析）。
+/// v1.5.0：用户级形象档已接入设置面（AvatarSettingsView）；本组件挂会话行/标题栏为
+/// 后续轮扩展（LazyVStack 回收重播性能面独立评审），本轮零调用点不变。
 enum AgentAvatarStatus: Equatable {
     /// Use the agent's configured expression. Editing surfaces use this state so
     /// a user-selected face is never replaced by a transient session state.

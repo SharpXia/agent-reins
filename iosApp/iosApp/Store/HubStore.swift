@@ -218,6 +218,11 @@ final class HubStore {
     /// 本地承载跨登出保留（§4.1：投影库可整库丢弃重建，偏好走「投影库外」先例 = 静音集）。
     let agentGroups = AgentGroupStore()
 
+    /// v1.5.0 个性化形象轮：用户级形象档状态（AvatarProfileStore 自身 @Observable，设置页
+    /// 子页直接订阅；shared avatarProfile 收敛流经 watchAvatarProfile 推 JSON 串进来，
+    /// updatedAt 大者胜 + UserDefaults `hub.avatarProfile.v1` 缓存跨登出保留）。
+    let avatar = AvatarProfileStore()
+
     /// 网关管理动作在途（键 = "create" 或 gatewayId；按钮禁用防重复提交——#25 名称不判重
     /// 无幂等键，重复提交产生多个网关各持独立 Token）。
     /// 复植轮不复活 revokedGatewayIds 即时隐藏集：本地投影行收敛已下沉 HubClient
@@ -605,6 +610,29 @@ final class HubStore {
             let p = phase.lowercased()
             self?.syncPhase = p
             self?.notePhaseForBanner(p)
+        }
+    }
+
+    /// 订阅形象档（v1.5.0 个性化形象轮；登录态建立时机调用——与 watchPhase 同模式，重复
+    /// 调用由桥侧换订阅）。shared avatarProfile 收敛流（updatedAt 大者胜）推 JSON 串，
+    /// AvatarProfileStore 宽松解码 + UserDefaults 缓存（跨登出保留）。
+    func watchAvatarProfile() {
+        bridge.hubWatchAvatarProfile { [weak self] json in
+            self?.avatar.applyRemote(json: json as String?)
+        }
+    }
+
+    /// 形象档保存（端点 #31 直调；**先 PUT 成功再更新本地**——低频不敏感，失败不排队）：
+    /// onDone ok true = 已取得服务端权威档（updatedAt 直接回填，shared 流已收敛）；false =
+    /// 未成功（未登录/网络不可达/形状校验 400 HUB-BIZ-004），error = 人读失败原因，设置页
+    /// 显式呈现 + 可重试，不静默。
+    func saveAvatarProfile(_ draft: AvatarProfileModel, onDone: @escaping (_ ok: Bool, _ error: String?) -> Void) {
+        bridge.hubPutAvatarProfile(profileJson: draft.requestBodyJSON) { [weak self] json, error in
+            guard let self else { return }
+            if let json {
+                self.avatar.applyRemote(json: json as String?, force: true) // 权威档直接落（编辑位让行）
+            }
+            onDone(json != nil, error)
         }
     }
 
@@ -1833,6 +1861,9 @@ final class HubStore {
                 // wp-10：登录态建立（hubClient 就绪）即挂连接相位订阅——提示条随相位翻转，
                 // 断连/重建可见、追平（linked）消失。重复回调由桥侧换订阅。
                 self.watchPhase()
+                // v1.5.0：登录态建立即挂形象档订阅（登录回拉 + sync.ready 重连回拉 +
+                // avatar.updated 实时帧三路在 shared 流汇合，桥只透 JSON 串；重复回调由桥侧换订阅）。
+                self.watchAvatarProfile()
                 // wp-13：登录态建立即请求通知授权（系统只在首次未决定时弹窗；拒绝后静默降级）。
                 self.notifications.requestAuthorizationIfNeeded()
                 // wp-17：同一时机注册远程通知；token 由 AppDelegate 注册回调取到后经
@@ -1950,6 +1981,10 @@ final class HubStore {
         sendingDraftFor = []
         draftSendError = [:]
         // mutedConversations 为本地偏好，跨登出保留。
+        // v1.5.0：形象档编辑瞬态随登出清（档本体 UserDefaults 缓存跨登出保留——streamingPlayback
+        // 先例；订阅随桥 hubLogout 取消，重登 watchAvatarProfile 重新挂）。
+        avatar.clearRemotePending()
+        avatar.isEditing = false
         bridge.hubLogout()
     }
 }

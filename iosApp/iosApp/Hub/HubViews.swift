@@ -3437,6 +3437,18 @@ struct HubSettingsView: View {
                     LabeledContent("本机设备", value: String(dev.prefix(12)) + "…")
                 }
             }
+            Section("机器人形象") {
+                // v1.5.0 个性化形象轮：用户级形象档子页（造型/配色/动效档 + 96pt 实时预览；
+                // 端点 #30/#31 /v1/me/avatar-profile，桌面设置页形象卡 parity）
+                NavigationLink {
+                    AvatarSettingsView()
+                    #if targetEnvironment(macCatalyst)
+                        .macContentColumn()
+                    #endif
+                } label: {
+                    Text("机器人形象")
+                }
+            }
             Section("审批") {
                 // wp-9：待审批计数入口——计数来自待审批投影 Flow（含归属未学习的审批）；
                 // 0 时入口保留（空态由清单页呈现），避免入口随计数闪烁。
@@ -3619,8 +3631,9 @@ struct HubSettingsView: View {
         // item2 补完（feature/mac-bigscreen-20261118，拍板 (b)）：设置页与聊天页同测度列帽
         //（macContentColumn 668，双页宽窗测度一致；modifier 本体在 Mac/MacSplitRoot.swift
         // Catalyst 门控域）——同 HubChatView postfix #if 写法，iOS 编译期整段剔除零变化。
-        // 推栈子页（待审批/网关与 Agent/服务器）已同帽（2026-11-18 low 债清账③）：三处
-        // NavigationLink 目的地逐页 postfix（见各链接处），宽窗父/子页测度一致不跳变。
+        // 推栈子页（机器人形象/待审批/网关与 Agent/服务器）已同帽（2026-11-18 low 债清账③，
+        // v1.5.0 形象轮补「机器人形象」）：NavigationLink 目的地逐页 postfix（见各链接处），
+        // 宽窗父/子页测度一致不跳变。
         #if targetEnvironment(macCatalyst)
         .macContentColumn()
         #endif

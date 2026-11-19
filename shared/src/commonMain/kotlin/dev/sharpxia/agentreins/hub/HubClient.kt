@@ -5,6 +5,9 @@ import app.cash.sqldelight.coroutines.mapToList
 import dev.sharpxia.agentreins.hub.auth.ApnsTokenRequest
 import dev.sharpxia.agentreins.hub.auth.CredentialStore
 import dev.sharpxia.agentreins.hub.auth.platformCredentialStore
+import dev.sharpxia.agentreins.hub.avatar.AvatarProfile
+import dev.sharpxia.agentreins.hub.avatar.AvatarProfileRequest
+import dev.sharpxia.agentreins.hub.avatar.convergeAvatarProfile
 import dev.sharpxia.agentreins.hub.command.CommandClient
 import dev.sharpxia.agentreins.hub.command.DefaultCommandClient
 import dev.sharpxia.agentreins.hub.projection.AgentRef
@@ -273,6 +276,17 @@ class DefaultHubClient(
     private val phaseState = MutableStateFlow(SyncPhase.Catching)
     val syncPhase: StateFlow<SyncPhase> get() = phaseState
 
+    /**
+     * v1.5.0 形象档状态（个性化形象轮）：REST 读面 + WSS avatar.updated 控制帧双通道收敛的
+     * 单一内存态（updatedAt 大者胜，同值幂等跳过防广播回环——[convergeAvatarProfile]）。
+     * null = 本会话期尚未取得（登录/重连回拉 + sync.ready 钩子两点填充）；平台缓存（iOS
+     * UserDefaults / 桌面 java.util.prefs）由各端收集本 Flow 自持持久化（键 hub.avatarProfile.v1，
+     * 跨登出保留），本类不落任何存储（投影库红线不动——形象是平台偏好不入 Hub.sq）。
+     * 断网启动：本 Flow 为 null，UI 读平台缓存否则内置默认档（12×1.00+GRAY+standard）。
+     */
+    private val avatarProfileState = MutableStateFlow<AvatarProfile?>(null)
+    val avatarProfile: StateFlow<AvatarProfile?> get() = avatarProfileState
+
     /** 登录态就绪后组装同步栈并启动（幂等：重复调用忽略；登出后 stop 再 login 需重新 start）。 */
     fun start() {
         val stack = runtime.authStack ?: return
@@ -299,7 +313,17 @@ class DefaultHubClient(
             accessTokenProvider = { stack.auth.currentAccessToken() },
             scope = scope,
         )
-        scheduler = DefaultSyncScheduler(scope, engine!!, ws, cursors, phaseSink = phaseState)
+        scheduler = DefaultSyncScheduler(
+            scope, engine!!, ws, cursors,
+            phaseSink = phaseState,
+            // v1.5.0：sync.ready 到达即回拉一次形象档（离线窗口 avatar.updated 广播不可重放，
+            // 重连建立成功后主动 GET——设计稿 §syncMechanism 读路径③）；onReady 回调自吞失败。
+            onReady = {
+                scope.launch { runCatching { pullAvatarProfile() } }
+            },
+            // avatar.updated 控制帧直达收敛（纯内存大者胜，同值幂等跳过——防回环双保险之一）
+            onAvatarUpdated = { profile -> noteAvatarProfile(profile) },
+        )
         scheduler?.start()
         // 断线恢复：未终态命令按同键幂等重发（05 §3.5 恢复流程收尾步）
         scope.launch { runCatching { commands?.retryUnfinished() } }
@@ -307,6 +331,10 @@ class DefaultHubClient(
         // 清灌 hubGateways）——登录/重连组装点拉一次 REST #6 对账（防抖通道，含差集删除），
         // 撤销网关卡免等 agents_changed 边沿即收敛。失败静默（runCatching 内，事件/快照兜底）。
         refreshGateways()
+        // v1.5.0 登录回拉兜底（设计稿 §syncMechanism 读路径①）：登录/启动组装点显式 GET 一次
+        // 形象档（sync.ready 钩子外的兜底——快照构成不动，profile 独立小端点代价可忽略）。
+        // 失败静默（runCatching 内；未登录/断网呈平台缓存或默认档，下个 ready 钩子再补）。
+        scope.launch { runCatching { pullAvatarProfile() } }
     }
 
     /**
@@ -802,6 +830,49 @@ class DefaultHubClient(
     suspend fun reportApnsToken(token: String) {
         val stack = runtime.authStack ?: throw IllegalStateException("未登录")
         return stack.auth.withBearer { stack.api.registerApnsToken(ApnsTokenRequest(token)) }
+    }
+
+    // ── v1.5.0 用户形象档门面（#30/#31，个性化形象轮；**纯 REST 直调不走幂等队列**——
+    //    幂等覆盖写/读面无 CommandReceipt 可追，与 deleteConversation 直调先例同源） ──
+
+    /**
+     * 形象档读取（#30，纯投影读无副作用；未登录抛 IllegalStateException，网络/契约错误按
+     * HubException 冒泡）：成功即收敛进 [avatarProfile] 状态（updatedAt 大者胜，服务端权威值
+     * 恒 ≥ 本地）——登录回拉与 sync.ready 钩子共用本通道。
+     */
+    suspend fun getAvatarProfile(): AvatarProfile {
+        val stack = runtime.authStack ?: throw IllegalStateException("未登录")
+        val profile = stack.auth.withBearer { stack.api.getAvatarProfile() }
+        noteAvatarProfile(profile)
+        return profile
+    }
+
+    /**
+     * 形象档保存（#31，幂等覆盖写；**200 回服务端权威档**——updatedAt 直接回填，客户端无二程
+     * GET）：未登录抛 IllegalStateException，形状校验拒绝（越界/长度≠12/未知枚举 → 400
+     * HUB-BIZ-004）按 HubException 冒泡呈现，不静默。保存 = 先 PUT 成功再更新本地（低频不
+     * 敏感，免回滚复杂度——UI 层纪律）；成功响应收敛进 [avatarProfile]，发起设备随后自收的
+     * avatar.updated 帧因 updatedAt 与响应相等而幂等跳过（防回环双保险之二在服务端同值不广播）。
+     */
+    suspend fun putAvatarProfile(profile: AvatarProfile): AvatarProfile {
+        val stack = runtime.authStack ?: throw IllegalStateException("未登录")
+        val saved = stack.auth.withBearer { stack.api.putAvatarProfile(AvatarProfileRequest(profile)) }
+        noteAvatarProfile(saved)
+        return saved
+    }
+
+    /** 登录/启动回拉体（[start] 与 sync.ready 钩子共用；失败由调用方 runCatching 静默）。 */
+    private suspend fun pullAvatarProfile() {
+        getAvatarProfile()
+    }
+
+    /**
+     * 形象档收敛落态（读面/PUT 响应/推送帧三通道唯一入口）：updatedAt 大者胜（last-write-wins
+     * 无合并无乐观锁），同值幂等跳过（发起设备自收帧防回环）；epoch 哨兵恒最小。纯内存操作
+     * （WSS 帧回调线程安全——StateFlow 同值/大者胜合流无竞态）。
+     */
+    private fun noteAvatarProfile(profile: AvatarProfile) {
+        convergeAvatarProfile(avatarProfileState.value, profile)?.let { avatarProfileState.value = it }
     }
 
     // ── v1.3.0 网关供给面管理门面（#25/#26/#27，多网关轮；纯 REST 直调不走幂等队列） ──

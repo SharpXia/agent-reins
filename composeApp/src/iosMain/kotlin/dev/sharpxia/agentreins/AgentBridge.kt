@@ -13,6 +13,9 @@ import dev.sharpxia.agentreins.hub.UiMessage
 import dev.sharpxia.agentreins.hub.UiMessagesPage
 import dev.sharpxia.agentreins.hub.UiWorkActivity
 import dev.sharpxia.agentreins.hub.auth.DeviceInfo
+import dev.sharpxia.agentreins.hub.avatar.AvatarProfile
+import dev.sharpxia.agentreins.hub.avatar.encodeJson
+import dev.sharpxia.agentreins.hub.avatar.parseAvatarProfileJson
 import dev.sharpxia.agentreins.hub.db.createHubDriver
 import dev.sharpxia.agentreins.hub.db.openHubDatabase
 import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
@@ -54,6 +57,7 @@ class AgentBridge {
     private var hubGatewayJob: Job? = null
     private var hubWorkActivityJob: Job? = null
     private var hubPhaseJob: Job? = null
+    private var hubAvatarJob: Job? = null
 
     /**
      * wp-13：run 终态通知回调（Swift 注册；见 [hubWatchRunTerminal]）。2026-11-15 推送
@@ -128,6 +132,7 @@ class AgentBridge {
         hubGatewayJob?.cancel(); hubGatewayJob = null
         hubWorkActivityJob?.cancel(); hubWorkActivityJob = null
         hubPhaseJob?.cancel(); hubPhaseJob = null
+        hubAvatarJob?.cancel(); hubAvatarJob = null
         val client = hubClient
         hubClient = null
         client?.stop()
@@ -212,6 +217,65 @@ class AgentBridge {
             // TF beta-0.5.4 真机缺陷修复：name 是 PascalCase 枚举名（"Catching"），Swift 侧按
             // 小写契约比较（注释上行）——恒不匹配导致提示条永不消失、文字恒空、恒琥珀底。
             runCatching { hubClient?.syncPhase?.collect { onPhase(it.name.lowercase()) } }
+        }
+    }
+
+    // ---------- v1.5.0 用户形象档（#30/#31 个性化形象轮；纯 REST 直调不走幂等队列） ----------
+
+    /**
+     * 形象档订阅（v1.5.0；Swift 侧 AvatarProfileStore 消费 shared 收敛流）：shared
+     * avatarProfile StateFlow（登录回拉 + sync.ready 重连回拉 + avatar.updated 控制帧三路
+     * 汇合、updatedAt 大者胜）→ **JSON 串**跨边界（DTO 纪律：Kotlin 枚举/List 不直接过
+     * ObjC 互携，编解码两端各自宽松）。null = 本会话期尚未取得（断网/未拉到——Swift 侧读
+     * UserDefaults 缓存否则内置默认档）。重复调用由桥侧换订阅；登出随 [hubLogout] 取消。
+     */
+    fun hubWatchAvatarProfile(onProfile: (profileJson: String?) -> Unit) {
+        hubAvatarJob?.cancel()
+        hubAvatarJob = scope.launch {
+            runCatching { hubClient?.avatarProfile?.collect { onProfile(it?.encodeJson()) } }
+        }
+    }
+
+    /**
+     * 形象档读取（端点 #30，v1.5.0 additive；纯读直调不走幂等队列——与 hubCommands 同式）：
+     * onDone 非 null = 成功（服务端权威档 JSON 串，未设置过 = 默认档 + epoch 哨兵，无 404
+     * 语义）；null = 通道不可用（未登录/网络不可达/Hub FAILED），error = 人读失败原因。
+     * 成功响应已收敛进 shared 流（Swift 收集侧自动收帧），本回调只服务设置页显式刷新。
+     */
+    fun hubGetAvatarProfile(onDone: (profileJson: String?, error: String?) -> Unit) {
+        scope.launch {
+            val r = runCatching { hubClient?.getAvatarProfile() ?: throw HubException.notLoggedIn() }
+            val profile = r.getOrNull()
+            if (profile != null) {
+                onDone(profile.encodeJson(), null)
+            } else {
+                onDone(null, describeError(r.exceptionOrNull()))
+            }
+        }
+    }
+
+    /**
+     * 形象档保存（端点 #31，v1.5.0 additive；**纯 REST 直调不走幂等队列**——幂等覆盖写无
+     * CommandReceipt 可追，与 hubDeleteConversation 同款直调先例）：[profileJson] 为三可编辑
+     * 字段请求体（updatedAt 不入请求——服务端权威设定）。onDone 非 null = 成功：**200 回
+     * 服务端权威档**（updatedAt 直接回填，客户端无二程 GET）；null = 未成功（未登录/网络
+     * 不可达/形状校验 400 HUB-BIZ-004 等），error = 人读失败原因，调用方显式呈现 + 可重试，
+     * 不静默。成功响应已收敛进 shared 流（发起设备自收 avatar.updated 帧因 updatedAt 相等
+     * 幂等跳过，防回环）。
+     */
+    fun hubPutAvatarProfile(profileJson: String, onDone: (profileJson: String?, error: String?) -> Unit) {
+        scope.launch {
+            val r = runCatching {
+                val client = hubClient ?: throw HubException.notLoggedIn()
+                val req = parseAvatarProfileJson(profileJson) ?: throw IllegalArgumentException("形象档请求体不可解析")
+                client.putAvatarProfile(req)
+            }
+            val profile = r.getOrNull()
+            if (profile != null) {
+                onDone(profile.encodeJson(), null)
+            } else {
+                onDone(null, describeError(r.exceptionOrNull()))
+            }
         }
     }
 

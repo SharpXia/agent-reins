@@ -1,10 +1,11 @@
 package dev.sharpxia.agentreins.hub
 
+import dev.sharpxia.agentreins.hub.avatar.AvatarProfile
 import dev.sharpxia.agentreins.hub.projection.EventEnvelope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 
-/** Hub→客户端的 WSS 帧（四帧之一；sync.resume 是唯一客户端→Hub 上行帧，由 [HubWsClient.connect] 内部发送）。 */
+/** Hub→客户端的 WSS 帧（sync.resume 是唯一客户端→Hub 上行帧，由 [HubWsClient.connect] 内部发送）。 */
 sealed interface HubServerFrame {
     /** 就绪确认：cursor 校验通过；watermark=服务端当前水位；pollIntervalMs 为退化轮询建议值（advisory，可采纳）。 */
     data class Ready(val watermark: String, val pollIntervalMs: Long? = null) : HubServerFrame
@@ -19,6 +20,14 @@ sealed interface HubServerFrame {
         val retryable: Boolean? = null,
         val retryAfterMs: Long? = null,
     ) : HubServerFrame
+
+    /**
+     * 形象档更新控制帧（v1.5.0 additive，`{"type":"avatar.updated","data":{"profile":…}}`）：
+     * **非事件域**——不进事件类型闭集、不入 eventlog、不占 seq、无投影、零推送触发（推送
+     * 订阅源 = eventlog）。best-effort 仅达同用户在线连接；权威 = REST 读面（端点 #30），
+     * 本帧是加速器（收敛比较 updatedAt 大者胜在 [convergeAvatarProfile]，同值幂等跳过）。
+     */
+    data class AvatarUpdated(val profile: AvatarProfile) : HubServerFrame
 }
 
 /** 连接关闭观测（R6：服务端主动断开不是错误，一律转断线恢复；仅 1000+superseded 不重连）。 */

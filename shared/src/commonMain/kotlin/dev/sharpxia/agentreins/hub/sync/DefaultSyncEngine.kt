@@ -151,6 +151,19 @@ class DefaultSyncScheduler(
      * 指向 scheduler 自持流会随重建换源，注入客户端级稳定流后 collect 永不换源。
      */
     private val phaseSink: MutableStateFlow<SyncPhase> = MutableStateFlow(SyncPhase.Catching),
+    /**
+     * v1.5.0 形象档回拉钩子（additive，可选）：每次 WSS 建连收到 sync.ready 即触发一次——
+     * 离线窗口错过的 avatar.updated 控制帧不可重放（控制帧无 seq 无重放），每次重连建立
+     * 成功后主动 GET 一次（端点 #30，权威 = REST 读面；设计稿 §syncMechanism 读路径③）。
+     * 缺省 null = 钩子关闭（旧装配/直连单测零行为变化）；实现方须自吞失败（best-effort，
+     * 不阻塞同步循环）。
+     */
+    private val onReady: (() -> Unit)? = null,
+    /**
+     * v1.5.0 形象档推送钩子（additive，可选）：avatar.updated 控制帧到达即回调（收敛比较
+     * updatedAt 大者胜由实现方承担——同值幂等跳过防广播回环）。缺省 null = 钩子关闭。
+     */
+    private val onAvatarUpdated: ((dev.sharpxia.agentreins.hub.avatar.AvatarProfile) -> Unit)? = null,
 ) : SyncScheduler {
 
     override val phase: StateFlow<SyncPhase> get() = phaseSink
@@ -258,6 +271,9 @@ class DefaultSyncScheduler(
                 val ok = runCatching { engine.catchUp() } // R3 先连后补（ready 后立即对账一次）
                 // wp-10：追平成功 → linked（提示条消失相位）；未追平/失败保持 catching（帧仍在流）
                 if (ok.getOrDefault(false)) setPhase(SyncPhase.Linked)
+                // v1.5.0：重连回拉钩子（形象档；离线窗口广播不可重放，ready 后主动 GET 一次）。
+                // 回调自吞失败（best-effort），不阻塞同步循环与相位收敛。
+                onReady?.invoke()
             }
             is HubServerFrame.Event -> engine.onEventArrived(frame.event)
             is HubServerFrame.Error -> when (frame.code) {
@@ -268,6 +284,8 @@ class DefaultSyncScheduler(
                 }
                 else -> Unit // HUB-BIZ-003 限流帧等：依赖下一轮校准/重连收敛
             }
+            // v1.5.0：avatar.updated 控制帧——非事件域，不进投影/游标，直达形象档收敛钩子
+            is HubServerFrame.AvatarUpdated -> onAvatarUpdated?.invoke(frame.profile)
         }
     }
 

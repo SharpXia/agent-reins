@@ -8,6 +8,8 @@ import dev.sharpxia.agentreins.hub.auth.LoginOk
 import dev.sharpxia.agentreins.hub.auth.LoginRequest
 import dev.sharpxia.agentreins.hub.auth.RefreshOk
 import dev.sharpxia.agentreins.hub.auth.RefreshRequest
+import dev.sharpxia.agentreins.hub.avatar.AvatarProfile
+import dev.sharpxia.agentreins.hub.avatar.AvatarProfileRequest
 import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
 import dev.sharpxia.agentreins.hub.projection.ApprovalDecisionRequest
 import dev.sharpxia.agentreins.hub.projection.BridgeTokenIssuedResponse
@@ -30,12 +32,13 @@ import dev.sharpxia.agentreins.hub.projection.SnapshotResponse
 import dev.sharpxia.agentreins.hub.projection.CancelRunRequest
 
 /**
- * Hub REST 客户端（契约 v1.4.0：29 端点 + WSS，冻结 tag hub-api-v1.4.0；v1.3.0 27 端点 +
- * 网关供给面 #25–#27；v1.2.0 24 端点 + 多模态新增 #23/#24；v1.1 20 端点 + #16–#21）。
+ * Hub REST 客户端（契约 v1.5.0：31 端点 + WSS，冻结 tag hub-api-v1.5.0；v1.4.0 29 端点 +
+ * 多主会话 #28/#29；v1.3.0 27 端点 + 网关供给面 #25–#27；v1.2.0 24 端点 + 多模态新增
+ * #23/#24；v1.1 20 端点 + #16–#21）。
  *
  * 契约钉版（P0 验收②，docs/plans/hub-migration-plan.md §6-P0；v1.1 迁移见 §8 变更清单）：
- * - REST 契约：`api/hub-api-v1.yaml` — OpenAPI 3.0.3，info.version = **v1.4.0**，`x-hub-api-version: 1`，
- *   冻结 git tag `hub-api-v1.4.0`（AgentReinService 仓；tag 名 ≠ yaml version，AGENTS.md 纪律）
+ * - REST 契约：`api/hub-api-v1.yaml` — OpenAPI 3.0.3，info.version = **v1.5.0**，`x-hub-api-version: 1`，
+ *   冻结 git tag `hub-api-v1.5.0`（AgentReinService 仓；tag 名 ≠ yaml version，AGENTS.md 纪律）
  * - WSS 帧契约：`api/hub-wss-frames-v1.schema.json` — JSON Schema 2020-12，protocolVersion 支持集 = {1}
  * - 版本策略（08 §6.1）：/v1 内仅 additive（新增端点、可选请求字段、响应字段、错误码）；
  *   破坏性变更升 /v2 并行 ≥90 天（v1.1 为前端未开工期的破坏性修订特例，不经 /v2）。客户端义务
@@ -57,9 +60,16 @@ import dev.sharpxia.agentreins.hub.projection.CancelRunRequest
  *   （按 agent 列会话，管理面清单 SessionsResponse，不收敛不筛族）与 #29 DELETE
  *   /v1/conversations/{conversationId}（Hub 主权 tombstone，204 幂等终态，历史只读保留）；
  *   GatewaySummary 增可选 provider（桥自报供给方标识，未知省略）。客户端义务同族：忽略未知
- *   字段、provider 不做枚举假设；本接口 deleteConversation/listAgentSessions 给默认实现抛
- *   UnsupportedOperationException（desktopTest 存量 fake 不在本批改动清单，生产实现
- *   [DefaultHubApi] 必须覆盖）
+ *   字段、provider 不做枚举假设
+ * - v1.5.0 additive（个性化形象轮，2026-11-20）：新端点 #30 GET /v1/me/avatar-profile
+ *   （纯投影读无副作用，资源恒存在——未设置过返回默认档 + epoch 哨兵，无 404 语义；s.bearer
+ *   非 bearerDevice——形象是用户级资源非设备绑定）与 #31 PUT /v1/me/avatar-profile（幂等
+ *   覆盖写：形状校验越界 400 HUB-BIZ-004 不落库；**200 回服务端权威档**——updatedAt 直接
+ *   回填，客户端无二程 GET；同值重 PUT 返回同 body 不更新 updatedAt 不重复广播）；WSS 控制帧
+ *   avatar.updated（非事件域：不进事件类型闭集、不入 eventlog、不占 seq、无投影、零推送触发）。
+ *   形象档形状见 [AvatarProfile]；客户端义务：忽略未知字段、未知枚举/越界宽松回落（显示层）。
+ *   本接口 getAvatarProfile/putAvatarProfile 给默认实现抛 UnsupportedOperationException
+ *   （desktopTest 存量 fake 不在本批改动清单，生产实现 [DefaultHubApi] 必须覆盖——#28/#29 同款纪律）
  */
 interface HubApi {
     // ── 认证（#1 / #2，公开端点） ─────────────────────────────────────────
@@ -230,4 +240,30 @@ interface HubApi {
 
     /** 事件增量（同端点两用途）：返回 (cursor, …] 按 id 升序；串行分页至 hasMore=false 且 nextCursor==currentWatermark。 */
     suspend fun events(cursor: String, limit: Int? = null): EventsPage
+
+    // ── 用户形象档（#30 / #31，v1.5.0 additive；s.bearer 非 bearerDevice——用户级资源非设备绑定） ──
+
+    /**
+     * 形象档读取（#30，v1.5.0 additive，纯投影读无副作用）：资源恒存在——未设置过返回
+     * 默认档（faceFactors 12×1.00、GRAY、standard、updatedAt=epoch 哨兵），无 404 语义；
+     * 无会话级 Token 403 HUB-AUTH-006 分支（撤销设备 Token 失效仍走 403 HUB-AUTH-004）。
+     * 默认实现抛 UnsupportedOperationException（存量测试 fake 不必逐一补 stub，见接口头注；
+     * 生产实现必须覆盖——#28/#29 同款纪律）。
+     */
+    suspend fun getAvatarProfile(): AvatarProfile {
+        throw UnsupportedOperationException("getAvatarProfile 为 v1.5.0 新端点，实现方必须覆盖")
+    }
+
+    /**
+     * 形象档保存（#31，v1.5.0 additive，幂等覆盖写）：**返回 200 + AvatarProfile**（服务端
+     * 权威 updatedAt 直接回填，客户端无二程 GET）；同值重 PUT 返回同 body、不更新 updatedAt、
+     * 不重复广播（同值无副作用）。逐字段校验在服务端（越界/长度≠12/未知枚举 → 400
+     * HUB-BIZ-004 不落库）；updatedAt 不入请求体（恒由服务端权威设定，见 [AvatarProfileRequest]）。
+     * 保存成功后服务端 best-effort 广播 WSS 控制帧 avatar.updated 至该用户全部在线连接（含
+     * 发起设备自身——自收帧因 updatedAt 与本响应相等而幂等跳过）。默认实现抛
+     * UnsupportedOperationException（同 [getAvatarProfile] 纪律）。
+     */
+    suspend fun putAvatarProfile(req: AvatarProfileRequest): AvatarProfile {
+        throw UnsupportedOperationException("putAvatarProfile 为 v1.5.0 新端点，实现方必须覆盖")
+    }
 }

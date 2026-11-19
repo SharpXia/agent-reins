@@ -1,5 +1,6 @@
 package dev.sharpxia.agentreins.hub
 
+import dev.sharpxia.agentreins.hub.avatar.parseAvatarUpdatedFrame
 import dev.sharpxia.agentreins.hub.projection.EventEnvelope
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
@@ -164,6 +165,8 @@ class DefaultHubWsClient(
             "error" -> json.decodeSafe(ErrorFrameDto.serializer(), obj)?.let {
                 HubServerFrame.Error(it.code, it.message, it.retryable, it.retryAfterMs)
             }
+            // v1.5.0：avatar.updated 控制帧（非事件域）——载荷抽取宽松（缺 data.profile → null 静默忽略）
+            "avatar.updated" -> parseAvatarUpdatedFrame(obj)?.let { HubServerFrame.AvatarUpdated(it) }
             else -> null // 未知帧类型：忽略内容不失败（宽松解析义务，08 §1.1）
         }
     }

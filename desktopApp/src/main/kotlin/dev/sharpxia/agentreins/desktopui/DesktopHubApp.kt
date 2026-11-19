@@ -22,6 +22,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -30,12 +31,16 @@ import androidx.compose.ui.unit.dp
 import dev.sharpxia.agentreins.hub.DefaultHubClient
 import dev.sharpxia.agentreins.hub.hubRootScopeGuard
 import dev.sharpxia.agentreins.hub.HubAuthState
+import dev.sharpxia.agentreins.hub.HubException
 import dev.sharpxia.agentreins.hub.HubRuntime
 import dev.sharpxia.agentreins.hub.auth.platformCredentialStore
+import dev.sharpxia.agentreins.hub.avatar.AvatarProfile
+import dev.sharpxia.agentreins.hub.avatar.avatarUpdatedAtNewer
 import dev.sharpxia.agentreins.hub.db.createHubDriver
 import dev.sharpxia.agentreins.hub.db.openHubDatabase
 import dev.sharpxia.agentreins.hub.sync.SyncPhase
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -72,6 +77,10 @@ internal fun DesktopHubApp(windowPrefs: DesktopWindowPreferences? = null) {
     // 2026-11-19：显示偏好（流式输出/思考中指示，用户级持久化跨登出保留；Preferences 不可用
     // 时降级纯内存态不崩）——同一实例喂 HubShell（UI 镜像权威），缺省 true = 保持既有行为。
     val displayPrefs = remember { DesktopDisplayPreferences() }
+    // v1.5.0 个性化形象轮：形象档缓存（键 hub.avatarProfile.v1，跨登出保留不入投影库；
+    // Preferences 不可用纯内存降级不抛）——同一实例喂 HubShell（shared avatarProfile 流收敛
+    // 进缓存，UI 镜像只喂设置页卡）。
+    val avatarPrefs = remember { DesktopAvatarPreferences() }
     // 多网关轮（v1.3.0，设计稿 §4.3）：agent 分组本地偏好（java.util.prefs，§4.2 JSON，
     // 与 iOS UserDefaults 各自持久互不同步；登出 wipeLocalData 不触碰——投影库外偏好）。
     // 同一实例喂 GatewaysPanel（分组三段式）与组员资格呈现，写随读刷。
@@ -127,7 +136,7 @@ internal fun DesktopHubApp(windowPrefs: DesktopWindowPreferences? = null) {
     MaterialTheme {
         when {
             authState is HubAuthState.LoggedIn -> {
-                HubShell(client, authState as HubAuthState.LoggedIn, coordinator, mutePrefs, displayPrefs, windowPrefs, agentGroups)
+                HubShell(client, authState as HubAuthState.LoggedIn, coordinator, mutePrefs, displayPrefs, avatarPrefs, windowPrefs, agentGroups)
             }
             authState is HubAuthState.NeedsLogin ||
                 (authState is HubAuthState.Idle && restoreAttempted) || submitting -> {
@@ -174,6 +183,8 @@ private fun HubShell(
     mutePrefs: DesktopMutePreferences,
     /** 2026-11-19：显示偏好（流式输出/思考中指示）权威实例——UI 镜像只喂会话页渲染与设置页开关。 */
     displayPrefs: DesktopDisplayPreferences,
+    /** v1.5.0：形象档缓存权威实例（shared 流收敛进缓存，UI 镜像只喂设置页形象卡）。 */
+    avatarPrefs: DesktopAvatarPreferences,
     windowPrefs: DesktopWindowPreferences?,
     agentGroups: DesktopAgentGroupStore,
 ) {
@@ -214,6 +225,65 @@ private fun HubShell(
     fun setThinkingIndicator(enabled: Boolean) {
         displayPrefs.setThinkingIndicator(enabled)
         thinkingIndicator = displayPrefs.thinkingIndicator
+    }
+    // ── v1.5.0 个性化形象轮：形象档同步链（设计稿 §syncMechanism 四条收敛通道的桌面接法） ──
+    // 读通道：登录回拉（shared DefaultHubClient.start）+ sync.ready 重连回拉（scheduler 钩子）
+    // + avatar.updated 实时帧——三路在 shared avatarProfile 流汇合（updatedAt 大者胜），本壳
+    // 只做「流 → 缓存 → UI 镜像」的二次收敛；写通道：设置页选择 → PUT 成功 → mergeRemote。
+    // 编辑冲突：保存在途收到远端更新不出发表单，顶栏提示 + 一键拉取（读通道④）。
+    val avatarScope = rememberCoroutineScope()
+    var avatarUi by remember { mutableStateOf(avatarPrefs.profile) }
+    var avatarSaving by remember { mutableStateOf(false) }
+    var avatarSaveError by remember { mutableStateOf<String?>(null) }
+    var remoteAvatarPending by remember { mutableStateOf<AvatarProfile?>(null) }
+    val remoteAvatar by client.avatarProfile.collectAsState()
+
+    /** shared 流 → 本地收敛：保存在途只记冲突提示（不覆盖表单），空闲直接大者胜合并。 */
+    fun reconcileAvatar() {
+        val remote = remoteAvatar ?: return
+        if (avatarSaving) {
+            // 读通道④：编辑（保存）期间远端更新不出发表单——记录待拉取，完成后裁决
+            if (avatarUpdatedAtNewer(remote.updatedAt, avatarUi.updatedAt)) {
+                remoteAvatarPending = remote
+            }
+            return
+        }
+        if (remote.updatedAt == avatarPrefs.profile.updatedAt) return
+        if (avatarPrefs.mergeRemote(remote)) avatarUi = avatarPrefs.profile
+    }
+    LaunchedEffect(remoteAvatar) { reconcileAvatar() }
+
+    /** 设置页统一选择入口（预设/配色/动效档/恢复默认）：先 PUT 成功再更新本地，失败不排队。 */
+    fun selectAvatar(newProfile: AvatarProfile) {
+        if (avatarSaving) return
+        avatarSaving = true
+        avatarSaveError = null
+        avatarScope.launch {
+            runCatching { client.putAvatarProfile(newProfile) }
+                .fold(
+                    onSuccess = { saved ->
+                        // 先 PUT 成功再更新本地；mergeRemote 大者胜——保存窗口内竞速成功的
+                        // 远端新档不被本端旧响应回退（last-write-wins 收敛）
+                        avatarPrefs.mergeRemote(saved)
+                        avatarUi = avatarPrefs.profile
+                        avatarSaveError = null
+                    },
+                    onFailure = { e ->
+                        avatarSaveError = (e as? HubException)?.let { "${it.payload.code} ${it.payload.message}" }
+                            ?: (e.message ?: "未知错误")
+                    },
+                )
+            avatarSaving = false
+            reconcileAvatar() // 保存窗口内到达的远端帧补收敛（shared 流已是最新）
+        }
+    }
+
+    /** 冲突横幅「拉取」：放弃在途表单、采纳远端权威值（读通道④ 一键拉取）。 */
+    fun pullRemoteAvatar() {
+        val remote = client.avatarProfile.value ?: return
+        if (avatarPrefs.mergeRemote(remote)) avatarUi = avatarPrefs.profile
+        remoteAvatarPending = null
+        avatarSaveError = null
     }
     // wp-18 通知规则数据面：会话列表推送喂回复差异面（unread 增量）；当前打开会话供
     // 「非当前打开」判定（iOS HubStore.selected 同口径）。规则态由协调器消费协程独占，
@@ -295,6 +365,13 @@ private fun HubShell(
                             onStreamingPlayback = ::setStreamingPlayback,
                             thinkingIndicator = thinkingIndicator,
                             onThinkingIndicator = ::setThinkingIndicator,
+                            // v1.5.0：机器人形象卡（UI 镜像 avatarUi；选择统一走 selectAvatar PUT 通道）
+                            avatarProfile = avatarUi,
+                            avatarSaving = avatarSaving,
+                            avatarSaveError = avatarSaveError,
+                            remoteAvatarPending = remoteAvatarPending,
+                            onAvatarSelect = ::selectAvatar,
+                            onAvatarPullRemote = ::pullRemoteAvatar,
                         )
                         // wp-11：网关与 Agent 独立页（observeGateways 零消费 → 结构化清单呈现）；
                         // 多网关轮：三段式分组（agentGroups 本地偏好 + AgentRefRow 新建会话 action）

@@ -1,6 +1,8 @@
 package dev.sharpxia.agentreins.desktopui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -33,6 +36,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -44,6 +48,13 @@ import dev.sharpxia.agentreins.hub.UiConversation
 import dev.sharpxia.agentreins.hub.UiGateway
 import dev.sharpxia.agentreins.hub.auth.DeviceInfo
 import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
+import dev.sharpxia.agentreins.hub.avatar.AgentExpression
+import dev.sharpxia.agentreins.hub.avatar.AgentTint
+import dev.sharpxia.agentreins.hub.avatar.AVATAR_PRESETS
+import dev.sharpxia.agentreins.hub.avatar.AvatarMotion
+import dev.sharpxia.agentreins.hub.avatar.AvatarPalette
+import dev.sharpxia.agentreins.hub.avatar.AvatarProfile
+import dev.sharpxia.agentreins.hub.avatar.DEFAULT_AVATAR_PROFILE
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -86,6 +97,14 @@ internal fun SettingsScreen(
     onStreamingPlayback: ((Boolean) -> Unit)? = null,
     thinkingIndicator: Boolean = true,
     onThinkingIndicator: ((Boolean) -> Unit)? = null,
+    // v1.5.0 个性化形象轮：形象档卡（avatarProfile = null = 不挂卡，旧装配兼容——同上先例）。
+    // onSelect = 统一选择入口（预设/配色/动效档/恢复默认均组装成完整档提交，PUT 成功才落本地）。
+    avatarProfile: AvatarProfile? = null,
+    avatarSaving: Boolean = false,
+    avatarSaveError: String? = null,
+    remoteAvatarPending: AvatarProfile? = null,
+    onAvatarSelect: ((AvatarProfile) -> Unit)? = null,
+    onAvatarPullRemote: (() -> Unit)? = null,
 ) {
     val scope = rememberCoroutineScope()
     var devices by remember { mutableStateOf<List<DeviceInfo>?>(null) }
@@ -227,6 +246,22 @@ internal fun SettingsScreen(
                     onStreamingPlayback = streamingPlaybackHandler,
                     thinkingIndicator = thinkingIndicator,
                     onThinkingIndicator = thinkingIndicatorHandler,
+                )
+            }
+
+            // v1.5.0：机器人形象卡（96dp 实时预览 + 8 款预设网格 + 十色圆点 + 动效档 + 恢复默认；
+            // profile = null 不挂卡——iOS HubSettingsView「机器人形象」Section parity）
+            val avatarHandler = onAvatarSelect
+            val avatarProfileCurrent = avatarProfile
+            val avatarPullHandler = onAvatarPullRemote
+            if (avatarProfileCurrent != null && avatarHandler != null && avatarPullHandler != null) {
+                AvatarPreferencesCard(
+                    profile = avatarProfileCurrent,
+                    saving = avatarSaving,
+                    saveError = avatarSaveError,
+                    remotePending = remoteAvatarPending,
+                    onSelect = avatarHandler,
+                    onPullRemote = avatarPullHandler,
                 )
             }
 
@@ -375,6 +410,156 @@ private fun DisplayPreferencesCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = Color(0xFF777777),
             )
+        }
+    }
+}
+
+/**
+ * v1.5.0 个性化形象轮：机器人形象卡（iOS HubSettingsView「机器人形象」子页 parity）——
+ * 96dp 实时预览（动效档 standard 才呼吸；off 静态）+ 8 款预设网格（44dp 缩略**静态渲染**
+ * motionEnabled=false——AvatarIdleMotion 常驻循环多实例性能教训两端同守）+ 十色横排圆点
+ * （strong 色，明暗随系统）+ 动效档两档开关（关闭/标准）+ 恢复默认。
+ *
+ * 选择即提交（低频不敏感）：预设 = 造型 + 推荐配色一并选（推荐语义），配色/动效单改保留
+ * 其余维度；onSelect 组装完整档交壳层 PUT——**先 PUT 成功再更新本地**（失败显式错误可重试，
+ * 不排队不回滚服务端）。编辑冲突（编辑期间收到远端更新）：顶部提示「其他设备已更新形象」
+ * +一键拉取，不出发表单（设计稿 §syncMechanism 读路径④）。
+ */
+@Composable
+private fun AvatarPreferencesCard(
+    profile: AvatarProfile,
+    saving: Boolean,
+    saveError: String?,
+    remotePending: AvatarProfile?,
+    onSelect: (AvatarProfile) -> Unit,
+    onPullRemote: () -> Unit,
+) {
+    val tint = AgentTint.of(profile.paletteId)
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("机器人形象", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                if (saving) Text("保存中…", style = MaterialTheme.typography.bodySmall, color = Color(0xFF999999))
+            }
+
+            // 编辑冲突提示（远端更新在途、未覆盖表单）：一键拉取收敛
+            if (remotePending != null) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "其他设备已更新形象",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFB45309),
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = onPullRemote) { Text("拉取") }
+                }
+            }
+
+            // 96dp 实时预览（≥40dp 全量渲染；动效档 standard 才呼吸，off 静态——A6 档位）
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                HubRobotAvatar(
+                    palette = tint,
+                    expression = AgentExpression.CALM,
+                    size = 96.dp,
+                    faceFactors = profile.faceFactors,
+                    motionEnabled = profile.motionLevel == AvatarMotion.STANDARD,
+                )
+                Column(Modifier.padding(start = 16.dp)) {
+                    Text(
+                        "造型 · ${AVATAR_PRESETS.firstOrNull { it.faceKey == profile.faceKey }?.zhName ?: "自定义"}",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        "配色 · ${profile.paletteId.wire}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF777777),
+                    )
+                    Text(
+                        "动效 · ${if (profile.motionLevel == AvatarMotion.STANDARD) "标准" else "关闭"}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF777777),
+                    )
+                }
+            }
+
+            // 预设网格 8 款（两行四列；缩略 44dp 静态；选中 = faceKey 相等）
+            Text("造型", style = MaterialTheme.typography.titleSmall)
+            listOf(0, 4).forEach { start ->
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AVATAR_PRESETS.subList(start, start + 4).forEach { preset ->
+                        val selected = preset.faceKey == profile.faceKey
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { onSelect(AvatarProfile(preset.faceFactors, preset.recommendedPalette, profile.motionLevel, profile.updatedAt)) }
+                                .padding(4.dp),
+                        ) {
+                            HubRobotAvatar(
+                                palette = AgentTint.of(preset.recommendedPalette),
+                                expression = AgentExpression.CALM,
+                                size = 44.dp,
+                                faceFactors = preset.faceFactors,
+                                motionEnabled = false, // 缩略静态渲染（常驻循环多实例性能纪律）
+                            )
+                            Text(
+                                preset.zhName,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (selected) Color(0xFF2B6CB0) else Color(0xFF777777),
+                            )
+                        }
+                    }
+                }
+            }
+
+            // 十色横排圆点（strong 色；选中描边）
+            Text("配色", style = MaterialTheme.typography.titleSmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                AvatarPalette.entries.forEach { p ->
+                    val selected = p == profile.paletteId
+                    Box(
+                        modifier = Modifier
+                            .size(26.dp)
+                            .clip(CircleShape)
+                            .background(Color(AgentTint.of(p).strongArgb(false)))
+                            .border(
+                                width = if (selected) 2.5.dp else 1.dp,
+                                color = if (selected) Color(0xFF2B6CB0) else Color(0xFFCCCCCC),
+                                shape = CircleShape,
+                            )
+                            .clickable { onSelect(AvatarProfile(profile.faceFactors, p, profile.motionLevel, profile.updatedAt)) },
+                    )
+                }
+            }
+
+            // 动效档（关闭 = 静止仅入场淡入+表情即时切换；标准 = +待机呼吸+过渡动画）
+            Text("动效", style = MaterialTheme.typography.titleSmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(AvatarMotion.OFF to "关闭", AvatarMotion.STANDARD to "标准").forEach { (motion, label) ->
+                    val selected = motion == profile.motionLevel
+                    OutlinedButton(
+                        onClick = { onSelect(AvatarProfile(profile.faceFactors, profile.paletteId, motion, profile.updatedAt)) },
+                        colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
+                            contentColor = if (selected) Color(0xFF2B6CB0) else Color(0xFF777777),
+                        ),
+                        border = androidx.compose.material3.ButtonDefaults.outlinedButtonBorder.takeIf { !selected },
+                    ) {
+                        Text(if (selected) "$label ●" else label)
+                    }
+                }
+            }
+
+            TextButton(onClick = {
+                onSelect(AvatarProfile(DEFAULT_AVATAR_PROFILE.faceFactors, AvatarPalette.GRAY, AvatarMotion.STANDARD, profile.updatedAt))
+            }) { Text("恢复默认") }
+
+            if (saveError != null) {
+                Text(
+                    "保存失败：$saveError（可重试）",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         }
     }
 }

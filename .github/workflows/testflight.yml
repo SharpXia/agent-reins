@@ -129,7 +129,15 @@ jobs:
             -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
             -authenticationKeyID "${{ secrets.ASC_API_KEY_ID }}" \
             -authenticationKeyIssuerID "${{ secrets.ASC_API_ISSUER_ID }}" \
-            archive 2>&1 | tail -40
+            archive 2>&1 | tee build/archive-ios-full.log | tail -40
+
+      - name: Upload full archive log (iOS, on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-log-ios
+          path: build/archive-ios-full.log
+          if-no-files-found: ignore
 
       - name: Export IPA (TestFlight / app-store-connect)
         run: |
@@ -304,6 +312,8 @@ jobs:
           # 优化等级 -O 不变仅拆编译单元。
           # destination=generic 变体：仅出包不跑模拟器，macosx sdk + IS_MACCATALYST=YES →
           # Compile Kotlin 脚本段走 embedAndSignCatalystAppleFrameworkForXcode + stamp 改写分支
+          # 全量日志 tee 落盘（2026-11-20 勘误：旧「exit 65 无 error 行」是 tail -40 把中途
+          # 诊断丢了——pipefail 只保退出码不保文本；失败时下一 step 上传全量日志）
           xcodebuild \
             -project iosApp/iosApp.xcodeproj \
             -scheme iosApp \
@@ -315,7 +325,15 @@ jobs:
             ARCHS=arm64 \
             SWIFT_COMPILATION_MODE=singlefile \
             CODE_SIGNING_ALLOWED=NO \
-            archive 2>&1 | tail -40
+            archive 2>&1 | tee build/archive-catalyst-full.log | tail -40
+
+      - name: Upload full archive log (Mac Catalyst, on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-log-maccatalyst
+          path: build/archive-catalyst-full.log
+          if-no-files-found: ignore
 
       - name: Re-sign app with App Sandbox entitlements (distribution)
         run: |

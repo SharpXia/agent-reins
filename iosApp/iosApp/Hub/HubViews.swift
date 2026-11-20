@@ -482,17 +482,44 @@ private struct NewConversationAgentRow: View {
 struct HubConversationRow: View {
     @State private var hub = HubStore.shared
     let c: UiConversation
+    /// DONE 瞬时窗（角色系统批次2）：hasActiveRun 真→假 触发 900ms 完成弹跳后回落 IDLE。
+    /// generation 防 900ms 窗内新 run 启动的陈旧回调误清（真→假→真 序列每次跳变 +1 作废旧窗）。
+    @State private var botDoneGeneration = 0
+    @State private var botDoneTransient = false
 
     private var title: String {
         if !c.label.isEmpty { return c.label }
         return c.agentId.isEmpty ? "会话" : c.agentId
     }
 
+    /// WAITING 谓词（wp-9 零新状态）：hub.approvals 按 conversationId 判等过滤——
+    /// conversationId = null（归属未学习）不匹配任何行，不伪造审批等待（设计 integrationPoints④）。
+    private var awaitingApproval: Bool {
+        hub.approvals.contains { $0.conversationId == c.conversationId }
+    }
+
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: c.hasActiveRun ? "bolt.badge.a" : "person.crop.circle.fill")
-                .foregroundStyle(c.hasActiveRun ? Color.orange : Color.secondary)
-                .font(.title3)
+            // 角色系统批次2（2026-11-20）：36pt 会话角色替代闪电/人形两态图标——seed=会话化身
+            // （botSeedFor 纯函数，同 cid 双端恒定、floorMod 分桶含负哈希金标锁），state 六态
+            // 纯函数接线。列表行不细分 THINKING（workActivity 逐行订阅违纪律，设计边界①两档
+            // 合一呈 RUNNING）；UiConversation 无失败信号（HubClient.kt:50-66），run 失败行按
+            // DONE 呈现=已知边界⑧（ERROR 全覆盖在聊天页）。帧门控在组件内（TimelineView
+            // 20fps paused:!visible，onAppear/onDisappear 自维护，批次1）；motionEnabled 接
+            // 形象档总开关（hub.avatar.profile，AvatarProfileModel.motionEnabled，off 档组件内不建循环）。
+            BotCharacterView(
+                seed: botSeedFor(c.conversationId),
+                state: botStateFor(
+                    hasActiveRun: c.hasActiveRun,
+                    thinkingNow: false,
+                    awaitingApproval: awaitingApproval,
+                    lastMessageFailed: false,
+                    doneTransient: botDoneTransient,
+                ),
+                size: 36,
+                motionEnabled: hub.avatar.profile.motionEnabled,
+                interactive: false,
+            )
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(title).fontWeight(.semibold).lineLimit(1)
@@ -527,6 +554,19 @@ struct HubConversationRow: View {
             }
         }
         .padding(.vertical, 2)
+        .onChange(of: c.hasActiveRun) { _, active in
+            botDoneGeneration += 1
+            if active {
+                botDoneTransient = false // 新 run 启动：立即脱离 DONE 瞬时窗
+            } else {
+                // 真→假 falling edge：终态按非 failed 呈 DONE，900ms 后回落 IDLE（边界⑧同上）
+                let generation = botDoneGeneration
+                botDoneTransient = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+                    if botDoneGeneration == generation { botDoneTransient = false }
+                }
+            }
+        }
     }
 }
 

@@ -279,9 +279,11 @@ class DefaultHubClient(
     /**
      * v1.5.0 形象档状态（个性化形象轮）：REST 读面 + WSS avatar.updated 控制帧双通道收敛的
      * 单一内存态（updatedAt 大者胜，同值幂等跳过防广播回环——[convergeAvatarProfile]）。
-     * null = 本会话期尚未取得（登录/重连回拉 + sync.ready 钩子两点填充）；平台缓存（iOS
-     * UserDefaults / 桌面 java.util.prefs）由各端收集本 Flow 自持持久化（键 hub.avatarProfile.v1，
-     * 跨登出保留），本类不落任何存储（投影库红线不动——形象是平台偏好不入 Hub.sq）。
+     * null = 本会话期尚未取得（登录/重连回拉 + sync.ready 钩子两点填充；登出经
+     * [wipeLocalData] 清空——清账轮 2026-11-20 起，同机换账号不残留）；平台缓存（iOS
+     * UserDefaults / 桌面 java.util.prefs）由各端收集本 Flow 自持持久化（键
+     * hub.avatarProfile.v1，登出随两端登出面清空），本类不落任何存储（投影库红线
+     * 不动——形象是平台偏好不入 Hub.sq）。
      * 断网启动：本 Flow 为 null，UI 读平台缓存否则内置默认档（12×1.00+GRAY+standard）。
      */
     private val avatarProfileState = MutableStateFlow<AvatarProfile?>(null)
@@ -390,11 +392,15 @@ class DefaultHubClient(
     /**
      * 清全部本地数据（登出闭环，方案 §6-P4 验收⑤）：十一表事务内清空，含 O-01 最小集
      * （命令队列/游标）、审批/工具活动累积态（wp-15 v6 两表）与两跳归属暂存（v7 wp-4）；
-     * 同时重置 run 发起登记表（wp-4 修法二，内存态不跨登出复用）。设备已在服务端撤销，
-     * 本地不残留任何账号数据；重登后从空库 bootstrap。须在 [stop] 之后调用（同步循环已停，
-     * 无在途投影写入）。
+     * 同时重置 run 发起登记表（wp-4 修法二，内存态不跨登出复用）与形象档内存态（清账轮
+     * 2026-11-20——同机换账号不得残留上一用户档，且旧用户的较新 updatedAt 不得把新用户
+     * 的 epoch 哨兵档 LWW 拒收至其首次写）。设备已在服务端撤销，本地不残留任何账号数据；
+     * 重登后从空库 bootstrap。须在 [stop] 之后调用（同步循环已停，无在途投影写入）。
      */
     fun wipeLocalData() {
+        // 形象档内存态随登出清空（置于 db 判空之前——未 start 过也须复位）；平台持久缓存
+        // 由两端登出面各自清除（iOS HubStore.logout / 桌面 SettingsScreen onLoggedOut）。
+        avatarProfileState.value = null
         val db = db ?: return
         db.hubQueries.transaction {
             db.hubQueries.clearGateways()

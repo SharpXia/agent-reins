@@ -109,6 +109,33 @@ class DesktopAvatarPreferencesTest {
     }
 
     @Test
+    fun clearRemovesKeyAndResetsToDefault() {
+        // 清账轮 2026-11-20（跨端复核④收口）：登出清缓存——键移除 + 内存回默认档；
+        // 重登后新实例回落默认档（换账号不残留上一用户档，权威档由登录回拉兜底）。
+        val node = probeNode()
+        try {
+            val prefs = DesktopAvatarPreferences(node)
+            prefs.setProfile(sampleProfile())
+            assertEquals(sampleProfile(), prefs.profile)
+
+            prefs.clear()
+            assertEquals(DEFAULT_AVATAR_PROFILE, prefs.profile, "内存回默认档")
+            assertEquals(
+                DEFAULT_AVATAR_PROFILE,
+                DesktopAvatarPreferences(node).profile,
+                "持久化键已移除（新实例回落默认档）",
+            )
+            assertTrue(node.get(DesktopAvatarPreferences.KEY_AVATAR_PROFILE, null) == null, "节点键已移除")
+
+            // 清空后收敛链照常（重登回拉 = mergeRemote 接受权威档）
+            assertTrue(prefs.mergeRemote(sampleProfile()), "登出后远端权威档可重新收敛")
+            assertEquals(sampleProfile(), prefs.profile)
+        } finally {
+            node.removeNode()
+        }
+    }
+
+    @Test
     fun avatarKeyDoesNotOverlapSiblingPreferenceKeys() {
         // 同节点键族不重叠（DesktopWindowPreferences.kt:50/:115 纪律）：三班偏好 + 形象档
         // 各自写键后，节点键集应恰含四个互异 hub.* 键（互不覆盖 = 写后读回各自成立）。

@@ -132,8 +132,9 @@ internal class DesktopDisplayPreferences(node: Preferences? = null) {
  * 同文件多班惯例）。存规范化 JSON 串（shared AvatarProfile.encodeJson 同形，键 `hub.avatarProfile.v1`
  * ——同节点键族不重叠；iOS UserDefaults 同名键 parity）。
  *
- * 口径：形象档缓存是**平台偏好不入投影库**（Hub.sq/HubDriver 红线零触碰），跨登出保留；
- * 服务端/契约不感知缓存。缺省（无键/坏 JSON/Preferences 不可用）= shared 默认档常量
+ * 口径：形象档缓存是**平台偏好不入投影库**（Hub.sq/HubDriver 红线零触碰）；登出清空
+ * （[clear]，清账轮 2026-11-20 起——形象是用户级数据，换账号不残留）；服务端/契约
+ * 不感知缓存。缺省（无键/坏 JSON/Preferences 不可用/登出后）= shared 默认档常量
  * （12×1.00 正圆 + GRAY + standard + epoch 哨兵，双端同源——断网启动/登录前显示该档）。
  * 存储纪律完全同 [DesktopWindowPreferences]：内存镜像权威 + best-effort persist（任何
  * Preferences I/O 失败静默降级纯内存态）+ node = null 全程内存态，不抛不崩。
@@ -167,6 +168,18 @@ internal class DesktopAvatarPreferences(node: Preferences? = null) {
         node?.let { n ->
             runCatching { n.put(KEY_AVATAR_PROFILE, profile.encodeJsonSafe()) }
         } // 持久化失败 = 内存态降级（进程内生效，重启后回落上次持久化值）
+    }
+
+    /**
+     * 登出清缓存（清账轮 2026-11-20 跨端复核④收口）：键移除 + 内存回默认档。形象是
+     * **用户级数据非设备偏好**——同机换账号不得残留上一用户档，且旧用户的较新
+     * updatedAt 不得把新用户的 epoch 哨兵档 LWW 拒收至其首次写（「跨登出保留」旧口径
+     * 就此撤回：权威在服务端，登录回拉 + sync.ready 钩子两路填充，清空代价 = 重登
+     * 一次 GET）。与 shared wipeLocalData 的 avatarProfile 内存态清空同批。
+     */
+    fun clear() {
+        synchronized(lock) { profileInMemory = DEFAULT }
+        node?.let { n -> runCatching { n.remove(KEY_AVATAR_PROFILE) } }
     }
 
     /**

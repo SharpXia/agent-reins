@@ -95,53 +95,68 @@ internal fun HubRobotAvatar(
         }
     }
 
-    // ── A2 待机呼吸（常驻循环，组合层 transform 非重绘 Path；motionEnabled=false 不施用） ──
-    val breath = rememberInfiniteTransition(label = "avatar-idle")
-    val breathScale by breath.animateFloat(
-        initialValue = 1f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = keyframes {
-                durationMillis = 1250
-                1.00f at 0 with FastOutSlowInEasing
-                1.02f at 313 with FastOutSlowInEasing
-                0.99f at 625 with FastOutSlowInEasing
-                1.00f at 1000 with FastOutSlowInEasing
-            },
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "breath-scale",
-    )
-    val breathOffsetY by breath.animateFloat(
-        initialValue = 0f,
-        targetValue = 0f,
-        animationSpec = infiniteRepeatable(
-            animation = keyframes {
-                durationMillis = 1250
-                0f at 0 with FastOutSlowInEasing
-                (-0.7f) at 313 with FastOutSlowInEasing
-                0.5f at 625 with FastOutSlowInEasing
-                0f at 1000 with FastOutSlowInEasing
-            },
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "breath-offset-y",
-    )
-    val breathRotation by breath.animateFloat(
-        initialValue = 0f,
-        targetValue = 0f,
-        animationSpec = infiniteRepeatable(
-            animation = keyframes {
-                durationMillis = 1250
-                0f at 0 with FastOutSlowInEasing
-                0.6f at 313 with FastOutSlowInEasing
-                (-0.45f) at 625 with FastOutSlowInEasing
-                0f at 1000 with FastOutSlowInEasing
-            },
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "breath-rotation",
-    )
+    // ── A2 待机呼吸（常驻循环，组合层 transform 非重绘 Path）──
+    // 清账轮 2026-11-20（跨端复核②收口）：InfiniteTransition 仅在 motionEnabled=true
+    // 分支创建——off 档不再有常驻 tick 时钟（此前 off 只是不施用、时钟仍随组合推进，
+    // 设置页多实例同屏时开销乘实例数）。off→on 切换重建循环自静止相位起，语义不变。
+    val breathScale: Float
+    val breathOffsetY: Float
+    val breathRotation: Float
+    if (motionEnabled) {
+        val breath = rememberInfiniteTransition(label = "avatar-idle")
+        val scale by breath.animateFloat(
+            initialValue = 1f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = keyframes {
+                    durationMillis = 1250
+                    1.00f at 0 with FastOutSlowInEasing
+                    1.02f at 313 with FastOutSlowInEasing
+                    0.99f at 625 with FastOutSlowInEasing
+                    1.00f at 1000 with FastOutSlowInEasing
+                },
+                repeatMode = RepeatMode.Restart,
+            ),
+            label = "breath-scale",
+        )
+        val offsetY by breath.animateFloat(
+            initialValue = 0f,
+            targetValue = 0f,
+            animationSpec = infiniteRepeatable(
+                animation = keyframes {
+                    durationMillis = 1250
+                    0f at 0 with FastOutSlowInEasing
+                    (-0.7f) at 313 with FastOutSlowInEasing
+                    0.5f at 625 with FastOutSlowInEasing
+                    0f at 1000 with FastOutSlowInEasing
+                },
+                repeatMode = RepeatMode.Restart,
+            ),
+            label = "breath-offset-y",
+        )
+        val rotation by breath.animateFloat(
+            initialValue = 0f,
+            targetValue = 0f,
+            animationSpec = infiniteRepeatable(
+                animation = keyframes {
+                    durationMillis = 1250
+                    0f at 0 with FastOutSlowInEasing
+                    0.6f at 313 with FastOutSlowInEasing
+                    (-0.45f) at 625 with FastOutSlowInEasing
+                    0f at 1000 with FastOutSlowInEasing
+                },
+                repeatMode = RepeatMode.Restart,
+            ),
+            label = "breath-rotation",
+        )
+        breathScale = scale
+        breathOffsetY = offsetY
+        breathRotation = rotation
+    } else {
+        breathScale = 1f
+        breathOffsetY = 0f
+        breathRotation = 0f
+    }
 
     // ── A4 身形插值状态（起终 12 值表 + 进度；打断 = 从当前合成帧出发冻结混合，A5②） ──
     var factorsFrom by remember { mutableStateOf(faceFactors) }
@@ -196,8 +211,8 @@ internal fun HubRobotAvatar(
         },
         label = "avatar-expression",
         // A2 施用面 = 组合层 graphicsLayer（scale/offsetY/rotationZ 同相位 1250ms，Canvas path
-        // 不随呼吸重绘——iOS AvatarIdleMotion 同纪律）；motionEnabled=false 分支不施用（循环值
-        // 推进零消费零绘制）。A1 入场 alpha 同层。
+        // 不随呼吸重绘——iOS AvatarIdleMotion 同纪律）；motionEnabled=false 时循环未创建
+        // （清账轮 2026-11-20），graphicsLayer 内静态值。A1 入场 alpha 同层。
         modifier = modifier
             .alpha(entrance.value)
             .graphicsLayer {

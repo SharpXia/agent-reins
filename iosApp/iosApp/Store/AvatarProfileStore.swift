@@ -168,10 +168,11 @@ enum AvatarPresetCatalog {
 
 /// v1.5.0：形象档状态面（HubStore 持有，AgentBridge.hubWatchAvatarProfile 推 JSON 串进来）。
 /// 缓存 = UserDefaults 键 `hub.avatarProfile.v1`（JSON 串；**读式 object(forKey:)** 防缺键
-/// 误读/bool 陷阱；`hub.<feature>` 键族不撞 `hub.muted.` 前缀枚举回灌；跨登出保留 =
-/// streamingPlayback 先例）。收敛 = updatedAt 大者胜（last-write-wins），同值幂等跳过
-/// （发起设备自收 avatar.updated 帧防回环）；编辑中远端更新不出发表单 → remotePending
-/// 顶栏提示 + 一键拉取（设计稿 §syncMechanism 读路径④）。
+/// 误读/bool 陷阱；`hub.<feature>` 键族不撞 `hub.muted.` 前缀枚举回灌；登出随
+/// [resetForLogout] 清空——清账轮 2026-11-20 起，形象是用户级数据换账号不残留）。
+/// 收敛 = updatedAt 大者胜（last-write-wins），同值幂等跳过（发起设备自收 avatar.updated
+/// 帧防回环）；编辑中远端更新不出发表单 → remotePending 顶栏提示 + 一键拉取（设计稿
+/// §syncMechanism 读路径④）。
 @Observable
 final class AvatarProfileStore {
     /// 当前呈现档（登录前/断网 = 缓存否则内置默认档；登录回拉/重连回拉/实时帧三路收敛）。
@@ -218,9 +219,21 @@ final class AvatarProfileStore {
         remotePending = nil
     }
 
-    /// 清编辑瞬态（保存成功/一键拉取/登出；profile 本体与 UserDefaults 缓存不动——跨登出保留）。
+    /// 清编辑瞬态（保存成功/一键拉取；profile 本体与 UserDefaults 缓存不动）。
     func clearRemotePending() {
         remotePending = nil
+    }
+
+    /// 登出复位（清账轮 2026-11-20 跨端复核④收口）：档本体与 UserDefaults 缓存一并清空、
+    /// 内存回默认档——形象是**用户级数据非设备偏好**，同机换账号不得残留上一用户档，且
+    /// 旧用户的较新 updatedAt 不得把新用户的 epoch 哨兵档 LWW 拒收至其首次写。「跨登出
+    /// 保留」旧口径就此撤回（streamingPlayback 先例不适用：那是设备级显示偏好）；权威在
+    /// 服务端，登录回拉 + sync.ready 钩子两路填充，清空代价 = 重登一次 GET。
+    func resetForLogout() {
+        profile = .default
+        remotePending = nil
+        isEditing = false
+        defaults.removeObject(forKey: Self.cacheKey)
     }
 
     /// 本地档显式覆盖（本端 PUT 成功权威回填走 applyRemote(force:)，此处供测试/兜底）。

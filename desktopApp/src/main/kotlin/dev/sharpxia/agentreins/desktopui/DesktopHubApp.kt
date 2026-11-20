@@ -266,6 +266,10 @@ private fun HubShell(
                         // 远端新档不被本端旧响应回退（last-write-wins 收敛）
                         avatarPrefs.mergeRemote(saved)
                         avatarUi = avatarPrefs.profile
+                        // 清账轮 2026-11-20（跨端复核①收口，iOS select 成功分支对称）：保存
+                        // 成功即清冲突待拉取——表单态已终结，reconcileAvatar 收尾对更新窗口
+                        // 内到达的更远端补收敛，横幅不再残留
+                        remoteAvatarPending = null
                         avatarSaveError = null
                     },
                     onFailure = { e ->
@@ -347,7 +351,10 @@ private fun HubShell(
                         HubPane.Settings -> SettingsScreen(
                             client = client,
                             session = session,
-                            onLoggedOut = {},
+                            // 清账轮 2026-11-20：登出随清库闭环清形象缓存（SettingsScreen 已完成
+                            // stop → runtime.logout → wipeLocalData 后回调；形象是用户级数据，
+                            // 换账号不残留——shared avatarProfile 流在 wipeLocalData 同批清空）
+                            onLoggedOut = { avatarPrefs.clear() },
                             // wp-11：设置页「网关与 Agent」卡点击 → 网关独立页（iOS NavigationLink 同语义）
                             onOpenGateways = { pane = HubPane.Gateways },
                             pendingApprovals = pendingApprovals,

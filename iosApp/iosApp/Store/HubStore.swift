@@ -1981,10 +1981,11 @@ final class HubStore {
         sendingDraftFor = []
         draftSendError = [:]
         // mutedConversations 为本地偏好，跨登出保留。
-        // v1.5.0：形象档编辑瞬态随登出清（档本体 UserDefaults 缓存跨登出保留——streamingPlayback
-        // 先例；订阅随桥 hubLogout 取消，重登 watchAvatarProfile 重新挂）。
-        avatar.clearRemotePending()
-        avatar.isEditing = false
+        // v1.5.0 形象档随登出整体复位（清账轮 2026-11-20 跨端复核④收口：档本体+UserDefaults
+        // 缓存清空、内存回默认档——形象是用户级数据，同机换账号不残留；shared avatarProfile
+        // 流在桥 hubLogout → wipeLocalData 同批清空；订阅随桥取消，重登 watchAvatarProfile
+        // 重新挂）。
+        avatar.resetForLogout()
         bridge.hubLogout()
     }
 }

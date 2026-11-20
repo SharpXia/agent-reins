@@ -63,15 +63,9 @@ internal fun TagChip(text: String, color: Color, modifier: Modifier = Modifier) 
     }
 }
 
-/** 活跃 Run 圆点（hasActiveRun）。 */
-@Composable
-internal fun ActiveRunDot(modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .size(8.dp)
-            .background(Color(0xFF2E9E44), CircleShape),
-    )
-}
+// ActiveRunDot（活跃 Run 圆点）已随角色系统批次3（2026-11-20）退役：唯一调用点
+// ConversationListPanel ConversationCard 行尾圆点由行首 36dp BotCharacter 六态承接
+// （活跃含义并入角色），定义删除——余点审计（全 desktopApp grep）仅此一处调用。
 
 /**
  * 消息附件 chip 行（v1.2.0 多模态，设计稿 §6 桌面行「user 行附件 chip 渲染」；assistant 行

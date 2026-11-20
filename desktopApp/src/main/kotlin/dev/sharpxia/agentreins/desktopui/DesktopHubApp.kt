@@ -34,6 +34,7 @@ import dev.sharpxia.agentreins.hub.HubAuthState
 import dev.sharpxia.agentreins.hub.HubException
 import dev.sharpxia.agentreins.hub.HubRuntime
 import dev.sharpxia.agentreins.hub.auth.platformCredentialStore
+import dev.sharpxia.agentreins.hub.avatar.AvatarMotion
 import dev.sharpxia.agentreins.hub.avatar.AvatarProfile
 import dev.sharpxia.agentreins.hub.avatar.avatarUpdatedAtNewer
 import dev.sharpxia.agentreins.hub.db.createHubDriver
@@ -191,6 +192,12 @@ private fun HubShell(
     val conversations by client.observeConversations().collectAsState(initial = emptyList())
     // wp-10：待审批单点订阅 + 决策瞬态（壳层持有跨面板存活；行离场 approval.resolved 时收敛清理）
     val pendingApprovals by client.observePendingApprovals().collectAsState(initial = emptyList())
+    // 角色系统批次3：会话行 WAITING 谓词数据面——pendingApprovals 按 conversationId 折叠成
+    // id 集（UiApproval.conversationId 可空，null 归属不匹配任何行），per-conversation Bool
+    // 透传给会话列表（:397 聊天页 approvals 过滤同式）
+    val awaitingApprovalIds = remember(pendingApprovals) {
+        pendingApprovals.mapNotNull { it.conversationId }.toSet()
+    }
     val decisions = remember { ApprovalDecisionState() }
     LaunchedEffect(pendingApprovals) { decisions.retainAll(pendingApprovals.map { it.approvalId }) }
     var selectedId by remember { mutableStateOf<String?>(null) }
@@ -326,6 +333,10 @@ private fun HubShell(
                     client = client,
                     mutedIds = mutedIds,
                     onToggleMute = ::setMuted,
+                    // 角色系统批次3：行首角色 WAITING 谓词 + 动效档总开关（avatarUi =
+                    // avatarPrefs UI 镜像，远端收敛/本端保存两路刷新；SettingsScreen:465 同口径）
+                    awaitingApprovalIds = awaitingApprovalIds,
+                    motionEnabled = avatarUi.motionLevel == AvatarMotion.STANDARD,
                     modifier = Modifier.weight(1f),
                 )
                 Surface(color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)) {

@@ -55,7 +55,10 @@ import dev.sharpxia.agentreins.hub.DefaultHubClient
 import dev.sharpxia.agentreins.hub.UiAgentRef
 import dev.sharpxia.agentreins.hub.UiConversation
 import dev.sharpxia.agentreins.hub.UiGateway
+import dev.sharpxia.agentreins.hub.avatar.botSeedFor
+import dev.sharpxia.agentreins.hub.avatar.botStateFor
 import dev.sharpxia.agentreins.hub.projection.SessionSummary
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -99,6 +102,13 @@ internal fun ConversationListPanel(
     modifier: Modifier = Modifier,
     mutedIds: Set<String> = emptySet(),
     onToggleMute: (conversationId: String, muted: Boolean) -> Unit = { _, _ -> },
+    // 角色系统批次3：WAITING 谓词（wp-9 零新状态）——壳层把 pendingApprovals 按 conversationId
+    // 折叠成 id 集（UiApproval.conversationId 可空 String?，null 归属不匹配任何行），
+    // per-conversation Bool 透传（评审④）
+    awaitingApprovalIds: Set<String> = emptySet(),
+    // 角色系统批次3：动效档总开关（avatarPrefs UI 镜像 motionLevel==STANDARD，SettingsScreen:465 同口径；
+    // off 档组件内不建帧循环，批次1 A6）
+    motionEnabled: Boolean = true,
 ) {
     // 多网关轮（§3.2）：会话行网关名 caption 数据面（hub.gateways 快照/事件/回拉三路同源）
     val gateways by client.observeGateways().collectAsState(initial = emptyList())
@@ -221,6 +231,8 @@ internal fun ConversationListPanel(
                             selected = conv.conversationId == selectedId,
                             muted = conv.conversationId in mutedIds,
                             compacting = conv.conversationId in compactingIds,
+                            awaitingApproval = conv.conversationId in awaitingApprovalIds,
+                            motionEnabled = motionEnabled,
                             gatewayName = gatewayNameFor(gateways, conv.gatewayId),
                             onToggleMute = onToggleMute,
                             onRename = { renameTarget = it },
@@ -280,6 +292,8 @@ private fun ConversationCard(
     selected: Boolean,
     muted: Boolean,
     compacting: Boolean,
+    awaitingApproval: Boolean,
+    motionEnabled: Boolean,
     gatewayName: String,
     onToggleMute: (conversationId: String, muted: Boolean) -> Unit,
     onRename: (UiConversation) -> Unit,
@@ -297,6 +311,23 @@ private fun ConversationCard(
     var menuOpen by remember { mutableStateOf(false) }
     var menuOffset by remember { mutableStateOf(DpOffset.Zero) }
     val density = LocalDensity.current
+    // 角色系统批次3：DONE 瞬时窗——hasActiveRun 真→假 播 900ms 完成弹跳后回落 IDLE（终态按
+    // 非 failed=已知边界⑧，UiConversation 无失败信号 HubClient.kt:50-66，ERROR 全覆盖在聊天页）。
+    // LaunchedEffect 键=hasActiveRun：跳变即重启协程，在途 delay(900) 被取消，天然防陈旧回落
+    // （新 run 启动即打断）；prevActive remember 初值=挂载时值，首组即非活跃不播 DONE。
+    var prevActive by remember { mutableStateOf(conv.hasActiveRun) }
+    var doneTransient by remember { mutableStateOf(false) }
+    LaunchedEffect(conv.hasActiveRun) {
+        when {
+            conv.hasActiveRun -> doneTransient = false
+            prevActive -> {
+                doneTransient = true
+                delay(900)
+                doneTransient = false
+            }
+        }
+        prevActive = conv.hasActiveRun
+    }
     Box {
         Column(
             modifier = Modifier
@@ -321,6 +352,25 @@ private fun ConversationCard(
                 .padding(horizontal = 12.dp, vertical = 10.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // 角色系统批次3（2026-11-20）：行首 36dp 会话角色替代行尾 ActiveRunDot——
+                // seed=botSeedFor（同 cid 双端恒定，floorMod 分桶含负哈希金标锁），state 六态
+                // 纯函数同参消费（botStateFor）；列表行不细分 THINKING（workActivity 逐行订阅
+                // 违纪律，设计边界①两档合一呈 RUNNING）。帧门控在组件内（withFrameNanos 循环
+                // 仅 motionEnabled=true 分支创建，LazyColumn 出屏 dispose 即停帧）。
+                BotCharacter(
+                    seed = botSeedFor(conv.conversationId),
+                    state = botStateFor(
+                        hasActiveRun = conv.hasActiveRun,
+                        thinkingNow = false,
+                        awaitingApproval = awaitingApproval,
+                        lastMessageFailed = false,
+                        doneTransient = doneTransient,
+                    ),
+                    size = 36.dp,
+                    motionEnabled = motionEnabled,
+                    interactive = false,
+                )
+                Spacer(Modifier.width(10.dp))
                 Text(
                     text = conv.label.ifBlank { "（未命名会话）" },
                     style = MaterialTheme.typography.titleSmall,
@@ -329,10 +379,6 @@ private fun ConversationCard(
                 )
                 if (muted) {
                     TagChip("已静音", Color(0xFF777777))
-                    Spacer(Modifier.width(6.dp))
-                }
-                if (conv.hasActiveRun) {
-                    ActiveRunDot()
                     Spacer(Modifier.width(6.dp))
                 }
                 if (conv.reconciling) {

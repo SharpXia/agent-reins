@@ -156,6 +156,10 @@ struct MacSplitRoot: View {
         }
         // 字号环境放大（见 sidebarList 注）：语义字体随环境放大一级，Section 头/系统行同效。
         .environment(\.dynamicTypeSize, .large)
+        // 2026-11-20 Mac 观感轮：sidebar 样式——plain 样式的选中高亮是近白实底
+        //（暗色模式下白底压白字，用户截图实证「选中行内容看不清」）；sidebar 样式
+        // 选中=系统 accent 半透明胶囊+primary 文字，双模式对比度由系统保证。
+        .listStyle(.sidebar)
         // 「新建」钮已迁 detail 列（补完项③）：原挂本列 .toolbar，侧栏折叠（detailOnly）
         // 后按钮随列隐藏，折叠态动作面只剩菜单栏 ⌘N——现挂 detailColumn 的 NavigationStack，
         // 折叠态常驻窗口工具栏（见 detailColumn 注）。

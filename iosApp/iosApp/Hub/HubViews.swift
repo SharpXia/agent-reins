@@ -846,6 +846,38 @@ struct HubChatView: View {
         hub.setDraftText(cmd.name + " ", conversationId: conv.conversationId)
     }
 
+    // ── 斜杠面板键盘导航（2026-11-20 Mac 键盘交互轮，用户拍板：↑↓ 选择 / Enter 直接发送 /
+    // Tab 预填进输入框补空格）。nil = 未动过键盘（视觉高亮落第 0 行）；仅面板可见时拦截
+    // 按键，修饰器在 TextField 上 Catalyst 门控挂载（iOS 触控面零变化）。
+
+    @State private var slashKeyboardIndex: Int?
+
+    /// 生效高亮行（越界收敛到尾行；草稿变化令面板重开时自然回 0）。
+    private var slashActiveIndex: Int? {
+        guard !slashSuggestions.isEmpty else { return nil }
+        let i = slashKeyboardIndex ?? 0
+        return min(max(i, 0), slashSuggestions.count - 1)
+    }
+
+    private func slashMoveSelection(_ delta: Int) {
+        let count = slashSuggestions.count
+        guard count > 0 else { return }
+        let base = slashActiveIndex ?? 0
+        slashKeyboardIndex = (base + delta + count) % count
+    }
+
+    private func slashHandleReturn() -> Bool {
+        guard let i = slashActiveIndex else { return false }
+        selectSlashCommand(slashSuggestions[i])
+        return true
+    }
+
+    private func slashHandleTab() -> Bool {
+        guard let i = slashActiveIndex else { return false }
+        prefillSlashCommand(slashSuggestions[i])
+        return true
+    }
+
     /// wp-9：会话页内嵌审批卡的数据源——只挂归属本会话（conversationId 命中）的 pending 审批；
     /// 归属未学习（nil）的审批不得错挂进任意会话页，只在设置页待审批清单出现。
     private var sessionApprovals: [UiApproval] {
@@ -1137,7 +1169,9 @@ struct HubChatView: View {
                             .font(.title3)
                             .foregroundStyle(.secondary)
                             .padding(9)
-                            .background(Circle().fill(.thinMaterial))
+                            // 2026-11-20 Mac 观感轮：thinMaterial→实色（半透明材质在 Mac 上
+                            // 叠出雾面，用户拍板去透明；elevated 双模式自适应）
+                            .background(Circle().fill(ink.elevated))
                             .overlay(Circle().stroke(ink.borderTertiary, lineWidth: 1))
                             .hoverCircle()
                     }
@@ -1201,6 +1235,7 @@ struct HubChatView: View {
             if !slashSuggestions.isEmpty {
                 SlashCommandPanel(
                     suggestions: slashSuggestions,
+                    keyboardIndex: slashActiveIndex,
                     onSelect: selectSlashCommand,
                     onPrefill: prefillSlashCommand,
                 )
@@ -1266,6 +1301,15 @@ struct HubChatView: View {
                 .accessibilityLabel("添加图片（最多 \(HubStore.maxDraftAttachments) 张）")
                 TextField("发消息…", text: draftBinding, axis: .vertical)
                     .focused($composerFocused) // 批次4：输入聚焦下视（角色 gaze 后三路之一）
+                    // 2026-11-20 Mac 键盘交互轮：斜杠面板可见时 ↑↓ 选择 / Enter 直接发送 /
+                    // Tab 预填+空格（面板不可见全部透传，输入行为零变化；Catalyst 门控在修饰器内）
+                    .modifier(SlashComposerKeyHandlers(
+                        enabled: composerFocused && !slashSuggestions.isEmpty,
+                        onUp: { slashMoveSelection(-1) },
+                        onDown: { slashMoveSelection(1) },
+                        onReturn: { slashHandleReturn() },
+                        onTab: { slashHandleTab() },
+                    ))
                     .lineLimit(1...4)
                     .padding(8)
                     .background(RoundedRectangle(cornerRadius: 18).fill(ink.surfaceTertiary))
@@ -1701,7 +1745,7 @@ private struct DraftAttachmentChipsRow: View {
                 Image(systemName: "xmark.circle.fill")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .background(Circle().fill(.thinMaterial))
+                    .background(Circle().fill(ink.elevated)) // 2026-11-20 Mac 观感轮：材质→实色（同回底钮）
             }
             .offset(x: 6, y: -6)
             .accessibilityLabel("移除该图片")
@@ -1797,6 +1841,9 @@ private enum SlashCommandCatalog {
 /// ScrollView 承载溢出（目录超出可视行数时内滚）；纯本地视图零网络，不劫持键盘焦点。
 private struct SlashCommandPanel: View {
     let suggestions: [SlashCommand]
+    /// 键盘高亮行（2026-11-20 Mac 键盘交互轮：↑↓ 移动、Enter 发送高亮项、Tab 预填高亮项；
+    /// 面板可见时恒有值=调用方 slashActiveIndex，默认第 0 行）。
+    let keyboardIndex: Int?
     /// 点行 = 直接发送（2026-11-08 用户拍板）。
     let onSelect: (SlashCommand) -> Void
     /// 行尾 ✎ = 预填命令文本进输入框（带尾随空格）续写参数，等待用户发送。
@@ -1845,6 +1892,12 @@ private struct SlashCommandPanel: View {
                         .hoverHighlight(cornerRadius: 9)
                         .accessibilityLabel("把 \(cmd.name) 填入输入框续写参数")
                     }
+                    // 键盘高亮行底（2026-11-20 Mac 键盘交互轮：系统 accent 薄底，双模式可读；
+                    // 与行内 hover 共存不冲突）
+                    .background(index == keyboardIndex
+                        ? AnyShapeStyle(Color.accentColor.opacity(0.16))
+                        : AnyShapeStyle(.clear))
+                    .clipShape(RoundedRectangle(cornerRadius: 9))
                     if index < suggestions.count - 1 {
                         Divider().padding(.leading, 12)
                     }
@@ -1854,6 +1907,50 @@ private struct SlashCommandPanel: View {
         .frame(maxHeight: Self.panelMaxHeight)
         .background(RoundedRectangle(cornerRadius: 12).fill(ink.elevated))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(ink.borderTertiary, lineWidth: 1))
+    }
+}
+
+/// 2026-11-20 Mac 键盘交互轮：composer 上的斜杠面板按键拦截——↑↓ 移动高亮、Enter 直接
+/// 发送高亮命令、Tab 预填进输入框补空格。仅 enabled（面板可见且 composer 聚焦）时消费，
+/// 面板不可见全部透传（输入行为零变化）。onKeyPress 系 iOS 17 API（部署目标 15.0 →
+/// 可用性门内挂）；Catalyst 门控——iOS 触控软键盘无此交互诉求，零变化。
+private struct SlashComposerKeyHandlers: ViewModifier {
+    let enabled: Bool
+    let onUp: () -> Void
+    let onDown: () -> Void
+    /// 返回 true = 已消费（高亮命令已发送）。
+    let onReturn: () -> Bool
+    /// 返回 true = 已消费（高亮命令已预填）。
+    let onTab: () -> Bool
+
+    func body(content: Content) -> some View {
+        #if targetEnvironment(macCatalyst)
+        if #available(iOS 17.0, *) {
+            content
+                .onKeyPress(.upArrow) {
+                    guard enabled else { return .ignored }
+                    onUp()
+                    return .handled
+                }
+                .onKeyPress(.downArrow) {
+                    guard enabled else { return .ignored }
+                    onDown()
+                    return .handled
+                }
+                .onKeyPress(.return) {
+                    guard enabled else { return .ignored }
+                    return onReturn() ? .handled : .ignored
+                }
+                .onKeyPress(.tab) {
+                    guard enabled else { return .ignored }
+                    return onTab() ? .handled : .ignored
+                }
+        } else {
+            content
+        }
+        #else
+        content
+        #endif
     }
 }
 

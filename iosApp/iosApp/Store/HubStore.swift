@@ -1911,9 +1911,39 @@ final class HubStore {
             baseUrl: baseUrl,
             username: username,
             password: password,
-            deviceName: UIDevice.current.name
+            deviceName: Self.deviceDisplayName()
         )
     }
+
+    /// 设备显示名（2026-11-20 设备白名单精确区分）：iOS 16+ SDK 起 UIDevice.name 受隐私门，
+    /// 无 user-assigned-device-name 权限时回通用名——真机恒「iPhone」、Catalyst 恒「iPad」
+    /// （Catalyst 的 iOS 身份即 iPad），Mac 登录曾被记成 iPad。Catalyst 改报 Mac 真名
+    /// （kern.computername）并加前缀；platform 仍为契约枚举 ios（platform 列区分
+    /// mac-catalyst 属契约 additive，待拍板）。iOS 分支维持系统通用名，行为不变。
+    #if targetEnvironment(macCatalyst)
+    private static func deviceDisplayName() -> String {
+        "Mac Catalyst · " + (macComputerName() ?? hostNameFallback())
+    }
+
+    private static func macComputerName() -> String? {
+        var size = 0
+        guard sysctlbyname("kern.computername", nil, &size, nil, 0) == 0, size > 0 else { return nil }
+        var buf = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("kern.computername", &buf, &size, nil, 0) == 0 else { return nil }
+        let name = String(cString: buf).trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? nil : name
+    }
+
+    private static func hostNameFallback() -> String {
+        var buf = [CChar](repeating: 0, count: 256)
+        gethostname(&buf, buf.count)
+        return String(cString: buf).replacingOccurrences(of: ".local", with: "")
+    }
+    #else
+    private static func deviceDisplayName() -> String {
+        UIDevice.current.name
+    }
+    #endif
 
     /// wp-17：APNs 设备 token 上报（AppDelegate 注册回调 → 本方法 → 桥）。必须走本实例自持的
     /// bridge：桥内 hubClient 与登录态同生命周期，另起 AgentBridge 实例没有登录栈，上报会被

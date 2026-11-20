@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // MARK: - 会话角色 BotCharacter（角色系统批次1，2026-11-20）：种子/状态 Swift 镜像派生
 //
@@ -134,6 +135,11 @@ struct BotGaze: Equatable {
     static let down = BotGaze(dx: 0, dy: 2.5)
 }
 
+/// 设置页档预览的中性种子（批次5）：botSeedFor("") = h=0 → 眼形圆角竖方/静息姿态 0/眨音
+/// 2600ms——档（12 值造型+色）经 faceFactorsOverride/paletteIndexOverride 注入，seed 只余
+/// 档外身份维度（眼形/姿态/眨音），设置页取中性值不携会话身份。
+let botSettingsPreviewSeed: BotSeed = botSeedFor("")
+
 /// 指针位置 → 注视 gaze（批次4；锚=悬停容器内角色中心近似 (16,14)、视野半径 120、窗幅
 /// 3.0×2.5——常量私有在 BotCharacterMotion，双端同表）。[location] 相对挂 onContinuousHover
 /// 的容器坐标（桌面 onPointerEvent(Move) 同参镜像）。
@@ -141,6 +147,142 @@ func botGazeToward(_ location: CGPoint) -> BotGaze {
     let nx = max(-1, min(1, (location.x - BotCharacterMotion.gazeAnchorX) / BotCharacterMotion.gazeRadius))
     let ny = max(-1, min(1, (location.y - BotCharacterMotion.gazeAnchorY) / BotCharacterMotion.gazeRadius))
     return BotGaze(dx: BotCharacterMotion.gazeAmpX * nx, dy: BotCharacterMotion.gazeAmpY * ny)
+}
+
+// MARK: - 黏土 blob 几何底座（原 RobotAvatar.swift 迁入——批次5 旧渲染器整文件退役，
+// 设置页 faceKey/12 值 blob 渲染仍消费；与 Kotlin AvatarProfile.kt 逐公式镜像，勿单端改）
+
+/// 黏土脸辅助：12 控制点极坐标、face 串解析/编码。规则与 Kotlin 一字对齐——
+/// split(",") 得 12 段 → 逐段 Double 解析 → 逐值 clamp [0.70,1.10]；
+/// 段数 ≠ 12 或任一段非数（含 nan/inf，逐字「非数」）→ 整体回退正圆（12×1.0）。
+enum ClayFace {
+    /// 控制点数 / 基准半径（100×100 坐标系，圆心 (50,50)）/ 半径系数上下限。
+    static let pointCount = 12
+    static let r = 44.0
+    static let minValue = 0.70
+    static let maxValue = 1.10
+
+    /// 正圆系数表（全 1.0）：face 串为空/解析失败时的唯一兜底。
+    static let defaultFactors: [Double] = Array(repeating: 1.0, count: pointCount)
+
+    private static func clamp(_ f: Double) -> Double { min(max(f, minValue), maxValue) }
+
+    /// 控制点坐标（face-sculpt §2）：x = 50 + 44·f·sin(θ_i)，y = 50 − 44·f·cos(θ_i)
+    /// （θ_i = i×30°，0 号在 12 点方向、顺时针；与 Kotlin facePoint 逐字一致）。
+    static func point(_ i: Int, _ f: Double) -> CGPoint {
+        let theta = Double(i % pointCount) * (2.0 * Double.pi / Double(pointCount))
+        let radius = r * clamp(f)
+        return CGPoint(x: 50.0 + radius * sin(theta), y: 50.0 - radius * cos(theta))
+    }
+
+    /// 解析黏土脸系数串：12 段逗号分隔小数，逐值 clamp 到 [0.70,1.10]。
+    /// 段数 ≠ 12 或任一段解析失败（trim 后仍非有限数）→ nil（调用方按正圆处理）。
+    static func parse(_ raw: String) -> [Double]? {
+        let parts = raw.split(separator: ",", omittingEmptySubsequences: false)
+        guard parts.count == pointCount else { return nil }
+        var out = [Double]()
+        out.reserveCapacity(pointCount)
+        for part in parts {
+            guard let v = Double(part.trimmingCharacters(in: .whitespaces)), v.isFinite else { return nil }
+            out.append(clamp(v))
+        }
+        return out
+    }
+
+    /// 编码黏土脸系数串：恒 12 段、各两位小数（如 `1.00,0.92,…`），与 Kotlin encodeFaceFactors
+    /// 往返一致（先 clamp 后 ×100 取整限 [70,110]，两位整数补零拼小数，不用 %-format 防本地化污染）。
+    static func encode(_ fs: [Double]) -> String {
+        let cents = (0..<pointCount).map { i -> Int in
+            let v = clamp(i < fs.count ? fs[i] : 1.0)
+            return min(max(Int((v * 100).rounded()), 70), 110)
+        }
+        return cents.map { c -> String in
+            let frac = String(c < 100 ? c : c - 100)
+            let padded = frac.count < 2 ? "0" + frac : frac
+            return c < 100 ? "0.\(padded)" : "1.\(padded)"
+        }.joined(separator: ",")
+    }
+}
+
+/// 12 控制点插值载体（VectorArithmetic）：SwiftUI 对 animatableData 逐帧线性插值。
+struct FaceFactorsVector: VectorArithmetic {
+    var values: [Double]
+
+    static var zero: FaceFactorsVector {
+        FaceFactorsVector(values: Array(repeating: 0, count: ClayFace.pointCount))
+    }
+
+    var magnitudeSquared: Double { values.reduce(0) { $0 + $1 * $1 } }
+
+    static func + (lhs: FaceFactorsVector, rhs: FaceFactorsVector) -> FaceFactorsVector {
+        var out = lhs
+        for i in 0..<out.values.count { out.values[i] += i < rhs.values.count ? rhs.values[i] : 0 }
+        return out
+    }
+
+    static func - (lhs: FaceFactorsVector, rhs: FaceFactorsVector) -> FaceFactorsVector {
+        var out = lhs
+        for i in 0..<out.values.count { out.values[i] -= i < rhs.values.count ? rhs.values[i] : 0 }
+        return out
+    }
+
+    mutating func scale(by rhs: Double) {
+        values = values.map { $0 * rhs }
+    }
+}
+
+/// 黏土 blob 形状：过 12 点闭合均匀 Catmull-Rom（标准张力 1/6），全 1.0 = 正圆。
+struct ClayFaceShape: Shape {
+    var factors: FaceFactorsVector
+
+    var animatableData: FaceFactorsVector {
+        get { factors }
+        set { factors = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let s = min(rect.width, rect.height) / 100
+        let fs = factors.values
+        let pts = (0..<ClayFace.pointCount).map {
+            ClayFace.point($0, $0 < fs.count ? fs[$0] : 1.0)
+        }
+        var p = Path()
+        p.move(to: pt(pts[0].x, pts[0].y, s))
+        for i in 0..<ClayFace.pointCount {
+            let p0 = pts[(i + ClayFace.pointCount - 1) % ClayFace.pointCount]
+            let p1 = pts[i]
+            let p2 = pts[(i + 1) % ClayFace.pointCount]
+            let p3 = pts[(i + 2) % ClayFace.pointCount]
+            p.addCurve(
+                to: pt(p2.x, p2.y, s),
+                control1: pt(p1.x + (p2.x - p0.x) / 6, p1.y + (p2.y - p0.y) / 6, s),
+                control2: pt(p2.x - (p3.x - p1.x) / 6, p2.y - (p3.y - p1.y) / 6, s)
+            )
+        }
+        p.closeSubpath()
+        return p
+    }
+}
+
+// MARK: - 固定常量色（face-sculpt §3 墨色二选一）
+
+private let inkDark = Color(hex: 0x1F2329)
+private let inkLight = Color(hex: 0xF5F7FA)
+
+/// 眼墨色（face-sculpt §3，两端逐字一致）：R/G/B 各 round 到 0-255 整数，
+/// 0.299R + 0.587G + 0.114B ≥ 153 → #1F2329（深墨），否则 → #F5F7FA（浅墨）。
+func inkForFace(_ face: Color) -> Color {
+    var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+    UIColor(face).getRed(&r, green: &g, blue: &b, alpha: &a)
+    let R = Int((r * 255).rounded())
+    let G = Int((g * 255).rounded())
+    let B = Int((b * 255).rounded())
+    return 0.299 * Double(R) + 0.587 * Double(G) + 0.114 * Double(B) >= 153 ? inkDark : inkLight
+}
+
+/// 100×100 逻辑坐标点 → 渲染坐标（逐点显式乘 s，不用 scale 变换）。
+private func pt(_ x: CGFloat, _ y: CGFloat, _ s: CGFloat) -> CGPoint {
+    CGPoint(x: x * s, y: y * s)
 }
 
 // MARK: - 六态相位函数（桌面 desktopApp BotCharacter.kt 逐公式镜像，双端同表勿单端改值）
@@ -339,6 +481,10 @@ struct BotCharacterView: View {
     var interactive: Bool = false
     /// 眼神交互覆盖（批次4）：interactive=true 时叠加到相位眼位（恒 clamp 眼窗）；nil = 无交互。
     var gaze: BotGaze? = nil
+    /// 档预览（批次5 设置页）：显式 12 值造型（seed bodyIndex 让位；nil = seed 域）。
+    var faceFactorsOverride: [Double]? = nil
+    /// 档预览（批次5 设置页）：显式色序号（AgentTintName 序；seed paletteIndex 让位）。
+    var paletteIndexOverride: Int? = nil
 
     @Environment(\.inkColors) private var c
     @State private var enteredAt = Date()
@@ -351,10 +497,12 @@ struct BotCharacterView: View {
     var body: some View {
         _ = BotCharacterGoldLock.verified // 金标 DEBUG 断言（进程内一次）
         let compact = size < BotCharacterMotion.compactThreshold
-        let tint = AgentTintName.allCases[min(max(seed.paletteIndex, 0), AgentTintName.allCases.count - 1)]
+        let paletteIndex = paletteIndexOverride ?? seed.paletteIndex
+        let tint = AgentTintName.allCases[min(max(paletteIndex, 0), AgentTintName.allCases.count - 1)]
         let faceFill = agentTint(tint, isDark: c.isDark).strong
         let ink = inkForFace(faceFill)
-        let factors = AvatarPresetCatalog.all[min(max(seed.bodyIndex, 0), AvatarPresetCatalog.all.count - 1)].faceFactors
+        let factors = faceFactorsOverride
+            ?? AvatarPresetCatalog.all[min(max(seed.bodyIndex, 0), AvatarPresetCatalog.all.count - 1)].faceFactors
         return TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: !visible || !motionEnabled)) { timeline in
             let t: CGFloat = motionEnabled
                 ? max(0, CGFloat(timeline.date.timeIntervalSince(enteredAt)) * 1000)

@@ -42,6 +42,7 @@ import dev.sharpxia.agentreins.hub.avatar.BOT_STATE_THINKING
 import dev.sharpxia.agentreins.hub.avatar.BOT_STATE_WAITING
 import dev.sharpxia.agentreins.hub.avatar.BODY_PRESET_COUNT
 import dev.sharpxia.agentreins.hub.avatar.BotSeed
+import dev.sharpxia.agentreins.hub.avatar.botSeedFor
 import dev.sharpxia.agentreins.hub.avatar.EYE_SHAPE_COUNT
 import dev.sharpxia.agentreins.hub.avatar.FACE_POINT_COUNT
 import dev.sharpxia.agentreins.hub.avatar.POSE_PRESET_COUNT
@@ -52,6 +53,7 @@ import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.hypot
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlinx.coroutines.launch
 
@@ -97,6 +99,9 @@ internal fun BotCharacter(
     modifier: Modifier = Modifier,
     // 眼神交互覆盖（批次4）：interactive=true 时叠加到相位眼位（恒 clamp 眼窗）；null = 无交互。
     gaze: BotGaze? = null,
+    // 档预览（批次5 设置页）：显式 12 值造型与色序号（seed bodyIndex/paletteIndex 让位；nil = seed 域）。
+    faceFactorsOverride: List<Double>? = null,
+    paletteIndexOverride: Int? = null,
 ) {
     val isDark = isSystemInDarkTheme()
     val compact = size < BOT_COMPACT_THRESHOLD
@@ -144,9 +149,10 @@ internal fun BotCharacter(
         }
     }
     // 配色随值动画（300ms 同 A4 曲线；off 档 snap——AvatarRenderers.kt:193-197 同式）
+    val paletteIndex = paletteIndexOverride ?: seed.paletteIndex
     val faceFill by animateColorAsState(
         targetValue = Color(
-            AgentTint.entries[seed.paletteIndex.coerceIn(0, AGENT_TINT_COUNT - 1)]
+            AgentTint.entries[paletteIndex.coerceIn(0, AGENT_TINT_COUNT - 1)]
                 .strongArgb(isDark),
         ),
         animationSpec = if (motionEnabled) tween(300, easing = CubicBezierEasing(0.22f, 1f, 0.36f, 1f)) else snap(),
@@ -154,14 +160,14 @@ internal fun BotCharacter(
     )
     val ink = inkForFace(faceFill)
 
-    // blob path（逻辑 12 点 → 像素空间）一次性构建：seed 形表 + 像素比变更才重建
+    // blob path（逻辑 12 点 → 像素空间）一次性构建：造型（档 override 或 seed 形表）+ 像素比
+    // 变更才重建（设置页预览随草稿选型即时重建）
     val density = LocalDensity.current
     val unitPx = remember(size, density) { with(density) { size.toPx() } / 100f }
-    val blobPath = remember(seed, unitPx) {
-        buildBotBlobPath(
-            AVATAR_PRESETS[seed.bodyIndex.coerceIn(0, BODY_PRESET_COUNT - 1)].faceFactors,
-            unitPx,
-        )
+    val effectiveFactors = faceFactorsOverride
+        ?: AVATAR_PRESETS[seed.bodyIndex.coerceIn(0, BODY_PRESET_COUNT - 1)].faceFactors
+    val blobPath = remember(effectiveFactors, unitPx) {
+        buildBotBlobPath(effectiveFactors, unitPx)
     }
 
     // 体态施于组合层（graphicsLayer 块内读相位 = per-frame 层属性更新，不重绘 path、不重组——
@@ -190,6 +196,18 @@ internal fun BotCharacter(
 
 /** 体态快照（scale/rotation/y-bob；坐标 100×100 逻辑系）。 */
 private data class BotPose(val scale: Float, val rotationDeg: Float, val offsetY: Float)
+
+/**
+ * 深浅墨色判定（iOS inkForFace 逐字口径：R/G/B round 到 0-255，
+ * 0.299R+0.587G+0.114B ≥ 153 → 深墨 0x1F2329，否则浅墨 0xF5F7FA）。
+ * 自 AvatarRenderers.kt 迁入（批次5 旧渲染器整文件退役，本组件为其唯一消费面）。
+ */
+internal fun inkForFace(face: Color): Color {
+    val r = (face.red * 255f).roundToInt()
+    val g = (face.green * 255f).roundToInt()
+    val b = (face.blue * 255f).roundToInt()
+    return if (0.299f * r + 0.587f * g + 0.114f * b >= 153f) Color(0xFF1F2329) else Color(0xFFF5F7FA)
+}
 
 /** 眼帧快照（平移 dx/dy + 竖直 scale + 开心弧开关）。 */
 private data class BotEyeFrame(val dx: Float, val dy: Float, val scaleY: Float, val arc: Boolean)
@@ -248,6 +266,11 @@ const val BOT_GAZE_AMP_X = 3f
 const val BOT_GAZE_AMP_Y = 2.5f
 const val BOT_FOCUS_BLINK_THRESHOLD = 4f
 const val BOT_FOCUS_BLINK_COOLDOWN_MS = 250L
+
+/** 设置页档预览的中性种子（批次5）：botSeedFor("") = h=0 → 眼形圆角竖方/姿态 0/眨音 2600ms
+ *  ——档（12 值+色）经 override 注入，seed 只余档外身份维度（眼形/姿态/眨音），设置页取
+ *  中性值不携会话身份（Swift botSettingsPreviewSeed 同值镜像）。 */
+val botSettingsPreviewSeed: BotSeed = botSeedFor("")
 
 // ── 相位函数（六态；t = ms since 态进入，纯时间函数双端同值） ──
 

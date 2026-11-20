@@ -3537,16 +3537,17 @@ struct HubSettingsView: View {
                     LabeledContent("本机设备", value: String(dev.prefix(12)) + "…")
                 }
             }
-            Section("机器人形象") {
+            Section("形象档（默认造型与动效）") {
                 // v1.5.0 个性化形象轮：用户级形象档子页（造型/配色/动效档 + 96pt 实时预览；
-                // 端点 #30/#31 /v1/me/avatar-profile，桌面设置页形象卡 parity）
+                // 端点 #30/#31 /v1/me/avatar-profile，桌面设置页形象卡 parity；批次5 文案落位
+                // 「形象档」——档=个人默认+动效开关+预设宿主，避免与每会话角色混淆）
                 NavigationLink {
                     AvatarSettingsView()
                     #if targetEnvironment(macCatalyst)
                         .macContentColumn()
                     #endif
                 } label: {
-                    Text("机器人形象")
+                    Text("形象档（默认造型与动效）")
                 }
             }
             Section("审批") {

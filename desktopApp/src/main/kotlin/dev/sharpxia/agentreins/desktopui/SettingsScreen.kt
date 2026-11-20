@@ -48,9 +48,9 @@ import dev.sharpxia.agentreins.hub.UiConversation
 import dev.sharpxia.agentreins.hub.UiGateway
 import dev.sharpxia.agentreins.hub.auth.DeviceInfo
 import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
-import dev.sharpxia.agentreins.hub.avatar.AgentExpression
 import dev.sharpxia.agentreins.hub.avatar.AgentTint
 import dev.sharpxia.agentreins.hub.avatar.AVATAR_PRESETS
+import dev.sharpxia.agentreins.hub.avatar.BOT_STATE_IDLE
 import dev.sharpxia.agentreins.hub.avatar.AvatarMotion
 import dev.sharpxia.agentreins.hub.avatar.AvatarPalette
 import dev.sharpxia.agentreins.hub.avatar.AvatarProfile
@@ -434,11 +434,12 @@ private fun AvatarPreferencesCard(
     onSelect: (AvatarProfile) -> Unit,
     onPullRemote: () -> Unit,
 ) {
-    val tint = AgentTint.of(profile.paletteId)
+    // 档色序号（AvatarPalette 声明序 = AgentTint 序契约；批次5 换装 BotCharacter 传参用）
+    val paletteIndex = AvatarPalette.entries.indexOf(profile.paletteId)
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("机器人形象", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                Text("形象档（默认造型与动效）", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
                 if (saving) Text("保存中…", style = MaterialTheme.typography.bodySmall, color = Color(0xFF999999))
             }
 
@@ -455,14 +456,17 @@ private fun AvatarPreferencesCard(
                 }
             }
 
-            // 96dp 实时预览（≥40dp 全量渲染；动效档 standard 才呼吸，off 静态——A6 档位）
+            // 96dp 实时预览（批次5 换装 BotCharacter：档 12 值+色经 override 注入，seed 只余
+            // 眼形/姿态/眨音取中性 botSettingsPreviewSeed；动效档 standard 才动，off 静态——A6）
             Row(verticalAlignment = Alignment.CenterVertically) {
-                HubRobotAvatar(
-                    palette = tint,
-                    expression = AgentExpression.CALM,
+                BotCharacter(
+                    seed = botSettingsPreviewSeed,
+                    state = BOT_STATE_IDLE,
                     size = 96.dp,
-                    faceFactors = profile.faceFactors,
                     motionEnabled = profile.motionLevel == AvatarMotion.STANDARD,
+                    interactive = false,
+                    faceFactorsOverride = profile.faceFactors,
+                    paletteIndexOverride = paletteIndex,
                 )
                 Column(Modifier.padding(start = 16.dp)) {
                     Text(
@@ -495,12 +499,14 @@ private fun AvatarPreferencesCard(
                                 .clickable { onSelect(AvatarProfile(preset.faceFactors, preset.recommendedPalette, profile.motionLevel, profile.updatedAt)) }
                                 .padding(4.dp),
                         ) {
-                            HubRobotAvatar(
-                                palette = AgentTint.of(preset.recommendedPalette),
-                                expression = AgentExpression.CALM,
+                            BotCharacter(
+                                seed = botSettingsPreviewSeed,
+                                state = BOT_STATE_IDLE,
                                 size = 44.dp,
-                                faceFactors = preset.faceFactors,
                                 motionEnabled = false, // 缩略静态渲染（常驻循环多实例性能纪律）
+                                interactive = false,
+                                faceFactorsOverride = preset.faceFactors, // AVATAR_PRESETS 双用：预设目录 12 值即缩略造型
+                                paletteIndexOverride = AvatarPalette.entries.indexOf(preset.recommendedPalette),
                             )
                             Text(
                                 preset.zhName,

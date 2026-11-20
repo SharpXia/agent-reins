@@ -1,13 +1,14 @@
 import SwiftUI
 
-// MARK: - 机器人形象设置子页（v1.5.0 个性化形象轮；端点 #30/#31 /v1/me/avatar-profile）
+// MARK: - 形象档设置子页（v1.5.0 个性化形象轮；端点 #30/#31 /v1/me/avatar-profile；
+// 角色系统批次5 换装 BotCharacter——档=个人默认造型+动效开关+预设宿主，seed=会话身份不上此页）
 
-/// 形象设置：顶部 96pt 实时预览（≥40pt 避 compact 折算表，RobotAvatar.swift:172）+ 8 款预设
-/// 网格（44pt 缩略、**motionEnabled=false 强制静态**——AvatarIdleMotion 常驻循环多实例性能，
-/// LazyVStack 重播教训 :199-201）+ 十色横排圆点（strong 色）+ 动效档 segmented（关闭/标准）
-/// +「恢复默认」。保存 = **先 PUT 成功再更新本地**（低频不敏感，免回滚复杂度），失败显式
-/// 错误不排队；编辑期间收到远端更新不出发表单，顶栏提示「其他设备已更新形象」+ 一键拉取
-/// （设计稿 §syncMechanism 读路径④）。
+/// 形象设置：顶部 96pt 实时预览（≥40pt 避 compact 折算表；档 12 值+色经 override 注入）+ 8 款预设
+/// 网格（44pt 缩略、**motionEnabled=false 强制静态**——常驻循环多实例性能纪律沿用）+ 十色横排
+/// 圆点（strong 色）+ 动效档 segmented（关闭/标准）+「恢复默认」。保存 = **先 PUT 成功再更新本地**
+///（低频不敏感，免回滚复杂度），失败显式错误不排队；编辑期间收到远端更新不出发表单，顶栏提示
+///「其他设备已更新形象」+ 一键拉取（设计稿 §syncMechanism 读路径④）。读档/保存/圆点/动效档
+/// 按钮逻辑批次5 零改动——只换渲染器。
 struct AvatarSettingsView: View {
     @State private var hub = HubStore.shared
     @Environment(\.colorScheme) private var colorScheme
@@ -24,12 +25,14 @@ struct AvatarSettingsView: View {
         List {
             Section("实时预览") {
                 HStack(spacing: 16) {
-                    RobotAvatar(
-                        palette: shown.paletteName,
-                        expression: .calm,
+                    BotCharacterView(
+                        seed: botSettingsPreviewSeed,
+                        state: .idle,
                         size: 96,
-                        faceFactors: shown.faceFactors,
-                        motionEnabled: shown.motionEnabled, // 动效档 standard 才呼吸（A6）
+                        motionEnabled: shown.motionEnabled, // 动效档 standard 才动（A6）
+                        interactive: false,
+                        faceFactorsOverride: shown.faceFactors, // 档 12 值造型（seed bodyIndex 让位）
+                        paletteIndexOverride: AgentTintName.allCases.firstIndex(of: shown.paletteName),
                     )
                     VStack(alignment: .leading, spacing: 4) {
                         Text("造型 · \(presetName(for: shown))").font(.body)
@@ -117,7 +120,7 @@ struct AvatarSettingsView: View {
                 }
             }
         }
-        .navigationTitle("机器人形象")
+        .navigationTitle("形象档（默认造型与动效）")
     }
 
     // MARK: - 单元
@@ -125,12 +128,14 @@ struct AvatarSettingsView: View {
     /// 预设单元格：44pt 缩略（motionEnabled=false 静态渲染）+ 中文名；选中 = 规范 face 串相等。
     private func presetCell(_ preset: AvatarPreset) -> some View {
         VStack(spacing: 4) {
-            RobotAvatar(
-                palette: preset.recommendedPalette,
-                expression: .calm,
+            BotCharacterView(
+                seed: botSettingsPreviewSeed,
+                state: .idle,
                 size: 44,
-                faceFactors: preset.faceFactors,
-                motionEnabled: false,
+                motionEnabled: false, // 缩略强制静态（常驻循环多实例纪律沿用）
+                interactive: false,
+                faceFactorsOverride: preset.faceFactors, // AVATAR_PRESETS 双用：预设目录 12 值即缩略造型
+                paletteIndexOverride: AgentTintName.allCases.firstIndex(of: preset.recommendedPalette),
             )
             Text(preset.zhName)
                 .font(.caption2)

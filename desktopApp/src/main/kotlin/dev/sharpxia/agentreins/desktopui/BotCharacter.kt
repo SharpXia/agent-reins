@@ -1,7 +1,9 @@
 package dev.sharpxia.agentreins.desktopui
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -13,6 +15,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
@@ -47,8 +50,10 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.floor
+import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.sin
+import kotlinx.coroutines.launch
 
 /**
  * 会话角色「BotCharacter」桌面渲染器（角色系统批次1，2026-11-20）：单体圆身 + 一对大竖眼，
@@ -79,7 +84,8 @@ import kotlin.math.sin
  * 性能纪律：帧循环 = LaunchedEffect+withFrameNanos 仅 motionEnabled=true 分支创建；
  * 体态（scale/rotate/y-bob）施于 graphicsLayer 组合层（不重绘 Canvas path，iOS AvatarIdleMotion
  * 同纪律）；blob path remember(seed,s) 一次构建；LazyColumn 出屏 dispose 即停帧（批次3 核验）。
- * [interactive] 为批次4 眼神交互预留位（注视/下瞥/对焦眨眼三路触发），批次1 恒无交互行为。
+ * [interactive]/[gaze] 为批次4 眼神交互面（注视/下瞥/对焦眨眼三路触发；gaze 附加眼位恒
+ * clamp 眼窗，跳变 >4 单位触发对焦眨眼 90/110ms 冷却 250ms，off 档只 snap 不播眨眼）。
  */
 @Composable
 internal fun BotCharacter(
@@ -89,6 +95,8 @@ internal fun BotCharacter(
     motionEnabled: Boolean,
     interactive: Boolean,
     modifier: Modifier = Modifier,
+    // 眼神交互覆盖（批次4）：interactive=true 时叠加到相位眼位（恒 clamp 眼窗）；null = 无交互。
+    gaze: BotGaze? = null,
 ) {
     val isDark = isSystemInDarkTheme()
     val compact = size < BOT_COMPACT_THRESHOLD
@@ -109,6 +117,32 @@ internal fun BotCharacter(
         }
     }
 
+    // 对焦眨眼（批次4）：gaze 跳变 >4 单位触发一次 90/110ms 包络，冷却 250ms（off 档只 snap
+    // 不播，A3「功能性反馈非装饰」同口径）。眨眼动画挂 rememberCoroutineScope——LaunchedEffect
+    // 随 gaze 变化重启会取消在途动画，scope 只随组合离场取消。
+    val focusBlink = remember { Animatable(0f) }
+    var lastGazeValue by remember { mutableStateOf<BotGaze?>(null) }
+    var lastFocusBlinkAtMs by remember { mutableStateOf(0L) }
+    val interactionScope = rememberCoroutineScope()
+    LaunchedEffect(gaze, interactive, motionEnabled) {
+        val current = gaze ?: BotGaze(0f, 0f)
+        val previous = lastGazeValue ?: BotGaze(0f, 0f)
+        lastGazeValue = gaze
+        if (!interactive || !motionEnabled) return@LaunchedEffect
+        val jump = hypot(current.dx - previous.dx, current.dy - previous.dy)
+        val now = System.currentTimeMillis()
+        if (jump > BOT_FOCUS_BLINK_THRESHOLD &&
+            now - lastFocusBlinkAtMs >= BOT_FOCUS_BLINK_COOLDOWN_MS &&
+            !focusBlink.isRunning
+        ) {
+            lastFocusBlinkAtMs = now
+            focusBlink.snapTo(0f)
+            interactionScope.launch {
+                focusBlink.animateTo(1f, tween(BOT_BLINK_CLOSE_MS.toInt(), easing = LinearEasing))
+                focusBlink.animateTo(0f, tween(BOT_BLINK_OPEN_MS.toInt(), easing = LinearEasing))
+            }
+        }
+    }
     // 配色随值动画（300ms 同 A4 曲线；off 档 snap——AvatarRenderers.kt:193-197 同式）
     val faceFill by animateColorAsState(
         targetValue = Color(
@@ -146,7 +180,10 @@ internal fun BotCharacter(
         Canvas(modifier = Modifier.size(size)) {
             val s = this.size.minDimension / 100f
             drawPath(blobPath, faceFill)
-            drawBotEyes(seed, botEyeFrame(seed, state, phaseMs, compact), s, ink, compact)
+            val eye = botEyeFrame(seed, state, phaseMs, compact, gaze = if (interactive) gaze else null)
+            // 对焦眨眼叠加：min 取更闭的包络（DONE U 弧不吃 scaleY 无碍；off 档 focusBlink 恒 0）
+            val blinked = eye.copy(scaleY = min(eye.scaleY, 1f - focusBlink.value))
+            drawBotEyes(seed, blinked, s, ink, compact)
         }
     }
 }
@@ -192,6 +229,26 @@ const val BOT_SQUINT_SCALE = 0.45f
 const val BOT_BLINK_CLOSE_MS = 90f
 const val BOT_BLINK_OPEN_MS = 110f
 
+/**
+ * 眼神交互附加眼位（批次4；Swift BotGaze 同形镜像，100 逻辑单位，组件内恒 clamp 眼窗）。
+ */
+data class BotGaze(val dx: Float, val dy: Float) {
+    companion object {
+        /** 下视窗底（输入聚焦/新消息下瞥共用值）。 */
+        val DOWN = BotGaze(0f, BOT_EYE_WINDOW_Y)
+    }
+}
+
+/** 眼神交互常量（批次4；Swift BotCharacterMotion 双端同表勿单端改值）：注视锚=角色中心在
+ *  悬停容器内的近似点、视野半径 120（饱和后按窗幅比例取单位方向）；对焦眨眼阈值/冷却。 */
+const val BOT_GAZE_ANCHOR_X = 16f
+const val BOT_GAZE_ANCHOR_Y = 14f
+const val BOT_GAZE_RADIUS = 120f
+const val BOT_GAZE_AMP_X = 3f
+const val BOT_GAZE_AMP_Y = 2.5f
+const val BOT_FOCUS_BLINK_THRESHOLD = 4f
+const val BOT_FOCUS_BLINK_COOLDOWN_MS = 250L
+
 // ── 相位函数（六态；t = ms since 态进入，纯时间函数双端同值） ──
 
 /** compact 动效幅度倍率下的一帧体态。 */
@@ -231,8 +288,8 @@ private fun breathScale(t: Float): Float {
 
 private fun lerp(a: Float, b: Float, x: Float): Float = a + (b - a) * x
 
-/** 一帧眼位/眼皮（平移恒 clamp 眼窗；ERROR 眯眼定格；DONE 开心弧替代眼形）。 */
-private fun botEyeFrame(seed: BotSeed, state: Int, t: Float, compact: Boolean): BotEyeFrame {
+/** 一帧眼位/眼皮（平移恒 clamp 眼窗；ERROR 眯眼定格；DONE 开心弧替代眼形；[gaze] 附加眼位先叠加后 clamp）。 */
+private fun botEyeFrame(seed: BotSeed, state: Int, t: Float, compact: Boolean, gaze: BotGaze? = null): BotEyeFrame {
     val amp = if (compact) BOT_COMPACT_AMP else 1f
     val tau = (2f * PI).toFloat()
     var dx = BOT_REST_EYE_X[seed.poseIndex.coerceIn(0, POSE_PRESET_COUNT - 1)] * amp
@@ -265,6 +322,10 @@ private fun botEyeFrame(seed: BotSeed, state: Int, t: Float, compact: Boolean): 
             if (u < 300f) dx += 1.2f * amp * sin(2f * tau * u / 300f) // ±1.2 ×3 圈@300ms
         }
         BOT_STATE_DONE -> arc = true
+    }
+    if (gaze != null) {
+        dx += gaze.dx // 附加眼位恒过眼窗 clamp（±3.0/±2.5 安全域不变）
+        dy += gaze.dy
     }
     return BotEyeFrame(
         dx = dx.coerceIn(-BOT_EYE_WINDOW_X, BOT_EYE_WINDOW_X),

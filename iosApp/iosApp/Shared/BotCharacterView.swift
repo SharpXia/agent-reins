@@ -117,6 +117,32 @@ private enum BotCharacterGoldLock {
     }()
 }
 
+// MARK: - 眼神交互（批次4）：附加眼位 + 对焦眨眼（桌面 BotCharacter.kt 逐参数镜像）
+//
+// gaze = 附加眼位（100 逻辑单位，组件内恒 clamp 眼窗）；interactive=true 时叠加到相位眼位。
+// 对焦眨眼：gaze 值跳变 >4 逻辑单位（欧氏距离，前值缺省 (0,0)）触发 90/110ms 包络一次，
+// 冷却 250ms；motionEnabled=false 只 snap 眼位不播眨眼（A3「功能性反馈非装饰」同口径）。
+// 触发源双端同观感：hover 注视（Catalyst/Mac）、输入聚焦下视、新消息一次性下瞥 400ms
+// （下视值 = BotGaze.down = (0, +2.5) 窗底）；注视锚/视野半径双端同表（GAZE_* 常量）。
+
+/// 附加眼位（批次4；100×100 逻辑单位，渲染端 clamp 眼窗 ±3.0/±2.5）。
+struct BotGaze: Equatable {
+    let dx: CGFloat
+    let dy: CGFloat
+
+    /// 下视窗底（输入聚焦/新消息下瞥共用值）。
+    static let down = BotGaze(dx: 0, dy: 2.5)
+}
+
+/// 指针位置 → 注视 gaze（批次4；锚=悬停容器内角色中心近似 (16,14)、视野半径 120、窗幅
+/// 3.0×2.5——常量私有在 BotCharacterMotion，双端同表）。[location] 相对挂 onContinuousHover
+/// 的容器坐标（桌面 onPointerEvent(Move) 同参镜像）。
+func botGazeToward(_ location: CGPoint) -> BotGaze {
+    let nx = max(-1, min(1, (location.x - BotCharacterMotion.gazeAnchorX) / BotCharacterMotion.gazeRadius))
+    let ny = max(-1, min(1, (location.y - BotCharacterMotion.gazeAnchorY) / BotCharacterMotion.gazeRadius))
+    return BotGaze(dx: BotCharacterMotion.gazeAmpX * nx, dy: BotCharacterMotion.gazeAmpY * ny)
+}
+
 // MARK: - 六态相位函数（桌面 desktopApp BotCharacter.kt 逐公式镜像，双端同表勿单端改值）
 //
 // 全部为 (seed, state, t, compact) 的纯时间函数（t = ms since 态进入）；motionEnabled=false
@@ -152,6 +178,17 @@ private enum BotCharacterMotion {
     static let squintScale: CGFloat = 0.45 // ERROR 眯眼定格 scaleY
     static let blinkCloseMs: CGFloat = 90
     static let blinkOpenMs: CGFloat = 110
+
+    // 眼神交互常量（批次4；桌面 BotCharacter.kt 双端同表勿单端改值）：注视锚=角色中心在
+    // 悬停容器内的近似点（角色行首 32/36pt，(16,14) 即眼心邻域）、视野半径 120（饱和后按
+    // 窗幅比例取单位方向）；对焦眨眼阈值/冷却（包络复用 blinkCloseMs/blinkOpenMs）。
+    static let gazeAnchorX: CGFloat = 16
+    static let gazeAnchorY: CGFloat = 14
+    static let gazeRadius: CGFloat = 120
+    static let gazeAmpX: CGFloat = 3.0
+    static let gazeAmpY: CGFloat = 2.5
+    static let focusBlinkThreshold: CGFloat = 4
+    static let focusBlinkCooldownMs: Double = 250
 
     struct Pose {
         let scale: CGFloat
@@ -191,7 +228,7 @@ private enum BotCharacterMotion {
         }
     }
 
-    static func eyeFrame(_ seed: BotSeed, _ state: BotState, _ t: CGFloat, _ compact: Bool) -> EyeFrame {
+    static func eyeFrame(_ seed: BotSeed, _ state: BotState, _ t: CGFloat, _ compact: Bool, gaze: BotGaze?) -> EyeFrame {
         let amp: CGFloat = compact ? compactAmp : 1
         let tau: CGFloat = 2 * .pi
         var dx = restEyeX[seed.poseIndex.clamped(0...3)] * amp
@@ -221,6 +258,10 @@ private enum BotCharacterMotion {
             if u < 300 { dx += 1.2 * amp * sin(2 * tau * u / 300) }  // 横抖 ±1.2×3@300ms
         case .done:
             arc = true
+        }
+        if let gaze {
+            dx += gaze.dx // 附加眼位恒过眼窗 clamp（±3.0/±2.5 安全域不变）
+            dy += gaze.dy
         }
         return EyeFrame(
             dx: dx.clamped(-windowX...windowX),
@@ -296,10 +337,16 @@ struct BotCharacterView: View {
     var size: CGFloat = 36
     var motionEnabled: Bool = true
     var interactive: Bool = false
+    /// 眼神交互覆盖（批次4）：interactive=true 时叠加到相位眼位（恒 clamp 眼窗）；nil = 无交互。
+    var gaze: BotGaze? = nil
 
     @Environment(\.inkColors) private var c
     @State private var enteredAt = Date()
     @State private var visible = false
+    /// 对焦眨眼（批次4）：gaze 跳变 >4 单位触发一次 90/110ms 包络，冷却 250ms（off 档不播）。
+    @State private var focusBlinkStart: Date?
+    @State private var lastGazeValue: BotGaze?
+    @State private var lastFocusBlinkAt = Date.distantPast
 
     var body: some View {
         _ = BotCharacterGoldLock.verified // 金标 DEBUG 断言（进程内一次）
@@ -313,7 +360,21 @@ struct BotCharacterView: View {
                 ? max(0, CGFloat(timeline.date.timeIntervalSince(enteredAt)) * 1000)
                 : CGFloat(BotCharacterMotion.staticPhaseMs(state))
             let pose = BotCharacterMotion.pose(seed, state, t, compact)
-            let frame = BotCharacterMotion.eyeFrame(seed, state, t, compact)
+            // 对焦眨眼叠加（min 取更闭的包络；DONE U 弧不吃 scaleY 无碍）——IIFE 形式：
+            // ViewBuilder 闭包体内不容 if-赋值语句
+            let frame: BotCharacterMotion.EyeFrame = {
+                let eye = BotCharacterMotion.eyeFrame(seed, state, t, compact, gaze: interactive ? gaze : nil)
+                if motionEnabled, let blinkStart = focusBlinkStart {
+                    let u = CGFloat(max(0, timeline.date.timeIntervalSince(blinkStart)) * 1000)
+                    return BotCharacterMotion.EyeFrame(
+                        dx: eye.dx,
+                        dy: eye.dy,
+                        scaleY: min(eye.scaleY, 1 - BotCharacterMotion.blinkEnvelope(u)),
+                        arc: eye.arc,
+                    )
+                }
+                return eye
+            }()
             ZStack {
                 ClayFaceShape(factors: FaceFactorsVector(values: factors))
                     .fill(faceFill)
@@ -333,6 +394,20 @@ struct BotCharacterView: View {
         }
         .onDisappear { visible = false }
         .onChange(of: state) { _, _ in enteredAt = Date() }
+        .onChange(of: gaze) { _, newValue in
+            // 对焦眨眼：眼位跳变 >4 逻辑单位触发（前值缺省 (0,0)），冷却 250ms；off 档只 snap
+            guard interactive, motionEnabled else { return }
+            let current = newValue ?? BotGaze(dx: 0, dy: 0)
+            let previous = lastGazeValue ?? BotGaze(dx: 0, dy: 0)
+            lastGazeValue = newValue
+            let jump = ((current.dx - previous.dx) * (current.dx - previous.dx)
+                + (current.dy - previous.dy) * (current.dy - previous.dy)).squareRoot()
+            let now = Date()
+            guard jump > BotCharacterMotion.focusBlinkThreshold,
+                  now.timeIntervalSince(lastFocusBlinkAt) * 1000 >= BotCharacterMotion.focusBlinkCooldownMs else { return }
+            lastFocusBlinkAt = now
+            focusBlinkStart = now
+        }
     }
 
     // 眼对绘制：eyeIndex 0 圆角竖方（圆角=半宽）/ 1 椭圆 / 2 正圆；眨/眯压 scaleY 宽保持；

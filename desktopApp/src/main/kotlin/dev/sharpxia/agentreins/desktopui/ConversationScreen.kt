@@ -52,6 +52,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -61,7 +62,10 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
@@ -75,6 +79,8 @@ import androidx.compose.ui.unit.sp
 import dev.sharpxia.agentreins.hub.DefaultHubClient
 import dev.sharpxia.agentreins.hub.HubException
 import dev.sharpxia.agentreins.hub.UiApproval
+import dev.sharpxia.agentreins.hub.avatar.botSeedFor
+import dev.sharpxia.agentreins.hub.avatar.botStateFor
 import dev.sharpxia.agentreins.hub.projection.AttachmentRef
 import dev.sharpxia.agentreins.hub.projection.CommandChoice
 import dev.sharpxia.agentreins.hub.projection.ModelOptionItem
@@ -86,10 +92,17 @@ import dev.sharpxia.agentreins.hub.projection.CommandsList
 import java.io.File
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val OPTIMISTIC_SEQ_SENTINEL: Long = Long.MAX_VALUE
+
+/** 末条消息失败判定（角色系统批次4 聊天页 ERROR 态信号；state/uiState 口径与消息行失败徽标同源）。 */
+private fun UiMessage?.isFailedMessage(): Boolean {
+    val m = this ?: return false
+    return m.state == "failed" || m.uiState == "failed"
+}
 
 /** 动态斜杠命令目录内存缓存 TTL（2026-11-07 动态目录轮）：5 分钟，过期即重拉。 */
 private const val SLASH_COMMANDS_TTL_MS: Long = 5 * 60 * 1000L
@@ -254,6 +267,9 @@ internal fun ConversationScreen(
     // HubShell 持镜像喂入；**数据面不动**，只裁渲染分支（streamingRowPresentation 决策）。
     streamingPlayback: Boolean,
     thinkingIndicator: Boolean,
+    // 角色系统批次4：动效档总开关（avatarPrefs UI 镜像，SettingsScreen:465 同口径）——
+    // composer 行首交互角色的 motion 门控。
+    motionEnabled: Boolean,
 ) {
     val messages by client.observeMessages(conversationId).collectAsState(initial = emptyList())
     // wp-15：工作过程披露条数据面（hubToolEvents + hubRunStatus 两表合流快照）——此前零消费，
@@ -295,6 +311,48 @@ internal fun ConversationScreen(
     // DefaultEventProjector.setRun 在 resolveConversation 失败时直接 return，不落库）置灰为
     // 「结束中」提示态，不假设 runId 恒有值、不误触。
     val canCancelRun = !liveConv?.activeRunId.isNullOrEmpty()
+
+    // ── 角色系统批次4：composer 行首 32dp 交互角色的眼神触发面（与 iOS HubChatView 同参同观感）──
+    // 触发三路：输入聚焦下视（onFocusChanged）、composer 区指针注视（pointerInput Move，
+    // 锚/半径/窗幅 = BotCharacter 双端同表常量）、新消息一次性下瞥 400ms（尾行 seq 推进触发，
+    // 首载不瞥；乐观占位 seq 哨兵行与落地行各瞥一次，体感均为「有新行」）。
+    // gaze 合成优先级：注视 > 聚焦下视 > 下瞥窗 > null。
+    var composerFocused by remember { mutableStateOf(false) }
+    var pointerGaze by remember { mutableStateOf<BotGaze?>(null) }
+    var glanceActive by remember { mutableStateOf(false) }
+    var glancePrimed by remember { mutableStateOf(false) }
+    val density = LocalDensity.current
+    LaunchedEffect(messages.lastOrNull()?.seq) {
+        if (!glancePrimed) {
+            glancePrimed = true // 首载不瞥（对齐 iOS onChange 语义）
+            return@LaunchedEffect
+        }
+        glanceActive = true
+        delay(400)
+        glanceActive = false
+    }
+    // DONE 瞬时窗：hasActiveRun 真→假 且终态非 failed（本页有失败信号，较列表行多一层门控）
+    // 触发 900ms；跳变即重启协程取消在途 delay，天然防陈旧回落（批次3 列表卡同式）。
+    var prevActive by remember { mutableStateOf(isRunActive) }
+    var doneTransient by remember { mutableStateOf(false) }
+    LaunchedEffect(isRunActive) {
+        when {
+            isRunActive -> doneTransient = false
+            prevActive && !messages.lastOrNull().isFailedMessage() -> {
+                doneTransient = true
+                delay(900)
+                doneTransient = false
+            }
+        }
+        prevActive = isRunActive
+    }
+    // 角色六态同参消费（批次2 列表行恒 false 的两路，本页为真源）：thinkingNow=workActivity
+    // 细分（wp-15，仅聊天页细分）；ERROR=末条消息 failed（全覆盖于聊天页，列表行无此信号）。
+    val chatThinkingNow = workActivity.phases.lastOrNull()?.phase == "thinking"
+    val chatAwaitingApproval = approvals.any { it.conversationId == conversationId }
+    val chatLastMessageFailed = messages.lastOrNull().isFailedMessage()
+    val chatGaze: BotGaze? = pointerGaze
+        ?: if (composerFocused || glanceActive) BotGaze.DOWN else null
 
     // wp-5 滚动锚定 + 历史翻页状态机（会话切换随 HubShell key(conversationId) 重挂整组重置，
     // 与 iOS resetPagingState 随会话期同语义）。判定纯函数见 TimelineScroll.kt。
@@ -872,15 +930,58 @@ internal fun ConversationScreen(
                     )
                 }
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        // 角色系统批次4：注视——指针在 composer 区移动时眼睛看向指针方向
+                        //（锚=角色中心近似 (16,14)、视野半径 120、窗幅 3.0×2.5，双端同表常量）
+                        .pointerInput(Unit) {
+                            awaitPointerEventScope {
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    if (event.type == PointerEventType.Move) {
+                                        val pos = event.changes.firstOrNull()?.position ?: continue
+                                        val dpX = with(density) { pos.x.toDp().value }
+                                        val dpY = with(density) { pos.y.toDp().value }
+                                        val nx = ((dpX - BOT_GAZE_ANCHOR_X)
+                                            .coerceIn(-BOT_GAZE_RADIUS, BOT_GAZE_RADIUS) / BOT_GAZE_RADIUS)
+                                        val ny = ((dpY - BOT_GAZE_ANCHOR_Y)
+                                            .coerceIn(-BOT_GAZE_RADIUS, BOT_GAZE_RADIUS) / BOT_GAZE_RADIUS)
+                                        pointerGaze = BotGaze(
+                                            dx = BOT_GAZE_AMP_X * nx,
+                                            dy = BOT_GAZE_AMP_Y * ny,
+                                        )
+                                    }
+                                }
+                            }
+                        },
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    // 角色系统批次4（2026-11-20）：composer 行首 32dp 交互角色——thinkingNow
+                    // 细分只在聊天页（workActivity wp-15）；ERROR=末条消息 failed（全覆盖于
+                    // 聊天页）；DONE 瞬时窗见上方 LaunchedEffect；「正在思考…▌」占位行文字信号
+                    // 保留为读屏锚（assistantPlaceholderText）。
+                    BotCharacter(
+                        seed = botSeedFor(conversationId),
+                        state = botStateFor(
+                            hasActiveRun = isRunActive,
+                            thinkingNow = chatThinkingNow,
+                            awaitingApproval = chatAwaitingApproval,
+                            lastMessageFailed = chatLastMessageFailed,
+                            doneTransient = doneTransient,
+                        ),
+                        size = 32.dp,
+                        motionEnabled = motionEnabled,
+                        interactive = true,
+                        gaze = chatGaze,
+                    )
+                    Spacer(Modifier.width(10.dp))
                     OutlinedTextField(
                         value = input,
                         onValueChange = { input = it },
                         placeholder = { Text("发送消息…") },
                         modifier = Modifier
                             .weight(1f)
+                            .onFocusChanged { composerFocused = it.isFocused } // 批次4：聚焦下视
                             .onPreviewKeyEvent { event ->
                                 // wp-6：Enter 键裁决在 preview 相拦截（先于 TextField 默认换行）；
                                 // IME 组合中的 Enter 属提交候选词，让行默认行为（不消费不发送）。

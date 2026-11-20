@@ -589,6 +589,16 @@ struct HubChatView: View {
     /// v1.4.0 追补（2026-11-16 用户反馈「没看到删除入口」）：#29 会话删除从管理 sheet 提到
     /// 会话详情页 ellipsis 菜单——终态确认挂本态。
     @State private var deletingConversation = false
+    /// 角色系统批次4：标题栏交互角色的眼神触发面——composer 输入聚焦下视（@FocusState）、
+    /// 标题区指针注视（onContinuousHover，Catalyst/Mac；触摸设备无 hover 自然只走后三路）、
+    /// 新消息一次性下瞥 400ms。gaze 合成优先级：注视 > 聚焦下视 > 下瞥窗 > nil。
+    @FocusState private var composerFocused: Bool
+    @State private var hoverGaze: BotGaze?
+    @State private var glanceActive = false
+    /// DONE 瞬时窗（聊天页）：hasActiveRun 真→假 且终态非 failed（本页有失败信号，较列表行
+    /// 多一层门控）触发 900ms；generation 防陈旧回调误清（与列表行同式）。
+    @State private var chatDoneGeneration = 0
+    @State private var chatDoneTransient = false
     /// 删除后关页：详情页有两套推栈路径（列表行 NavigationLink 直推 / 通知跳转 chatPush
     /// 绑定推），store 只复位 chatPush 不影响前者——dismiss() 对两路径统一 pop。
     @Environment(\.dismiss) private var dismiss
@@ -764,6 +774,26 @@ struct HubChatView: View {
     ///（HubMessageRow 早退分支），进行中信号收敛到标题一处。
     private var agentBusy: Bool {
         hub.isThinkingNow || isRunActive
+    }
+
+    /// 角色系统批次4：本会话挂起的工具审批（wp-9 零新状态，与 :822 审批卡同谓词）。
+    private var chatAwaitingApproval: Bool {
+        hub.approvals.contains { $0.conversationId == conv.conversationId }
+    }
+
+    /// 角色系统批次4：末条消息失败（ERROR 态信号；列表行无此信号=已知边界⑧，聊天页全覆盖）。
+    private var chatLastMessageFailed: Bool {
+        guard let last = hub.messages.last else { return false }
+        return last.state == "failed" || last.uiState == "failed"
+    }
+
+    /// 角色系统批次4：眼神 gaze 合成——注视（hover，标题区指针方向，锚/半径双端同表）>
+    /// 聚焦下视（窗底）> 新消息下瞥窗（400ms 窗底）> nil。
+    private var chatGaze: BotGaze? {
+        if let hoverGaze { return hoverGaze }
+        if composerFocused { return .down }
+        if glanceActive { return .down }
+        return nil
     }
 
     /// #4（2026-11-08 UX 轮，用户改版）：草稿有内容 = 发送键优先——run 活跃也可直接发
@@ -1235,6 +1265,7 @@ struct HubChatView: View {
                 }
                 .accessibilityLabel("添加图片（最多 \(HubStore.maxDraftAttachments) 张）")
                 TextField("发消息…", text: draftBinding, axis: .vertical)
+                    .focused($composerFocused) // 批次4：输入聚焦下视（角色 gaze 后三路之一）
                     .lineLimit(1...4)
                     .padding(8)
                     .background(RoundedRectangle(cornerRadius: 18).fill(ink.surfaceTertiary))
@@ -1312,12 +1343,54 @@ struct HubChatView: View {
         // 独占全屏），pop 回列表自动恢复；详情仍走 NavigationStack 推栈，导航纪律不变
         //（不必单开 WindowGroup/Scene：多 Scene 会引入窗口生命周期与状态同步复杂度，收益不抵）。
         .toolbar(.hidden, for: .tabBar)
+        // 角色系统批次4：DONE 瞬时窗——hasActiveRun 真→假 且终态非 failed（本页有失败信号，
+        // 较列表行多一层门控；终态 failed 走 ERROR 不播完成弹跳）触发 900ms 后回落。
+        .onChange(of: isRunActive) { _, active in
+            chatDoneGeneration += 1
+            if active {
+                chatDoneTransient = false // 新 run 启动：立即脱离 DONE 瞬时窗
+            } else if !chatLastMessageFailed {
+                let generation = chatDoneGeneration
+                chatDoneTransient = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+                    if chatDoneGeneration == generation { chatDoneTransient = false }
+                }
+            }
+        }
+        // 角色系统批次4：新消息一次性下瞥 400ms（乐观占位 seq 哨兵行与落地行各瞥一次，
+        // 体感均为「有新行」；首载 onChange 不触发不瞥）。
+        .onChange(of: hub.messages.last?.seq) { _, _ in
+            glanceActive = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                glanceActive = false
+            }
+        }
         .toolbar {
             // #3（2026-11-08 UX 轮，用户改版）：进行中信号移至标题——标题旁小字 + 动画
             // 省略号（思考中/处理中，见 agentBusy）。principal 自定义标题项替代
             // navigationTitle（inline 模式下居中渲染，动画不劫持返回手势）。
             ToolbarItem(placement: .principal) {
                 HStack(spacing: 5) {
+                    // 角色系统批次4（2026-11-20）：标题栏左挂 32pt 交互角色——thinkingNow
+                    // 细分只在聊天页（hub.isThinkingNow，wp-15 数据面）；ERROR 聊天页全覆盖
+                    //（末条消息 failed）；DONE 瞬时窗见 onChange。onContinuousHover 仅
+                    // Catalyst/Mac 出指针（触摸设备无 hover，自然只走聚焦下视/下瞥/对焦眨眼
+                    // 后三路）；「思考中/处理中」文字 + AnimatedEllipsis 保留为读屏锚。
+                    BotCharacterView(
+                        seed: botSeedFor(conv.conversationId),
+                        state: botStateFor(
+                            hasActiveRun: isRunActive,
+                            thinkingNow: hub.isThinkingNow,
+                            awaitingApproval: chatAwaitingApproval,
+                            lastMessageFailed: chatLastMessageFailed,
+                            doneTransient: chatDoneTransient,
+                        ),
+                        size: 32,
+                        motionEnabled: hub.avatar.profile.motionEnabled,
+                        interactive: true,
+                        gaze: chatGaze,
+                    )
+                    .accessibilityHidden(true) // 读屏锚=文字（accessibilityLabel 见下）
                     Text(title(conv))
                         .fontWeight(.semibold)
                         .lineLimit(1)
@@ -1326,6 +1399,18 @@ struct HubChatView: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                         AnimatedEllipsis()
+                    }
+                }
+                // 注视：指针在标题区移动时眼睛看向指针方向（换算函数 botGazeToward 内含
+                // 双端同表常量：锚 (16,14)/半径 120/窗幅 3.0×2.5）
+                .onContinuousHover { phase in
+                    switch phase {
+                    case .active(let location):
+                        hoverGaze = botGazeToward(location)
+                    case .ended:
+                        hoverGaze = nil
+                    @unknown default:
+                        hoverGaze = nil
                     }
                 }
                 .accessibilityElement(children: .combine)
@@ -3321,34 +3406,9 @@ struct GatewaysView: View {
     }
 }
 
-/// wp-7②：流式 typing 指示——三点波脉冲，替代静态「…」。
-/// TimelineView 定步驱动而非 repeatForever 动画：LazyVStack 行物化/整列表重渲不丢相位，
-/// 重渲频率 = 步长倒数（~2.2Hz）可忽略。
-private struct TypingIndicator: View {
-    @Environment(\.inkColors) private var ink
-
-    /// 单步时长：三点轮转一圈 ≈1.35s。
-    private static let step: Double = 0.45
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: Self.step)) { context in
-            let phase = Int(context.date.timeIntervalSinceReferenceDate / Self.step) % 3
-            HStack(spacing: 4) {
-                ForEach(0..<3, id: \.self) { i in
-                    Circle()
-                        .fill(ink.ink.opacity(i == phase ? 0.85 : 0.30))
-                        .frame(width: 6, height: 6)
-                        .scaleEffect(i == phase ? 1.0 : 0.62)
-                }
-            }
-            .animation(.easeInOut(duration: Self.step), value: phase)
-        }
-    }
-}
-
 /// #3（2026-11-08 UX 轮）：标题栏进行中态的动画省略号——"." / ".." / "..." 循环步进。
-/// TimelineView 定步驱动（与 TypingIndicator 同纪律，重渲不丢相位）；minWidth 锁宽
-/// 防步进抖动把标题文本推来推去。
+/// TimelineView 定步驱动而非 repeatForever 动画（重渲不丢相位，LazyVStack 行物化/整列表
+/// 重渲零影响）；minWidth 锁宽防步进抖动把标题文本推来推去。
 private struct AnimatedEllipsis: View {
     var color: Color = .secondary
 

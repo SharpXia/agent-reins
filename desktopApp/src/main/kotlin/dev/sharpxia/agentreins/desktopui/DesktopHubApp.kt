@@ -410,6 +410,8 @@ private fun HubShell(
                                         // 2026-11-19：显示偏好两开关（key(conversationId) 重挂时取镜像现值）
                                         streamingPlayback = streamingPlayback,
                                         thinkingIndicator = thinkingIndicator,
+                                        // 角色系统批次4：composer 行首交互角色动效门控
+                                        motionEnabled = avatarUi.motionLevel == AvatarMotion.STANDARD,
                                     )
                                 }
                             } else {

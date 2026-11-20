@@ -1,5 +1,6 @@
 package dev.sharpxia.agentreins.hub.auth
 
+import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import java.io.File
@@ -10,6 +11,8 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 actual fun hubDevicePlatform(): String = "android"
+
+actual fun hubDeviceModel(): String? = Build.MODEL?.takeIf { it.isNotBlank() }
 
 actual fun platformCredentialStore(): CredentialStore = KeystoreCredentialStore()
 

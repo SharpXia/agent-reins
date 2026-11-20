@@ -8,6 +8,7 @@ import kotlinx.cinterop.convert
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.ptr
 import kotlinx.cinterop.reinterpret
+import kotlinx.cinterop.toKString
 import kotlinx.cinterop.usePinned
 import kotlinx.cinterop.value
 import platform.CoreFoundation.CFDataCreate
@@ -39,8 +40,28 @@ import platform.Security.kSecMatchLimitOne
 import platform.Security.kSecReturnData
 import platform.Security.kSecValueData
 import platform.posix.memcpy
+import platform.posix.uname
+import platform.posix.utsname
 
-actual fun hubDevicePlatform(): String = "ios"
+/**
+ * platform 契约值（v1.5.1 枚举增 mac-catalyst）：Catalyst 与 iOS 共用同一 K/N 二进制
+ * （Xcode 侧 stamp 改写平台面），编译期分不出运行面——运行时以 uname machine 判：
+ * Mac 硬件机型（MacBookPro18,3 等）= mac-catalyst，iPhone 系/iPad 系 = ios，
+ * 裸架构（arm64/x86_64，模拟器）= ios。iOS 16+ 隐私门下 UIDevice.name 恒回通用名
+ * （真机=iPhone、Catalyst=iPad），platform/displayName 两面协同才可辨 Mac。
+ */
+@OptIn(ExperimentalForeignApi::class)
+private fun unameMachine(): String? = memScoped {
+    val uts = alloc<utsname>()
+    if (uname(uts.ptr) != 0) return@memScoped null
+    uts.machine.toKString().takeIf { it.isNotEmpty() }
+}
+
+actual fun hubDevicePlatform(): String =
+    if (unameMachine()?.startsWith("Mac") == true) "mac-catalyst" else "ios"
+
+actual fun hubDeviceModel(): String? =
+    unameMachine()?.takeUnless { it == "arm64" || it == "x86_64" } // 模拟器裸架构不报机型
 
 actual fun platformCredentialStore(): CredentialStore = KeychainCredentialStore()
 

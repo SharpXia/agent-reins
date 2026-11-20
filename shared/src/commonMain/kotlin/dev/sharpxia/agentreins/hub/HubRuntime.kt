@@ -2,6 +2,7 @@ package dev.sharpxia.agentreins.hub
 
 import dev.sharpxia.agentreins.hub.auth.CredentialStore
 import dev.sharpxia.agentreins.hub.auth.HubAuthStack
+import dev.sharpxia.agentreins.hub.auth.hubDeviceModel
 import dev.sharpxia.agentreins.hub.auth.hubDevicePlatform
 import dev.sharpxia.agentreins.hub.auth.platformCredentialStore
 import kotlin.concurrent.Volatile
@@ -95,7 +96,7 @@ class HubRuntime(
                     val reg = s.auth.registerCurrentDevice(
                         displayName = deviceName.ifBlank { "AgentReins " + hubDevicePlatform() },
                         platform = hubDevicePlatform(),
-                        model = null,
+                        model = hubDeviceModel(),
                         appVersion = null,
                     )
                     _state.value = HubAuthState.LoggedIn(userDisplay = ok.user.displayName, deviceId = reg.deviceId)

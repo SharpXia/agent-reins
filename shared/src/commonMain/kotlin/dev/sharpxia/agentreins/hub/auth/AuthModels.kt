@@ -32,7 +32,7 @@ data class RefreshOk(
     val refreshExpiresIn: Long,
 )
 
-/** platform ∈ ios/android/desktop。 */
+/** platform ∈ ios/mac-catalyst/android/desktop（v1.5.1 增 mac-catalyst）。 */
 @Serializable
 data class DeviceRegistrationRequest(
     val displayName: String,

@@ -950,6 +950,10 @@ internal fun ConversationScreen(
                                             dx = BOT_GAZE_AMP_X * nx,
                                             dy = BOT_GAZE_AMP_Y * ny,
                                         )
+                                    } else if (event.type == PointerEventType.Exit) {
+                                        // 指针离场复位（复审修复）：否则 pointerGaze 恒非 null，
+                                        // 聚焦下视/新消息下瞥两路被永久遮蔽（iOS .ended 置 nil 对齐）
+                                        pointerGaze = null
                                     }
                                 }
                             }

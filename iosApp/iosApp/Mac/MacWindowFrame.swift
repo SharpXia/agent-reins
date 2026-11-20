@@ -121,7 +121,11 @@ final class MacWindowSceneDelegate: NSObject, UIWindowSceneDelegate {
                     Self.requestFrame(preferred, on: windowScene)
                 }
             }
+            // DEBUG 门对齐定义侧（51-87）：Release archive 无此成员——beta-0.5.20a 起 Mac
+            // 上 TestFlight 连挂的真实根因（被 CI tail -40 日志截断掩盖至 2026-11-20 取证）
+            #if DEBUG
             Self.verifyWindowBehavior(windowScene)
+            #endif
         }
         #endif
     }

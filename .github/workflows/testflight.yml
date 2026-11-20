@@ -109,6 +109,8 @@ jobs:
           # CI 传的版本进不了包，会以固定号撞历史 build 被 ASC 静默丢弃（2026-10-29 实证）
           TAG="${GITHUB_REF_NAME#refs/tags/}"
           MV="${TAG#beta-}"
+          # 尾缀免疫（beta-0.5.21c 实证：altool -19239 拒 "0.5.21c"）——字母重试后缀剥离到首个非数字/点
+          MV=$(printf '%s' "$MV" | sed -E 's/[^0-9.].*$//')
           case "$MV" in *.*) ;; *) MV="0.1.0" ;; esac
           echo "BUILD_NUMBER=$BUILD" >> "$GITHUB_ENV"
           echo "MARKETING_VERSION=$MV" >> "$GITHUB_ENV"
@@ -296,6 +298,8 @@ jobs:
           # 版本号口径与 iOS job 相同：beta-* tag 推导（beta-0.2.22 → 0.2.22），无 tag 回退 0.1.0
           TAG="${GITHUB_REF_NAME#refs/tags/}"
           MV="${TAG#beta-}"
+          # 尾缀免疫（beta-0.5.21c 实证：altool -19239 拒 "0.5.21c"）——字母重试后缀剥离到首个非数字/点
+          MV=$(printf '%s' "$MV" | sed -E 's/[^0-9.].*$//')
           case "$MV" in *.*) ;; *) MV="0.1.0" ;; esac
           echo "BUILD_NUMBER=$BUILD" >> "$GITHUB_ENV"
           echo "MARKETING_VERSION=$MV" >> "$GITHUB_ENV"

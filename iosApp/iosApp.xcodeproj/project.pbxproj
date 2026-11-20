@@ -34,6 +34,7 @@
 		1A6FBB00000000000000001D /* MacSplitRoot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA00000000000000001D /* MacSplitRoot.swift */; };
 		1A6FBB00000000000000001E /* AvatarProfileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA00000000000000001E /* AvatarProfileStore.swift */; };
 		1A6FBB00000000000000001F /* AvatarSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA00000000000000001F /* AvatarSettingsView.swift */; };
+		1A6FBB000000000000000020 /* BotCharacterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000020 /* BotCharacterView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -67,6 +68,7 @@
 		1A6FAA00000000000000001D /* MacSplitRoot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacSplitRoot.swift; sourceTree = "<group>"; };
 		1A6FAA00000000000000001E /* AvatarProfileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvatarProfileStore.swift; sourceTree = "<group>"; };
 		1A6FAA00000000000000001F /* AvatarSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvatarSettingsView.swift; sourceTree = "<group>"; };
+		1A6FAA000000000000000020 /* BotCharacterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BotCharacterView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -191,6 +193,7 @@
 				1A6FAA000000000000000005 /* Components.swift */,
 				1A6FAA000000000000000011 /* BackSwipe.swift */,
 				1A6FAA000000000000000012 /* RobotAvatar.swift */,
+				1A6FAA000000000000000020 /* BotCharacterView.swift */,
 				1A6FAA000000000000000013 /* ScrollBench.swift */,
 			);
 			path = Shared;
@@ -359,6 +362,7 @@
 				1A6FBB00000000000000001D /* MacSplitRoot.swift in Sources */,
 				1A6FBB00000000000000001E /* AvatarProfileStore.swift in Sources */,
 				1A6FBB00000000000000001F /* AvatarSettingsView.swift in Sources */,
+				1A6FBB000000000000000020 /* BotCharacterView.swift in Sources */,
 				1A6FBB000000000000000014 /* HubStore.swift in Sources */,
 				1A6FBB000000000000000017 /* NotificationCoordinator.swift in Sources */,
 				1A6FBB000000000000000015 /* LoginView.swift in Sources */,

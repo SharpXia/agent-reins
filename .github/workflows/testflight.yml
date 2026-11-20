@@ -102,6 +102,7 @@ jobs:
       - name: Archive (App Store signing, build number = epoch seconds)
         run: |
           set -o pipefail
+          mkdir -p build
           BUILD=$(date +%s)
           # 版本号：beta-* tag 推导（beta-0.2.22 → 0.2.22），dispatch 等无 tag 场景回退 0.1.0。
           # Info.plist 引用 $(MARKETING_VERSION)/$(CURRENT_PROJECT_VERSION)——写成字面量的话
@@ -290,6 +291,7 @@ jobs:
       - name: Archive (Mac Catalyst, App Store signing, build number = epoch seconds)
         run: |
           set -o pipefail
+          mkdir -p build
           BUILD=$(date +%s)
           # 版本号口径与 iOS job 相同：beta-* tag 推导（beta-0.2.22 → 0.2.22），无 tag 回退 0.1.0
           TAG="${GITHUB_REF_NAME#refs/tags/}"

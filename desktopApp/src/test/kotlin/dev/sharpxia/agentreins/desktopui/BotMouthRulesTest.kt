@@ -146,4 +146,18 @@ class BotMouthRulesTest {
         )
         assertTrue(corner < FACE_BASE_RADIUS.toFloat() * FACE_MIN, "角点距心 $corner 触安全域")
     }
+
+    @Test
+    fun trembleLowerBoundAndDoneWideMidEnvelope() {
+        // 走查①修补第 7 例（与 Swift DEBUG 锁同表，使 commit message「×7」账实一致）：
+        // ERROR 颤动下探界 −0.75（u=262.5 → sin(3.5π)=−1）
+        val errLow = botMouthFrame(BOT_STATE_ERROR, 262.5f, false)
+        assertEquals(BOT_MOUTH_ERROR_CURVE - BOT_MOUTH_ERROR_TREMBLE, errLow.curve, 1e-3f)
+        assertEquals(0f, errLow.open)
+        // DONE 450ms 包络中程（t=112.5 → env=sin(π/4)≈0.7071）：open≈0.601、wide≈1.2475
+        val doneMid = botMouthFrame(BOT_STATE_DONE, 112.5f, false)
+        assertEquals(0.601f, doneMid.open, 1e-3f)
+        assertEquals(1.2475f, doneMid.wide, 1e-3f)
+        assertEquals(BOT_MOUTH_DONE_CURVE, doneMid.curve, 1e-3f)
+    }
 }

@@ -441,11 +441,14 @@ private fun DisplayPreferencesCard(
  * 形象随机轮 2026-11-21 增「随机换形象」：🎲 换一个 = 形状一键随机（randomPresetExcluding
  * 排除 shown 档键——draft 感知，「连摇必换形」）、色/动效继承 shown；随机结果只进
  * [randomDraft] 本地态（remember，不入偏好/仓），shown = draft ?: profile 换入预览与网格/
- * 色点取值（draft 只改预览与高亮不 PUT）；「用这个形象」才走既有 onSelect→壳层 selectAvatar
- * PUT 链（先 PUT 成功再落本地），「放弃」清 draft 零扰动。预设/色点/动效/恢复默认任一手动
- * 点击先清 draft（手动控制作用在权威档上，预览不作数）；LaunchedEffect(profile) 覆盖拉取/
- * 远端直收敛/保存成功三路 profile 变更的清 draft 义务（壳层 DesktopHubApp 不改签名）——
- * 否则陈旧 draft 遮蔽权威档、确认旧形覆盖远端新档。
+ * 色点取值（draft 只改预览与高亮不 PUT）；「用这个形象」走既有 onSelect→壳层 selectAvatar
+ * PUT 链（先 PUT 成功再落本地），「放弃」清 draft 零扰动。手动控制口径（走查②修后）：
+ * 色点 draft 在场 = 并入随机草稿（给预览形配色，随确认一次 PUT）、无 draft = 即选即存；
+ * 预设/动效/恢复默认任一手动点击先清 draft（手动控制作用在权威档上，预览不作数）；
+ * LaunchedEffect(profile) 覆盖拉取/远端直收敛/保存成功三路 profile 变更的清 draft 义务
+ * （壳层 DesktopHubApp 不改签名）——否则陈旧 draft 遮蔽权威档、确认旧形覆盖远端新档。
+ * 走查③修：确认不清 draft = 桌面本地乐观层（target 驱动预览直至 PUT 返回，对齐 iOS
+ * draft=target 乐观呈现；成功经 LaunchedEffect 清 draft 无缝落新档、失败预览保持可重试）。
  */
 @Composable
 private fun AvatarPreferencesCard(
@@ -577,7 +580,10 @@ private fun AvatarPreferencesCard(
 
             // 随机预览确认行：确认走既有 onSelect→壳层 selectAvatar PUT 链（先 PUT 成功再落
             // 本地），放弃清 draft 零扰动；remotePending 横幅在场强行确认 = 显式覆盖（与既有
-            // 即选即存同语义，服务端 LWW/幂等覆盖写兜底不改契约）
+            // 即选即存同语义，服务端 LWW/幂等覆盖写兜底不改契约）。走查③修：确认不清
+            // randomDraft——保留 target 驱动预览直至 PUT 返回（桌面本地乐观层，对齐 iOS
+            // draft=target 乐观呈现，消除保存期间「闪旧→新」）：成功 profile 变更经上方
+            // LaunchedEffect 清 draft 无缝落新档；失败预览保持+错误横幅，「用这个」可重试
             if (randomDraft != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -589,7 +595,6 @@ private fun AvatarPreferencesCard(
                     Button(
                         onClick = {
                             val target = randomDraft ?: return@Button
-                            randomDraft = null
                             onSelect(target)
                         },
                         enabled = !saving,
@@ -599,7 +604,9 @@ private fun AvatarPreferencesCard(
                 }
             }
 
-            // 十色横排圆点（strong 色；选中描边——draft 感知随 shown）
+            // 十色横排圆点（strong 色；选中描边——draft 感知随 shown）。走查②修：draft 在场
+            // = 并入随机草稿（给预览形配色，随「用这个形象」一次 PUT——不再静默洗掉预览形
+            // 即时保存）；无 draft = 既有即选即存（作用在权威档上）
             Text("配色", style = MaterialTheme.typography.titleSmall)
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 AvatarPalette.entries.forEach { p ->
@@ -615,8 +622,12 @@ private fun AvatarPreferencesCard(
                                 shape = CircleShape,
                             )
                             .clickable {
-                                randomDraft = null // 手动改色先清随机草稿（同预设格口径）
-                                onSelect(AvatarProfile(profile.faceFactors, p, profile.motionLevel, profile.updatedAt))
+                                val current = randomDraft
+                                if (current != null) {
+                                    randomDraft = current.copy(paletteId = p)
+                                } else {
+                                    onSelect(AvatarProfile(profile.faceFactors, p, profile.motionLevel, profile.updatedAt))
+                                }
                             },
                     )
                 }

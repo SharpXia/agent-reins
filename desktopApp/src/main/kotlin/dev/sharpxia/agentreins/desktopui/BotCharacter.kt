@@ -62,7 +62,9 @@ import kotlinx.coroutines.launch
  * 2026-11-21）：单体圆身 + 一对大竖眼 + 一张嘴，无眉无四肢。零 UI 接入（批次3 会话列表 /
  * 批次4 聊天页接线）；iOS 对位 iosApp/iosApp/Shared/BotCharacterView.swift——本文件与
  * Swift 侧逐公式镜像，凡标「双端同表/同式」的常量与相位函数两侧一字不差（金标 3 ULID
- * JVM 单测 + Swift DEBUG 断言锁；嘴部/幅度新表两端手写无金标，改值必须并排 diff 双端同改）。
+ * JVM 单测 + Swift DEBUG 断言锁；嘴部/幅度新表另由 JVM BotMouthRulesTest 与 Swift
+ * BotCharacterGoldLock.mouthAmplitudeLock DEBUG 锁同判据字面量表对锁——走查④修，单端
+ * 改值 DEBUG 即断，不再只靠并排 diff 人工纪律）。
  *
  * 几何：100×100 逻辑坐标（s = size/100，RobotAvatar.swift:229 同规）；身体 = 既有 12 点
  * Catmull-Rom blob 管线原样复用（facePoint + 张力 1/6，AvatarRenderers.kt:303-324 同式，

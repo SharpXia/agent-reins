@@ -10,8 +10,10 @@ import SwiftUI
 ///「其他设备已更新形象」+ 一键拉取（设计稿 §syncMechanism 读路径④）。
 /// 形象随机轮 2026-11-21 增「随机换形象」：🎲 换一个 = 形状一键随机（排除 shown 档键——draft
 /// 感知，「连摇必换形」）、色/动效继承 shown；随机结果只进 [randomDraft] 预览（预览/网格高亮
-/// 随 shown），「用这个形象」才走既有 select()（先 PUT 成功再落本地），除确认外任何路径
-///（再摇/放弃/手动预设/色点/动效/恢复默认/拉取/远端收敛）零 PUT 且清 draft——当前形象零扰动。
+/// 随 shown），「用这个形象」走既有 select()（先 PUT 成功再落本地；iOS 乐观层=draft 在途保持
+/// 目标形），除确认外任何路径（再摇/放弃/手动预设/动效/恢复默认/拉取/远端收敛）零 PUT 且清
+/// draft——当前形象零扰动。改色口径（走查②修，双端同改）：色点 draft 在场 = 并入随机草稿
+///（给预览形配色，随确认一次 PUT）、无 draft = 既有即选即存。
 /// DEBUG 专属「状态走查」节：六态 × 24/32/36/40/96pt（32/36 = 列表行/聊天页头真实挂载档），
 /// motion 强制 true；#if DEBUG 编译期剔除，Release 零开销。
 struct AvatarSettingsView: View {
@@ -258,14 +260,24 @@ struct AvatarSettingsView: View {
                 )
             )
             .onTapGesture {
-                // 手动改色先清随机草稿（形象随机轮，同预设格口径）
-                randomDraft = nil
-                select(AvatarProfileModel(
-                    faceFactors: shown.faceFactors,
-                    paletteId: name.rawValue,
-                    motionLevel: shown.motionLevel,
-                    updatedAt: shown.updatedAt,
-                ))
+                // 改色（走查②修，双端同口径）：draft 在场 = 并入随机草稿——给预览形配色，
+                // 随「用这个形象」一次 PUT（不再静默洗掉预览形即时保存）；无 draft = 既有
+                // 即选即存（作用在权威档上）
+                if let current = randomDraft {
+                    randomDraft = AvatarProfileModel(
+                        faceFactors: current.faceFactors,
+                        paletteId: name.rawValue,
+                        motionLevel: current.motionLevel,
+                        updatedAt: current.updatedAt,
+                    )
+                } else {
+                    select(AvatarProfileModel(
+                        faceFactors: shown.faceFactors,
+                        paletteId: name.rawValue,
+                        motionLevel: shown.motionLevel,
+                        updatedAt: shown.updatedAt,
+                    ))
+                }
             }
             .accessibilityLabel("配色\(name.rawValue)")
     }

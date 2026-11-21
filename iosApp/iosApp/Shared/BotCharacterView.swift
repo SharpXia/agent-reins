@@ -91,7 +91,8 @@ func botStateFor(
     return .idle
 }
 
-/// 金标 3 枚真实 ULID（仓内文档留痕现役标识）+ 期望值表（与 BotSeedRulesTest 同表勿改）。
+/// 金标 3 枚真实 ULID（仓内文档留痕现役标识）+ 期望值表（与 BotSeedRulesTest 同表勿改）+
+/// 嘴部/幅度新表锁 [mouthAmplitudeLock]（走查④修，与桌面 BotMouthRulesTest 同判据字面量表）。
 /// 进程内首个 BotCharacterView 实例化时 DEBUG 断言一次（Release 零开销）。
 private enum BotCharacterGoldLock {
     static let verified: Void = {
@@ -114,8 +115,55 @@ private enum BotCharacterGoldLock {
         assert(botStateFor(hasActiveRun: false, thinkingNow: false, awaitingApproval: false, lastMessageFailed: true, doneTransient: true) == .error)
         assert(botStateFor(hasActiveRun: false, thinkingNow: false, awaitingApproval: false, lastMessageFailed: false, doneTransient: true) == .done)
         assert(botStateFor(hasActiveRun: false, thinkingNow: false, awaitingApproval: false, lastMessageFailed: false) == .idle)
+        mouthAmplitudeLock()
         #endif
     }()
+
+    // 嘴部+幅度新表双端机制锁（走查④修，2026-11-21）：此前新表只有「人工并排 diff」纪律
+    // 兜底——这里与桌面 BotMouthRulesTest 同判据字面量表，单端改常量/公式/钉点 DEBUG 即断，
+    // 不再静默漂移。approx 容差 0.01 容跨平台 Float 三角函数尾差；dyadic 字面量走恒等比对。
+    // #if DEBUG 整段编译期剔除（与上方金标锁同口径，Release 零开销）。
+    #if DEBUG
+    private static func mouthAmplitudeLock() {
+        func approx(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) < 0.01 }
+        let neutral = BotSeed(paletteIndex: 0, bodyIndex: 0, eyeIndex: 0, poseIndex: 0, blinkTempoMs: 2600)
+        // 窗/幅随窗（扩窗回归锚——改窗必双端同改）
+        assert(BotCharacterMotion.windowX == 4.5 && BotCharacterMotion.windowY == 3.5, "眼窗 ±4.5/±3.5 漂移")
+        assert(BotCharacterMotion.gazeAmpX == 4.5 && BotCharacterMotion.gazeAmpY == 3.5, "gaze 幅未随窗")
+        assert(BotGaze.down == BotGaze(dx: 0, dy: BotCharacterMotion.windowY), "下视窗底未引 windowY")
+        // 嘴帧逐态钉点（与桌面 BotMouthRulesTest 同表勿改）
+        let mIdle = BotCharacterMotion.mouthFrame(.idle, 0, false)
+        assert(approx(mIdle.open, 0.10) && approx(mIdle.curve, 0.55), "IDLE 嘴钉点漂移")
+        let mThink = BotCharacterMotion.mouthFrame(.thinking, 0, false)
+        assert(approx(mThink.open, 0.45) && approx(mThink.wide, 0.70) && approx(mThink.dx, 1.5), "THINKING 嘴钉点漂移")
+        assert(approx(BotCharacterMotion.mouthFrame(.running, 0, false).open, 0.30), "RUNNING 开合下界漂移")
+        assert(approx(BotCharacterMotion.mouthFrame(.running, 125, false).open, 0.632), "RUNNING 钉点 t=125 open≈0.632 漂移")
+        assert(approx(BotCharacterMotion.mouthFrame(.running, 190, false).open, 0.75), "RUNNING 开合上界漂移")
+        let mWait = BotCharacterMotion.mouthFrame(.waiting, 1000, false)
+        assert(mWait.open == 0 && approx(mWait.curve, -0.15), "WAITING 钉点应抿嘴（1000 避叹气窗）")
+        let mSigh = BotCharacterMotion.mouthFrame(.waiting, 730, false)
+        assert(approx(mSigh.open, 0.35) && approx(mSigh.curve, -0.45), "叹气窗峰值漂移")
+        let mErr = BotCharacterMotion.mouthFrame(.error, 500, false)
+        assert(mErr.open == 0 && approx(mErr.curve, -0.5), "ERROR 钉点漂移")
+        assert(approx(BotCharacterMotion.mouthFrame(.error, 262.5, false).curve, -0.75), "ERROR 颤动下探界漂移")
+        assert(approx(BotCharacterMotion.mouthFrame(.error, 37.5, false).curve, -0.25), "ERROR 颤动上探界漂移")
+        let mDone = BotCharacterMotion.mouthFrame(.done, 225, false)
+        assert(approx(mDone.open, 0.85) && approx(mDone.wide, 1.35) && approx(mDone.curve, 0.7), "DONE 大笑钉点漂移")
+        let mDoneMid = BotCharacterMotion.mouthFrame(.done, 112.5, false)
+        assert(approx(mDoneMid.open, 0.601) && approx(mDoneMid.wide, 1.2475), "DONE 包络中程漂移")
+        // 静态钉点/体态端点（与桌面 botStaticPhaseMs/botPose 新表同值）
+        assert(BotCharacterMotion.staticPhaseMs(.running) == 125
+            && BotCharacterMotion.staticPhaseMs(.waiting) == 1000
+            && BotCharacterMotion.staticPhaseMs(.error) == 500
+            && BotCharacterMotion.staticPhaseMs(.done) == 225, "静态钉点漂移")
+        assert(approx(BotCharacterMotion.breathScale(0), 1.0)
+            && approx(BotCharacterMotion.breathScale(313), 1.035)
+            && approx(BotCharacterMotion.breathScale(625), 0.98), "呼吸关键帧漂移")
+        assert(approx(BotCharacterMotion.pose(neutral, .done, 225, false).scale, 1.16), "DONE 弹跳峰值漂移")
+        assert(approx(BotCharacterMotion.pose(neutral, .running, 125, false).offsetY, -3.0), "RUNNING y-bob 峰值漂移")
+        assert(approx(BotCharacterMotion.pose(neutral, .thinking, 0, false).rotation, 2.8), "THINKING 体倾漂移（rest −1.2+4.0）")
+    }
+    #endif
 }
 
 // MARK: - 眼神交互（批次4）：附加眼位 + 对焦眨眼（桌面 BotCharacter.kt 逐参数镜像）

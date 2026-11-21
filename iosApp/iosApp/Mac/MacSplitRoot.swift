@@ -25,6 +25,9 @@ struct MacSplitRoot: View {
     /// 侧栏行删除确认目标（本地瞬态；终动作全走 hub.deleteConversation 同 store 入口，
     /// 同 HubHomeView 的 deleteTarget 口径与文案——已知跨面复制，B3 既有先例）。
     @State private var deleteTarget: UiConversation?
+    /// v1.5.2 会话换形象目标（侧栏行右键「换形象」入口；nil=关。UiConversation 非
+    /// Identifiable，同 deleteTarget 走 isPresented Binding 口径）。
+    @State private var avatarTarget: UiConversation?
 
     var body: some View {
         NavigationSplitView(columnVisibility: sidebarVisibility) {
@@ -38,6 +41,16 @@ struct MacSplitRoot: View {
         // 同写 hub.showNewConversation）。
         .sheet(isPresented: $hub.showNewConversation) {
             NewConversationSheet()
+        }
+        // v1.5.2 会话换形象 sheet（侧栏行右键「换形象」入口；同 deleteTarget 走 isPresented
+        // Binding——UiConversation 非 Identifiable 不可走 item:）。
+        .sheet(isPresented: Binding(
+            get: { avatarTarget != nil },
+            set: { if !$0 { avatarTarget = nil } }
+        )) {
+            if let t = avatarTarget {
+                ConversationAvatarSheet(conversation: t)
+            }
         }
         // #29 会话删除确认（侧栏行右键入口）：与 HubHomeView 同款终态确认文案。
         .confirmationDialog(
@@ -146,6 +159,12 @@ struct MacSplitRoot: View {
                                 } label: {
                                     Label(hub.mutedConversations.contains(c.conversationId) ? "取消静音" : "静音此会话",
                                           systemImage: hub.mutedConversations.contains(c.conversationId) ? "bell.fill" : "bell.slash")
+                                }
+                                // v1.5.2 会话换形象（会话级覆盖档；HubHomeView 行同款 parity）。
+                                Button {
+                                    avatarTarget = c
+                                } label: {
+                                    Label("换形象", systemImage: "face.smiling")
                                 }
                                 Divider()
                                 Button(role: .destructive) {

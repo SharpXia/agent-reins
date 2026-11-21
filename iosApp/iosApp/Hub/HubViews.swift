@@ -254,6 +254,9 @@ struct HubHomeView: View {
     /// 本工具栏共用同一入口（iOS 行为不变）。
     /// v1.4.0 追补（2026-11-16 用户反馈「没看到删除入口」）：列表行长按删除目标（nil=关）。
     @State private var deleteTarget: UiConversation?
+    /// v1.5.2 会话换形象目标（行右键/长按「换形象」入口；nil=关。UiConversation 非
+    /// Identifiable，同 deleteTarget 走 isPresented Binding 口径）。
+    @State private var avatarTarget: UiConversation?
 
     var body: some View {
         Group {
@@ -284,6 +287,12 @@ struct HubHomeView: View {
                             Label(hub.mutedConversations.contains(c.conversationId) ? "取消静音" : "静音此会话",
                                   systemImage: hub.mutedConversations.contains(c.conversationId) ? "bell.fill" : "bell.slash")
                         }
+                        // v1.5.2 会话换形象（会话级覆盖档入口②；Mac 侧栏行同款 parity）。
+                        Button {
+                            avatarTarget = c
+                        } label: {
+                            Label("换形象", systemImage: "face.smiling")
+                        }
                         Divider()
                         Button(role: .destructive) {
                             deleteTarget = c
@@ -310,6 +319,16 @@ struct HubHomeView: View {
         }
         .sheet(isPresented: $hub.showNewConversation) {
             NewConversationSheet()
+        }
+        // v1.5.2 会话换形象 sheet（行右键/长按「换形象」入口；同 deleteTarget 走 isPresented
+        // Binding——UiConversation 非 Identifiable 不可走 item:）。
+        .sheet(isPresented: Binding(
+            get: { avatarTarget != nil },
+            set: { if !$0 { avatarTarget = nil } }
+        )) {
+            if let t = avatarTarget {
+                ConversationAvatarSheet(conversation: t)
+            }
         }
         // #29 会话删除（v1.4.0 追补入口）：与详情页/管理 sheet 同款终态确认。
         .confirmationDialog(
@@ -505,6 +524,12 @@ struct HubConversationRow: View {
         hub.approvals.contains { $0.conversationId == c.conversationId }
     }
 
+    /// v1.5.2 会话覆盖档（nil = 覆盖键缺席或未水合——渲染走 seed 派生零变化；在场 = 造型
+    /// 12 值+色注入，眼形/姿态/眨音/动效相位仍随 seed）。
+    private var avatarOverride: AvatarProfileModel? {
+        hub.conversationAvatarOverride(for: c.conversationId)
+    }
+
     var body: some View {
         HStack(spacing: 10) {
             // 角色系统批次2（2026-11-20）：36pt 会话角色替代闪电/人形两态图标——seed=会话化身
@@ -526,6 +551,10 @@ struct HubConversationRow: View {
                 size: 36,
                 motionEnabled: hub.avatar.profile.motionEnabled,
                 interactive: false,
+                // v1.5.2 会话覆盖档：键在场 = 档 12 值+色注入（seed 仍照传——动效相位/眨眼
+                // 仍随 seed）；键缺席/未水合 = nil 注入 = 既有 seed 派生渲染零变化。
+                faceFactorsOverride: avatarOverride?.faceFactors,
+                paletteIndexOverride: avatarOverride.flatMap { AgentTintName.allCases.firstIndex(of: $0.paletteName) },
             )
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
@@ -663,6 +692,8 @@ struct HubChatView: View {
     /// Markdown 图块、composer pending 缩略图（openPendingPreview）。瞬态 UI 挂视图层，
     /// 不进 store。
     @State private var imageViewer: ImageViewerPayload?
+    /// v1.5.2 会话换形象 sheet（入口①=页头角色点按；会话级覆盖档 #32/#33 写路径）。
+    @State private var avatarSheetPresented = false
     @Environment(\.inkColors) private var ink
     let conv: UiConversation
 
@@ -798,6 +829,12 @@ struct HubChatView: View {
     private var chatLastMessageFailed: Bool {
         guard let last = hub.messages.last else { return false }
         return last.state == "failed" || last.uiState == "failed"
+    }
+
+    /// v1.5.2 会话覆盖档（nil = 覆盖键缺席或未水合——渲染走 seed 派生零变化；在场 = 造型
+    /// 12 值+色注入，眼形/姿态/眨音/动效相位仍随 seed）。
+    private var avatarOverride: AvatarProfileModel? {
+        hub.conversationAvatarOverride(for: conv.conversationId)
     }
 
     /// 角色系统批次4：眼神 gaze 合成——注视（hover，标题区指针方向，锚/半径双端同表）>
@@ -1516,7 +1553,14 @@ struct HubChatView: View {
                         motionEnabled: hub.avatar.profile.motionEnabled,
                         interactive: true,
                         gaze: chatGaze,
+                        // v1.5.2 会话覆盖档：键在场 = 档 12 值+色注入（seed 仍照传——动效相位/
+                        // 眨眼仍随 seed）；键缺席/未水合 = nil 注入 = 既有 seed 派生渲染零变化。
+                        faceFactorsOverride: avatarOverride?.faceFactors,
+                        paletteIndexOverride: avatarOverride.flatMap { AgentTintName.allCases.firstIndex(of: $0.paletteName) },
                     )
+                    // v1.5.2 入口①：页头头像点按换形象（会话级覆盖档 sheet）。
+                    .contentShape(Rectangle())
+                    .onTapGesture { avatarSheetPresented = true }
                     .accessibilityHidden(true) // 读屏锚=文字（accessibilityLabel 见下）
                     Text(title(conv))
                         .fontWeight(.semibold)
@@ -1643,6 +1687,10 @@ struct HubChatView: View {
             ImageViewerView(pages: payload.pages, initialIndex: payload.index) {
                 imageViewer = nil
             }
+        }
+        // v1.5.2 会话换形象 sheet（页头角色点按入口；会话级覆盖档，见 ConversationAvatarSheet）。
+        .sheet(isPresented: $avatarSheetPresented) {
+            ConversationAvatarSheet(conversation: conv)
         }
     }
 

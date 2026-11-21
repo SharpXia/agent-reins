@@ -331,7 +331,9 @@ struct AvatarSettingsView: View {
 /// 随机换形抽取（形象随机轮 2026-11-21；桌面 shared `randomPresetExcluding` 3 行镜像——
 /// 无跨端一致性要求不需金标）：排除传入 faceKey（draft 感知=调用方传 shown 档键）后随机
 /// 取一款，空表回退全目录（防御）。只抽形——色/动效由调用方继承 shown。
-private func randomPresetExcluding(_ currentFaceKey: String?) -> AvatarPreset {
+/// v1.5.2 会话换形象 sheet（ConversationAvatarSheet.swift）同消费——private→internal 单一
+/// 真相放宽（MacSplitRoot/HubConversationRow 可见性放宽同先例，纯放宽零行为差）。
+func randomPresetExcluding(_ currentFaceKey: String?) -> AvatarPreset {
     let pool = AvatarPresetCatalog.all.filter { $0.faceKey != currentFaceKey }
     return (pool.isEmpty ? AvatarPresetCatalog.all : pool).randomElement()!
 }

@@ -223,6 +223,21 @@ final class HubStore {
     /// updatedAt 大者胜 + UserDefaults `hub.avatarProfile.v1` 缓存跨登出保留）。
     let avatar = AvatarProfileStore()
 
+    /// v1.5.2 会话级形象覆盖档（#32/#33/#34）：conversationId → 覆盖档宽松解析镜像。三态
+    /// 语义与 shared conversationAvatarProfiles 流逐字对齐，勿合并压缩——`nil` = 未水合
+    ///（登录/启动 #34 回拉未到：所有会话渲染一律走 seed 派生，不猜测）；`[:]`/键缺席 =
+    /// 已水合该会话无覆盖（渲染走 seed 派生，**不造默认档**——无覆盖是「没有」不是「默认」）；
+    /// 键在场 = 覆盖生效（渲染注入 faceFactors+paletteId；档内 motionLevel 不消费——动效
+    /// 仍全局形象档）。收敛单源在 shared 流（登录水合 + sync.ready 回拉 + PUT/DELETE 成功
+    /// 落表 + conversation.avatar.updated 控制帧多路汇合，per-key updatedAt 大者胜），本
+    /// 映射只是观察镜像不本地写——写成功后由订阅推回，防双写竞态。
+    private(set) var conversationAvatarProfiles: [String: AvatarProfileModel]?
+
+    /// 覆盖档读面（渲染双挂载点/换装 sheet 消费）：nil = 键缺席或未水合，调用方走 seed 派生。
+    func conversationAvatarOverride(for conversationId: String) -> AvatarProfileModel? {
+        conversationAvatarProfiles?[conversationId]
+    }
+
     /// 网关管理动作在途（键 = "create" 或 gatewayId；按钮禁用防重复提交——#25 名称不判重
     /// 无幂等键，重复提交产生多个网关各持独立 Token）。
     /// 复植轮不复活 revokedGatewayIds 即时隐藏集：本地投影行收敛已下沉 HubClient
@@ -634,6 +649,73 @@ final class HubStore {
             }
             onDone(json != nil, error)
         }
+    }
+
+    // ---------- v1.5.2：会话级形象覆盖档（#32/#33/#34；纯 REST 直调不走幂等队列，同 #31 桥面口径） ----------
+
+    /// 订阅会话覆盖档清单（登录态建立时机调用——与 watchAvatarProfile 同模式，重复调用由
+    /// 桥侧换订阅）。桥推 JSON 对象串 `{"<conversationId>":<AvatarProfile>,…}`，三态语义见
+    /// [conversationAvatarProfiles]：null = 未水合置 nil；`{}` = 已水合无覆盖置空字典；逐键
+    /// 宽松解析（值形状漂移该键丢弃 = 无覆盖走 seed 派生，不造默认档）；外层形状漂移静默
+    /// 忽略保持现值（shared 帧宽松纪律，不断连，下一帧自愈）。
+    func watchConversationAvatarProfiles() {
+        bridge.hubWatchConversationAvatarProfiles { [weak self] mapJson in
+            self?.applyConversationAvatarMap(mapJson as String?)
+        }
+    }
+
+    /// #34 显式刷新（换装 sheet 打开时 best-effort 对账——登录/sync.ready 已自动水合，此处
+    /// 只兜长驻进程的陈旧窗口；失败静默不呈现，观察面仍以 shared 流为准。成功响应已整体
+    /// 替换落 shared 流，订阅侧自动收帧，本回调不另带数据）。
+    func refreshConversationAvatarProfiles() {
+        bridge.hubGetConversationAvatarProfiles { [weak self] mapJson, _ in
+            self?.applyConversationAvatarMap(mapJson as String?)
+        }
+    }
+
+    /// 会话覆盖档保存（端点 #32 直调；**先 PUT 成功再落本地**——落表单源在 shared 流：200
+    /// 权威档经 shared putConversationAvatarProfile 收敛进流推回本映射，Swift 侧不二次写防
+    /// 双写竞态）。onDone ok true = 已成功（调用方关 sheet 时机）；false = 未成功（未登录/
+    /// 网络不可达/形状校验 400 HUB-BIZ-004/会话查无或无权 404 HUB-BIZ-002 防枚举），error =
+    /// 人读失败原因，调用方显式呈现 + 可重试，不静默。
+    func saveConversationAvatarProfile(_ conversationId: String, _ draft: AvatarProfileModel, onDone: @escaping (_ ok: Bool, _ error: String?) -> Void) {
+        bridge.hubPutConversationAvatarProfile(conversationId: conversationId, profileJson: draft.requestBodyJSON) { _, error in
+            onDone(error == nil, error)
+        }
+    }
+
+    /// 会话覆盖档清除（端点 #33 直调；「恢复默认」= 回落会话 seed 派生）：204 幂等终态——
+    /// 无覆盖重复 DELETE 亦 204（error = null 即已清除，重复清除无害）。成功已按键移除
+    /// shared 流本地键，订阅推回即渲染回落 seed 派生。失败同 [saveConversationAvatarProfile]
+    /// 显式呈现可重试。
+    func clearConversationAvatarProfile(_ conversationId: String, onDone: @escaping (_ ok: Bool, _ error: String?) -> Void) {
+        bridge.hubDeleteConversationAvatarProfile(conversationId: conversationId) { error in
+            onDone(error == nil, error)
+        }
+    }
+
+    /// 覆盖档映射宽松解析落表（镜像 AvatarProfileModel 宽松纪律；null/garbage/漂移三态见
+    /// [watchConversationAvatarProfiles] 注）。
+    private func applyConversationAvatarMap(_ raw: String?) {
+        guard let raw else {
+            conversationAvatarProfiles = nil // null = 未水合（与 `{}` 已水合无覆盖语义不同，勿合并）
+            return
+        }
+        guard let data = raw.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return // 外层形状漂移：静默忽略保持现值（不断连）
+        }
+        var out: [String: AvatarProfileModel] = [:]
+        for (key, value) in obj {
+            // 值重序列化后走 AvatarProfileModel(json:) 既有宽松解析（档内越界/未知枚举各自
+            // 回退）；值非对象或不可解析 → 该键丢弃 = 无覆盖走 seed 派生。
+            guard let vobj = value as? [String: Any], JSONSerialization.isValidJSONObject(vobj),
+                  let vdata = try? JSONSerialization.data(withJSONObject: vobj),
+                  let json = String(data: vdata, encoding: .utf8),
+                  let model = AvatarProfileModel(json: json) else { continue }
+            out[key] = model
+        }
+        conversationAvatarProfiles = out
     }
 
     // ---------- wp-11：#16 新建会话入口 ----------
@@ -1864,6 +1946,10 @@ final class HubStore {
                 // v1.5.0：登录态建立即挂形象档订阅（登录回拉 + sync.ready 重连回拉 +
                 // avatar.updated 实时帧三路在 shared 流汇合，桥只透 JSON 串；重复回调由桥侧换订阅）。
                 self.watchAvatarProfile()
+                // v1.5.2：登录态建立即挂会话覆盖档订阅（#34 水合 + sync.ready 回拉 +
+                // conversation.avatar.updated 控制帧多路在 shared 流汇合，桥只透 JSON 对象串；
+                // 重复回调由桥侧换订阅）。
+                self.watchConversationAvatarProfiles()
                 // wp-13：登录态建立即请求通知授权（系统只在首次未决定时弹窗；拒绝后静默降级）。
                 self.notifications.requestAuthorizationIfNeeded()
                 // wp-17：同一时机注册远程通知；token 由 AppDelegate 注册回调取到后经
@@ -2016,6 +2102,9 @@ final class HubStore {
         // 流在桥 hubLogout → wipeLocalData 同批清空；订阅随桥取消，重登 watchAvatarProfile
         // 重新挂）。
         avatar.resetForLogout()
+        // v1.5.2：会话覆盖档镜像随登出复位 nil（未水合语义）——订阅随桥取消后不再有帧推回，
+        // 不复位则重登新账号在 #34 回拉到达前的窗口会错用旧用户覆盖档渲染（用户级数据同纪律）。
+        conversationAvatarProfiles = nil
         bridge.hubLogout()
     }
 }

@@ -34,6 +34,7 @@
 		1A6FBB00000000000000001E /* AvatarProfileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA00000000000000001E /* AvatarProfileStore.swift */; };
 		1A6FBB00000000000000001F /* AvatarSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA00000000000000001F /* AvatarSettingsView.swift */; };
 		1A6FBB000000000000000020 /* BotCharacterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000020 /* BotCharacterView.swift */; };
+		1A6FBB000000000000000021 /* ConversationAvatarSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000021 /* ConversationAvatarSheet.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -67,6 +68,7 @@
 		1A6FAA00000000000000001E /* AvatarProfileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvatarProfileStore.swift; sourceTree = "<group>"; };
 		1A6FAA00000000000000001F /* AvatarSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvatarSettingsView.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000020 /* BotCharacterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BotCharacterView.swift; sourceTree = "<group>"; };
+		1A6FAA000000000000000021 /* ConversationAvatarSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationAvatarSheet.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -162,6 +164,7 @@
 			children = (
 				1A6FAA000000000000000016 /* HubViews.swift */,
 				1A6FAA00000000000000001F /* AvatarSettingsView.swift */,
+				1A6FAA000000000000000021 /* ConversationAvatarSheet.swift */,
 				1A6FAA000000000000000018 /* MediaSupport.swift */,
 				1A6FAA00000000000000001A /* ImageViewer.swift */,
 			);
@@ -360,6 +363,7 @@
 				1A6FBB00000000000000001E /* AvatarProfileStore.swift in Sources */,
 				1A6FBB00000000000000001F /* AvatarSettingsView.swift in Sources */,
 				1A6FBB000000000000000020 /* BotCharacterView.swift in Sources */,
+				1A6FBB000000000000000021 /* ConversationAvatarSheet.swift in Sources */,
 				1A6FBB000000000000000014 /* HubStore.swift in Sources */,
 				1A6FBB000000000000000017 /* NotificationCoordinator.swift in Sources */,
 				1A6FBB000000000000000015 /* LoginView.swift in Sources */,

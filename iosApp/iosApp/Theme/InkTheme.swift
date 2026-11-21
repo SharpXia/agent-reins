@@ -2,7 +2,8 @@ import SwiftUI
 
 // MARK: - 墨水系设计令牌（M3 InkColors/InkType/InkShapes 逐值移植）
 
-// 选中面/按钮面三条铁律（2026-11-21 观感整治轮评审定稿；违反即复现「白字压近白底」同款 bug）：
+// 选中面/按钮面/accent 面四条铁律（2026-11-21 观感整治轮评审定稿+同日 tint 债清账轮补④；
+// 违反即复现「白字压近白底」同款 bug）：
 // 1. `.tint` 只作交互控件着色，不作隐式文本色来源——行内文字一律显式令牌
 //    （.tint(colors.ink) 把 app accent 劫持成近白/近黑单色，beta-0.5.22 侧栏选中胶囊
 //    与行内浅灰白字同色的根因即「系统选中面吃 accent + 行内文字钉死 tertiary」叠加）。
@@ -11,6 +12,10 @@ import SwiftUI
 // 3. 新圆钮一律走统一面组件 `inkIconButtonFace`（Components.swift），禁就地
 //    `Circle().fill(...)`——就地拼面是半透明材质/雾面残留的根源（c01acea 只换了
 //    两处看不见的背景层，真身 glyph 半透明盘与默认 bezel 漏网）。
+// 4. accent 语义面（链接/交互强调）一律用 InkColors.accent 显式令牌，禁新增
+//    Color.accentColor 字面量——全局 tint 维持 ink 单色不动，字面量会渲染成近白/近黑
+//    失去区分度（2026-11-21 tint 债清账轮：存量字面量已清零；Markdown 链接是 Text
+//    .link run 的隐式着色，由 LiteMarkdownBody 作用域 .tint(accent) 收口）。
 
 /// 颜色令牌：与 composeApp `ui/theme/InkColors.kt` 同源同值。
 /// FuncColors 四件套在 Swift 里折平为带前缀的属性（infoText/infoBorder/...）。
@@ -51,6 +56,20 @@ struct InkColors {
     let shimmerBase: Color
     let awaiting: Color
     let awaitingSubtle: Color
+    // ── accent 语义（链接/交互强调，2026-11-21 tint 债清账轮扩容）──
+    /// accent 语义面专用：Markdown 链接、JSON 卡折叠钮、斜杠面板命令名/键盘高亮、
+    /// 模型卡当前项、形象设置选中。全局 tint 维持 ink（单色语言）不动，系统 accent 仍
+    /// 被劫持为近白/近黑——本令牌是 accent 语义的唯一合法来源，此后禁新增
+    /// Color.accentColor 字面量（存量已随本轮清零，见各消费点）。
+    /// 取色 = 既有 info/awaiting 蓝族（不引入新色相，与单色语言协调的克制色）：
+    /// dark 与 infoText 同值 0x4D9BFF；light 自 infoText 0x0B6DD3 加深至 0x0A61BC——
+    /// 0x0B6DD3 在链接实际落点（助手气泡面 surfaceTertiary 叠 paper ≈ 0xEFEFEF、JSON
+    /// 卡面双层 surfaceTertiary ≈ 0xE3E3E3）只有 4.41:1 / 3.95:1，不达 WCAG AA 小文本
+    /// 4.5:1。WCAG 2.x 相对亮度公式 python3 实测：
+    /// light 0x0A61BC 对 paper 5.93 / 气泡面 5.30 / 卡面 4.74 / elevated 6.09；
+    /// dark  0x4D9BFF 对 paper 6.64 / 气泡面 6.11 / 卡面 5.51 / elevated 5.91
+    /// ——全表面 ≥4.5（描边/薄底等非文本用法 ≥3 同过）。
+    let accent: Color
     // ── 选中面（sidebar 胶囊 + 行内文字对）──
     /// 系统选中胶囊面（List(selection:) 作用域 .tint 钉住此令牌）。今日与全局 tint 同值
     /// （light=ink:45 / dark=ink:83），作用是钉住令牌防全局 tint 漂移，非本轮变色项。
@@ -102,6 +121,7 @@ struct InkColors {
             shimmerBase: Color(hex: 0x1C1C1C, alpha: 0x40),
             awaiting: Color(hex: 0x0B6DD3),
             awaitingSubtle: Color(hex: 0x1680F3, alpha: 0x17),
+            accent: Color(hex: 0x0A61BC),              // 链接/交互强调；paper 5.93:1 / 气泡面 5.30 / 卡面 4.74
             selectionFill: Color(hex: 0x1C1C1C),       // = ink（今日与全局 tint 同值）
             onSelection: Color(hex: 0xFCFCFC),         // 16.61:1 on selectionFill
             onSelectionMuted: Color(hex: 0xB3B3B3),    //  8.13:1 on selectionFill
@@ -146,6 +166,7 @@ struct InkColors {
             shimmerBase: Color(hex: 0xF5F5F5, alpha: 0x38),
             awaiting: Color(hex: 0x4D9BFF),
             awaitingSubtle: Color(hex: 0x1884FC, alpha: 0x12),
+            accent: Color(hex: 0x4D9BFF),              // =infoText 同值；paper 6.64:1 / 气泡面 6.11 / 卡面 5.51
             selectionFill: Color(hex: 0xF5F5F5),       // = ink（今日与全局 tint 同值）
             onSelection: Color(hex: 0x121212),         // 17.18:1 on selectionFill
             onSelectionMuted: Color(hex: 0x666666),    //  5.27:1 on selectionFill

@@ -213,7 +213,9 @@ private struct GenericJsonBody: View {
                 } label: {
                     Text(expanded ? "收起" : "展开 \(all.count - Self.foldLines) 行")
                         .font(.caption)
-                        .foregroundStyle(Color.accentColor)
+                        // tint 债清账轮（2026-11-21）：Color.accentColor → 令牌——全局 tint
+                        // 仍=ink，字面量在暗色下渲染近白失去链接感（InkColors.accent 注释含实测对比度）。
+                        .foregroundStyle(ink.accent)
                 }
                 .buttonStyle(.plain)
                 .padding(.top, 4)
@@ -275,6 +277,11 @@ private struct LiteMarkdownBody: View, Equatable {
         .font(.system(size: 15))
         .lineSpacing(4)
         .foregroundColor(c.ink)
+        // 链接着色收口（2026-11-21 tint 债清账轮）：Text 的 .link run 与卡内 Link(chip)
+        // 的颜色来自 tint 隐式来源，全局 .tint(colors.ink) 会把它们染成近白/近黑、暗色下
+        // 失去链接区分度——本作用域钉 accent 令牌恢复区分度（明暗实测对比度见
+        // InkColors.accent 注释；外层 .foregroundColor 不改 .link run 的着色来源）。
+        .tint(c.accent)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

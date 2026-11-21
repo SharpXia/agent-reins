@@ -19,6 +19,7 @@ import SwiftUI
 struct AvatarSettingsView: View {
     @State private var hub = HubStore.shared
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.inkColors) private var ink
     @State private var draft: AvatarProfileModel?
     @State private var saving = false
     @State private var saveError: String?
@@ -227,7 +228,9 @@ struct AvatarSettingsView: View {
             )
             Text(preset.zhName)
                 .font(.caption2)
-                .foregroundStyle(preset.faceKey == shown.faceKey ? Color.accentColor : Color.secondary)
+                // tint 债清账轮（2026-11-21）：Color.accentColor → 令牌——全局 tint 仍=ink，
+                // 选中态在暗色下近白与未选中 secondary 拉不开。
+                .foregroundStyle(preset.faceKey == shown.faceKey ? ink.accent : Color.secondary)
         }
         .frame(maxWidth: .infinity)
         .contentShape(Rectangle())
@@ -255,7 +258,8 @@ struct AvatarSettingsView: View {
             .frame(width: 26, height: 26)
             .overlay(
                 Circle().stroke(
-                    selected ? Color.accentColor : Color.secondary.opacity(0.4),
+                    // tint 债清账轮（2026-11-21）：字面量 → 令牌（同 preset 标签）。
+                    selected ? ink.accent : Color.secondary.opacity(0.4),
                     lineWidth: selected ? 2.5 : 1,
                 )
             )

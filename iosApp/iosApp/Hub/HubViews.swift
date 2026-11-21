@@ -1307,8 +1307,31 @@ struct HubChatView: View {
                 // 底还是 label 上都与 composer 底（surfaceTertiary≈#F0F0F0）几乎同色=亮色
                 // 回退红线。onControlFace 亮色 0x1C1C1C 恰=上一版继承的全局 tint 同值、暗色
                 // 0xEDEDED≈全局 tint 0xF5F5F5——两种 tint 语义（胶囊底/label 色）下都与
-                // beta-0.5.22 已发包观感几乎一致，零回退； PasteButton 系统托管控件对 tint
-                // 的实际语义仍以四态走查实测拍板为准（本注释即拍板前状态）。
+                // beta-0.5.22 已发包观感几乎一致，零回退。
+                //
+                // ── 四态拍板（同日遗留债清账，取代上版「四态走查实测拍板门」）：四态渲染
+                // 由本处代码显式钉死，不再依赖系统 tint 语义路由。可定制面实证（Apple
+                // PasteButton 文档）："The system provides a button appearance and label …
+                // you can use view modifiers like buttonBorderShape(_:), labelStyle(_:)
+                // and tint(_:) to customize the button"——据此两条平台限制：①label 系统
+                // 所有不可注入，观感轮给 send 键的「label 内 \.isEnabled 显式面」在此结构性
+                // 不可用：PasteButton 的禁用来自剪贴板内容（系统内部态），不进 SwiftUI
+                // 环境；\.isEnabled 只读外部 .disabled 作用域，本调用点无外部 disabled=
+                // 恒真=写它就是假确定（死代码）。②buttonStyle 不在文档定制通道内，无剥掉
+                // 系统失效绘制的通道。故取「可消费颜色通道全部同值钉死」：.foregroundStyle
+                // 与 .tint 同钉 onControlFace——系统无论把 tint 语义路由到 label 色还是
+                // bezel 底、label 色无论走 foreground 环境还是 accent，落点都是代码写死的
+                // 同一令牌值（明 0x1C1C1C／暗 0xEDEDED，InkColors 明暗成对代码表）。钉
+                // foregroundStyle 零风险：值与 tint 同源，系统忽略即无操作、消费即正中钉值；
+                // 且两钉值与 d828389 单 tint 版一致=零观感回退，只消灭「语义路由未知」。
+                // 四态归属：亮/暗×可用=label 色由双通道钉死值决定；亮/暗×禁用=启停本就是
+                // 系统托管（本控件存在理由，见上注），禁用渲染=系统失效绘制作用于已钉死
+                // 令牌色——与走查⑤ .plain borderless 钮「无保证淡出」不同类：PasteButton
+                // 无 buttonStyle 通道，系统绘制与失效绘制不可分割，无从也无须自行接管淡出
+                // 因子。走查由此降级为纯回归肉眼（禁用淡出可辨识度），不再是语义拍板；另
+                // 文档明示剪贴板实时启停 "on iOS, but not on macOS"——Catalyst 侧禁用态是否
+                // 随剪贴板实时翻转无文档保证，回归按此口径观察。
+                .foregroundStyle(ink.onControlFace)
                 .tint(ink.onControlFace)
                 #endif
                 // v1.3 发送链：图片选择入口（PHPicker 出程式面板，无需相册权限）；多选上限
@@ -1927,7 +1950,10 @@ private struct SlashCommandPanel: View {
                                 HStack(spacing: 10) {
                                     Text(cmd.name)
                                         .font(.callout.monospaced().weight(.semibold))
-                                        .foregroundStyle(Color.accentColor)
+                                        // tint 债清账轮（2026-11-21）：Color.accentColor → 令牌
+                                        // ——全局 tint 仍=ink，字面量暗色下近白失去强调（对位桌面
+                                        // ConversationScreen 同位 primary 色）。
+                                        .foregroundStyle(ink.accent)
                                     Text(cmd.summary)
                                         .font(.footnote)
                                         .foregroundStyle(.secondary)
@@ -1955,10 +1981,11 @@ private struct SlashCommandPanel: View {
                             .hoverHighlight(cornerRadius: 9)
                             .accessibilityLabel("把 \(cmd.name) 填入输入框续写参数")
                         }
-                        // 键盘高亮行底（2026-11-20 Mac 键盘交互轮：系统 accent 薄底，双模式可读；
-                        // 与行内 hover 共存不冲突）
+                        // 键盘高亮行底（2026-11-20 Mac 键盘交互轮：accent 薄底，双模式可读；
+                        // 与行内 hover 共存不冲突。2026-11-21 tint 债清账：字面量 → 令牌，
+                        // 否则暗色下是近白薄底）
                         .background(index == keyboardIndex
-                            ? AnyShapeStyle(Color.accentColor.opacity(0.16))
+                            ? AnyShapeStyle(ink.accent.opacity(0.16))
                             : AnyShapeStyle(.clear))
                         .clipShape(RoundedRectangle(cornerRadius: 9))
                         if index < suggestions.count - 1 {
@@ -1992,7 +2019,8 @@ private struct SlashCommandPanel: View {
 ///     知情边界：发送按钮的 ⌘Return 键盘快捷键通道语义跟按钮（draftHasContent 含附件），
 ///     纯附件草稿（文本空白+附件在场）在②按空白消费 no-op，但快捷键通道仍可能先触发按钮
 ///     发送——同键同草稿态可能「发附件/不动」分叉，两通道先后无官方次序，实机 ⌘Enter 四态
-///     走查覆盖（桌面同键恒 no-op，为双端已知边界差异）；
+///     走查覆盖（桌面键盘通道 2026-11-21 债清已对齐=draftHasContent 含附件即发，本分叉仅
+///     存在于 Catalyst 自身双通道间）；
 ///   ③ ⌘/Ctrl → 强制发送（onSend + .handled；含 .control——桌面 isMetaOrCtrlPressed 同
 ///     口径，Ctrl+Enter 多行同发，2026-11-21 走查修复②对齐；发送在途由 HubStore
 ///     .sendingDraftFor 防重保证单次——发送按钮在场时与 ⌘Return 键盘快捷键构成双通道，
@@ -2013,8 +2041,9 @@ private struct ComposerKeyHandlers: ViewModifier {
     let isFocused: Bool
     /// 渲染期快照：斜杠面板可见（= !slashSuggestions.isEmpty）。
     let panelVisible: Bool
-    /// 渲染期快照：草稿纯文本 trim 后为空（不含附件——附件独发走发送键，与桌面 Ignored
-    /// 口径一致；勿与 draftHasContent 混用，后者含附件）。
+    /// 渲染期快照：草稿纯文本 trim 后为空（不含附件——附件独发走发送键的守卫；勿与
+    /// draftHasContent 混用，后者含附件。桌面键盘通道 ⌘Enter 已对齐含附件即发，本纯文本
+    /// 判据只约束本端 onKeyPress 的②空白消费）。
     let draftTextIsBlank: Bool
     /// 渲染期快照：草稿已含换行（多行）。
     let draftIsMultiline: Bool
@@ -2194,7 +2223,9 @@ private struct ModelsInteractiveCard: View {
                     if isCurrent {
                         Image(systemName: "checkmark")
                             .font(.caption2.weight(.bold))
-                            .foregroundStyle(Color.accentColor)
+                            // tint 债清账轮（2026-11-21）：字面量 → 令牌（模型卡 accent 面，
+                            // 同卡描边见下；暗色下近白对白字无区分度）。
+                            .foregroundStyle(ink.accent)
                     }
                 }
                 Text(subtitle)
@@ -2206,7 +2237,7 @@ private struct ModelsInteractiveCard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10).padding(.vertical, 7)
             .background(RoundedRectangle(cornerRadius: 8).fill(ink.surfaceTertiary))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(isCurrent ? Color.accentColor : ink.borderTertiary,
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(isCurrent ? ink.accent : ink.borderTertiary,
                                                              lineWidth: isCurrent ? 1.2 : 0.5))
             .contentShape(Rectangle())
         }

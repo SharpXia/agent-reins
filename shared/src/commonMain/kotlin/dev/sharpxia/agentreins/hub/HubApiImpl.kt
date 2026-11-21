@@ -10,6 +10,7 @@ import dev.sharpxia.agentreins.hub.auth.RefreshOk
 import dev.sharpxia.agentreins.hub.auth.RefreshRequest
 import dev.sharpxia.agentreins.hub.avatar.AvatarProfile
 import dev.sharpxia.agentreins.hub.avatar.AvatarProfileRequest
+import dev.sharpxia.agentreins.hub.avatar.ConversationAvatarProfileEntry
 import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
 import dev.sharpxia.agentreins.hub.projection.ApprovalDecisionRequest
 import dev.sharpxia.agentreins.hub.projection.BridgeTokenIssuedResponse
@@ -269,6 +270,40 @@ class DefaultHubApi(
         }
         return decode(resp)
     }
+
+    // ── v1.5.2 会话形象覆盖档（#32/#33/#34；路径参数 conversationId 为 Hub ULID（服务端签发
+    //    句柄），直拼与既有路径样板同口径安全——deleteConversation #29 同款） ──
+
+    /**
+     * #32（v1.5.2 additive）：会话覆盖档保存——幂等覆盖写，**200 回服务端权威档**（updatedAt
+     * 直接回填）；请求体与 #31 同款三可编辑字段全量覆盖。http.put 直拼 + decode，与
+     * putAvatarProfile 同式仅多路径参数。
+     */
+    override suspend fun putConversationAvatarProfile(conversationId: String, req: AvatarProfileRequest): AvatarProfile {
+        val resp = http.put(config.baseUrl + "/conversations/" + conversationId + "/avatar-profile") {
+            bearer()
+            contentType(ContentType.Application.Json)
+            setBody(req)
+        }
+        return decode(resp)
+    }
+
+    /**
+     * #33（v1.5.2 additive）：会话覆盖档清除——204 无响应体（ConversationAvatarProfileCleared），
+     * 与 deleteConversation 同款 ensureSuccess 不走 decode()；幂等终态（无覆盖重复 DELETE 亦 204），
+     * 「不存在/无权」统一 404 HUB-BIZ-002 防枚举。
+     */
+    override suspend fun deleteConversationAvatarProfile(conversationId: String) {
+        val resp = http.delete(config.baseUrl + "/conversations/" + conversationId + "/avatar-profile") { bearer() }
+        ensureSuccess(resp)
+    }
+
+    /**
+     * #34（v1.5.2 additive）：会话覆盖档列表（水合面）——conversationId ULID 升序，无覆盖 =
+     * 空数组（非 null）；get JSON decode 样板（reified List），get gateways 同式。
+     */
+    override suspend fun listConversationAvatarProfiles(): List<ConversationAvatarProfileEntry> =
+        get("/me/conversation-avatar-profiles")
 
     // ── 内部 ─────────────────────────────────────────────────────────────
 

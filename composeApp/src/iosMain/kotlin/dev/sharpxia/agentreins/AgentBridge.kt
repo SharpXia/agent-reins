@@ -14,6 +14,8 @@ import dev.sharpxia.agentreins.hub.UiMessagesPage
 import dev.sharpxia.agentreins.hub.UiWorkActivity
 import dev.sharpxia.agentreins.hub.auth.DeviceInfo
 import dev.sharpxia.agentreins.hub.avatar.AvatarProfile
+import dev.sharpxia.agentreins.hub.avatar.conversationAvatarMapFromEntries
+import dev.sharpxia.agentreins.hub.avatar.encodeConversationAvatarMapJson
 import dev.sharpxia.agentreins.hub.avatar.encodeJson
 import dev.sharpxia.agentreins.hub.avatar.parseAvatarProfileJson
 import dev.sharpxia.agentreins.hub.db.createHubDriver
@@ -58,6 +60,7 @@ class AgentBridge {
     private var hubWorkActivityJob: Job? = null
     private var hubPhaseJob: Job? = null
     private var hubAvatarJob: Job? = null
+    private var hubConversationAvatarJob: Job? = null
 
     /**
      * wp-13：run 终态通知回调（Swift 注册；见 [hubWatchRunTerminal]）。2026-11-15 推送
@@ -275,6 +278,88 @@ class AgentBridge {
                 onDone(profile.encodeJson(), null)
             } else {
                 onDone(null, describeError(r.exceptionOrNull()))
+            }
+        }
+    }
+
+    // ---------- v1.5.2 会话形象覆盖档（#32/#33/#34；纯 REST 直调不走幂等队列，同 #30/#31 桥面口径） ----------
+
+    /**
+     * 会话覆盖档清单订阅（v1.5.2；Swift 侧消费 shared 收敛流）：shared conversationAvatarProfiles
+     * StateFlow（Map<conversationId, AvatarProfile>；登录/启动水合 #34 + sync.ready 重连回拉 +
+     * PUT 响应/DELETE 成功 + conversation.avatar.updated 控制帧多路汇合，per-key updatedAt
+     * 大者胜）→ **JSON 对象串**跨边界（DTO 纪律：Kotlin Map/枚举不过 ObjC 互携）——形态
+     * `{"<conversationId>":<AvatarProfile>,…}`。null = 本会话期尚未水合（Swift 侧所有会话恒走
+     * seed 派生默认渲染）；`{}` = 已水合且无任何覆盖；键缺席 = 该会话无覆盖（回落 seed 派生，
+     * store 不造默认值）。重复调用由桥侧换订阅；登出随 [hubLogout] 取消。
+     */
+    fun hubWatchConversationAvatarProfiles(onMap: (mapJson: String?) -> Unit) {
+        hubConversationAvatarJob?.cancel()
+        hubConversationAvatarJob = scope.launch {
+            runCatching { hubClient?.conversationAvatarProfiles?.collect { onMap(it?.encodeConversationAvatarMapJson()) } }
+        }
+    }
+
+    /**
+     * 会话覆盖档清单读取（端点 #34，v1.5.2 additive；显式刷新直调不走幂等队列）：onDone 非
+     * null = 成功（全量覆盖档对象映射 JSON 串，形态同 [hubWatchConversationAvatarProfiles]，
+     * 无覆盖 = `{}`）；null = 通道不可用（未登录/网络不可达/Hub FAILED），error = 人读失败原因。
+     * 成功响应已整体替换落 shared 流（订阅侧自动收帧）。
+     */
+    fun hubGetConversationAvatarProfiles(onDone: (mapJson: String?, error: String?) -> Unit) {
+        scope.launch {
+            val r = runCatching { hubClient?.listConversationAvatarProfiles() ?: throw HubException.notLoggedIn() }
+            val list = r.getOrNull()
+            if (list != null) {
+                onDone(conversationAvatarMapFromEntries(list).encodeConversationAvatarMapJson(), null)
+            } else {
+                onDone(null, describeError(r.exceptionOrNull()))
+            }
+        }
+    }
+
+    /**
+     * 会话覆盖档保存（端点 #32，v1.5.2 additive；**纯 REST 直调不走幂等队列**——幂等覆盖写无
+     * CommandReceipt 可追，与 hubPutAvatarProfile 同款直调先例）：[profileJson] 为三可编辑字段
+     * 请求体（updatedAt 不入请求——服务端权威设定）；[conversationId] 为 Hub ULID 句柄。onDone
+     * 非 null = 成功：**200 回服务端权威档**（updatedAt 直接回填，客户端无二程 GET）；null =
+     * 未成功（未登录/网络不可达/形状校验 400 HUB-BIZ-004/会话查无或无权 404 HUB-BIZ-002
+     * 防枚举等），error = 人读失败原因，调用方显式呈现 + 可重试，不静默。成功响应已落 shared
+     * 流（发起设备自收 conversation.avatar.updated 帧因 updatedAt 相等幂等跳过，防回环）。
+     */
+    fun hubPutConversationAvatarProfile(conversationId: String, profileJson: String, onDone: (profileJson: String?, error: String?) -> Unit) {
+        scope.launch {
+            val r = runCatching {
+                val client = hubClient ?: throw HubException.notLoggedIn()
+                val req = parseAvatarProfileJson(profileJson) ?: throw IllegalArgumentException("形象档请求体不可解析")
+                client.putConversationAvatarProfile(conversationId, req)
+            }
+            val profile = r.getOrNull()
+            if (profile != null) {
+                onDone(profile.encodeJson(), null)
+            } else {
+                onDone(null, describeError(r.exceptionOrNull()))
+            }
+        }
+    }
+
+    /**
+     * 会话覆盖档清除（端点 #33，v1.5.2 additive；「恢复默认」= 回落 seed 派生默认）：204 幂等
+     * 终态——无覆盖重复 DELETE 亦 204，onDone(null) = 已清除（含幂等无覆盖）；非 null error =
+     * 未成功（未登录/网络不可达/404 防枚举等），显式呈现可重试。成功已按键移除 shared 流本地
+     * 键（渲染即回落 seed 派生）。
+     */
+    fun hubDeleteConversationAvatarProfile(conversationId: String, onDone: (error: String?) -> Unit) {
+        scope.launch {
+            val r = runCatching {
+                val client = hubClient ?: throw HubException.notLoggedIn()
+                client.deleteConversationAvatarProfile(conversationId)
+            }
+            val e = r.exceptionOrNull()
+            if (e == null) {
+                onDone(null)
+            } else {
+                onDone(describeError(e))
             }
         }
     }

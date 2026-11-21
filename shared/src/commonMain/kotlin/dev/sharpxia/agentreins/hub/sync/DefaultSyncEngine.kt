@@ -164,6 +164,13 @@ class DefaultSyncScheduler(
      * updatedAt 大者胜由实现方承担——同值幂等跳过防广播回环）。缺省 null = 钩子关闭。
      */
     private val onAvatarUpdated: ((dev.sharpxia.agentreins.hub.avatar.AvatarProfile) -> Unit)? = null,
+    /**
+     * v1.5.2 会话覆盖档推送钩子（additive，可选）：conversation.avatar.updated 控制帧到达即
+     * 回调（conversationId, profile）——[dev.sharpxia.agentreins.hub.avatar.AvatarProfile] 非
+     * null = 覆盖档帧（per-key updatedAt 大者胜/同值幂等跳过由实现方承担）；**null = 合法清除
+     * 帧**（端点 #33 广播，按键移除，重复应用无副作用）。缺省 null = 钩子关闭。
+     */
+    private val onConversationAvatarUpdated: ((String, dev.sharpxia.agentreins.hub.avatar.AvatarProfile?) -> Unit)? = null,
 ) : SyncScheduler {
 
     override val phase: StateFlow<SyncPhase> get() = phaseSink
@@ -284,8 +291,11 @@ class DefaultSyncScheduler(
                 }
                 else -> Unit // HUB-BIZ-003 限流帧等：依赖下一轮校准/重连收敛
             }
-            // v1.5.0：avatar.updated 控制帧——非事件域，不进投影/游标，直达形象档收敛钩子
+            // v1.5.0/v1.5.2：avatar.updated / conversation.avatar.updated 控制帧——非事件域，
+            // 不进投影/游标，直达形象档收敛钩子（会话帧 profile=null = 合法清除帧）
             is HubServerFrame.AvatarUpdated -> onAvatarUpdated?.invoke(frame.profile)
+            is HubServerFrame.ConversationAvatarUpdated ->
+                onConversationAvatarUpdated?.invoke(frame.conversationId, frame.profile)
         }
     }
 

@@ -1,6 +1,7 @@
 package dev.sharpxia.agentreins.hub
 
 import dev.sharpxia.agentreins.hub.avatar.parseAvatarUpdatedFrame
+import dev.sharpxia.agentreins.hub.avatar.parseConversationAvatarUpdatedFrame
 import dev.sharpxia.agentreins.hub.projection.EventEnvelope
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
@@ -167,6 +168,11 @@ class DefaultHubWsClient(
             }
             // v1.5.0：avatar.updated 控制帧（非事件域）——载荷抽取宽松（缺 data.profile → null 静默忽略）
             "avatar.updated" -> parseAvatarUpdatedFrame(obj)?.let { HubServerFrame.AvatarUpdated(it) }
+            // v1.5.2：conversation.avatar.updated 控制帧（非事件域）——profile=null 是合法清除帧
+            // （非形状漂移）；缺 data/conversationId/profile 键或档形状漂移才静默忽略
+            "conversation.avatar.updated" -> parseConversationAvatarUpdatedFrame(obj)?.let {
+                HubServerFrame.ConversationAvatarUpdated(it.conversationId, it.profile)
+            }
             else -> null // 未知帧类型：忽略内容不失败（宽松解析义务，08 §1.1）
         }
     }

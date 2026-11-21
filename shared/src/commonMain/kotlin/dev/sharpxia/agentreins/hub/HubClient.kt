@@ -7,7 +7,10 @@ import dev.sharpxia.agentreins.hub.auth.CredentialStore
 import dev.sharpxia.agentreins.hub.auth.platformCredentialStore
 import dev.sharpxia.agentreins.hub.avatar.AvatarProfile
 import dev.sharpxia.agentreins.hub.avatar.AvatarProfileRequest
+import dev.sharpxia.agentreins.hub.avatar.ConversationAvatarProfileEntry
 import dev.sharpxia.agentreins.hub.avatar.convergeAvatarProfile
+import dev.sharpxia.agentreins.hub.avatar.conversationAvatarMapFromEntries
+import dev.sharpxia.agentreins.hub.avatar.mergeConversationAvatarProfile
 import dev.sharpxia.agentreins.hub.command.CommandClient
 import dev.sharpxia.agentreins.hub.command.DefaultCommandClient
 import dev.sharpxia.agentreins.hub.projection.AgentRef
@@ -289,6 +292,20 @@ class DefaultHubClient(
     private val avatarProfileState = MutableStateFlow<AvatarProfile?>(null)
     val avatarProfile: StateFlow<AvatarProfile?> get() = avatarProfileState
 
+    /**
+     * v1.5.2 会话形象覆盖档状态（会话级形象覆盖档轮）：conversationId → [AvatarProfile] 的
+     * 单一内存态，REST 读面（#32 权威回包 / #34 全量清单）+ WSS conversation.avatar.updated
+     * 控制帧多通道收敛（per-key updatedAt 大者胜，同值幂等跳过防广播回环——
+     * [mergeConversationAvatarProfile]）。渲染语义（两党校准）：键在场 = 用覆盖档；**键缺席 =
+     * 无覆盖，调用方走 seed=hash(conversationId) 派生默认渲染——本 store 不造默认值**。
+     * null = 本会话期尚未水合（登录/启动拉 #34 + sync.ready 钩子两点填充；登出经
+     * [wipeLocalData] 清空）；emptyMap = 已水合且无任何覆盖（#34 空数组的落表形态）。平台
+     * 缓存由各端自持（镜像 #30/#31 口径），本类不落任何存储（投影库红线不动——会话覆盖档
+     * 同为平台偏好不入 Hub.sq）。断网启动：本 Flow 为 null，UI 全部会话走 seed 派生默认。
+     */
+    private val conversationAvatarState = MutableStateFlow<Map<String, AvatarProfile>?>(null)
+    val conversationAvatarProfiles: StateFlow<Map<String, AvatarProfile>?> get() = conversationAvatarState
+
     /** 登录态就绪后组装同步栈并启动（幂等：重复调用忽略；登出后 stop 再 login 需重新 start）。 */
     fun start() {
         val stack = runtime.authStack ?: return
@@ -318,13 +335,21 @@ class DefaultHubClient(
         scheduler = DefaultSyncScheduler(
             scope, engine!!, ws, cursors,
             phaseSink = phaseState,
-            // v1.5.0：sync.ready 到达即回拉一次形象档（离线窗口 avatar.updated 广播不可重放，
-            // 重连建立成功后主动 GET——设计稿 §syncMechanism 读路径③）；onReady 回调自吞失败。
+            // v1.5.0/v1.5.2：sync.ready 到达即回拉一次形象档 + 会话覆盖档清单（离线窗口控制帧
+            // 广播不可重放，重连建立成功后主动 GET——设计稿 §syncMechanism 读路径③）；
+            // onReady 回调自吞失败（best-effort 不阻塞同步循环）。
             onReady = {
-                scope.launch { runCatching { pullAvatarProfile() } }
+                scope.launch {
+                    runCatching { pullAvatarProfile() }
+                    runCatching { pullConversationAvatarProfiles() }
+                }
             },
-            // avatar.updated 控制帧直达收敛（纯内存大者胜，同值幂等跳过——防回环双保险之一）
+            // avatar.updated / conversation.avatar.updated 控制帧直达收敛（纯内存 per-key 大者胜，
+            // 同值幂等跳过——防回环双保险之一；会话帧 profile=null = 合法清除帧按键移除）
             onAvatarUpdated = { profile -> noteAvatarProfile(profile) },
+            onConversationAvatarUpdated = { conversationId, profile ->
+                noteConversationAvatarProfile(conversationId, profile)
+            },
         )
         scheduler?.start()
         // 断线恢复：未终态命令按同键幂等重发（05 §3.5 恢复流程收尾步）
@@ -337,6 +362,9 @@ class DefaultHubClient(
         // 形象档（sync.ready 钩子外的兜底——快照构成不动，profile 独立小端点代价可忽略）。
         // 失败静默（runCatching 内；未登录/断网呈平台缓存或默认档，下个 ready 钩子再补）。
         scope.launch { runCatching { pullAvatarProfile() } }
+        // v1.5.2 登录回拉兜底（同上款口径）：登录/启动组装点显式拉一次会话覆盖档清单（#34
+        // 水合面；快照构成不动——覆盖档不入 snapshotResponse，客户端独立 GET #34）。失败静默。
+        scope.launch { runCatching { pullConversationAvatarProfiles() } }
     }
 
     /**
@@ -400,7 +428,10 @@ class DefaultHubClient(
     fun wipeLocalData() {
         // 形象档内存态随登出清空（置于 db 判空之前——未 start 过也须复位）；平台持久缓存
         // 由两端登出面各自清除（iOS HubStore.logout / 桌面 SettingsScreen onLoggedOut）。
+        // v1.5.2 会话覆盖档同批复位（同机换账号不残留；旧用户较新 updatedAt 不得把新用户的
+        // per-key LWW 拒收至其首次写）。
         avatarProfileState.value = null
+        conversationAvatarState.value = null
         val db = db ?: return
         db.hubQueries.transaction {
             db.hubQueries.clearGateways()
@@ -518,6 +549,13 @@ class DefaultHubClient(
      * 走 runtime.authStack。仅供 GatewaySurfaceTest 门面用例（204 后行删/响应透出）注入。
      */
     internal var sessionAdminApiOverride: HubApi? = null
+
+    /**
+     * 测试注入点（desktopTest 专用）：覆写 v1.5.2 会话覆盖档门面 REST 面（#32/#33/#34）——
+     * fake 自管鉴权（不经 TokenManager.withBearer）；生产路径恒 null，走 runtime.authStack。
+     * 仅供 ConversationAvatarProfileTest store 用例（PUT 落 store/DELETE 清 store/#34 水合）注入。
+     */
+    internal var conversationAvatarApiOverride: HubApi? = null
 
     /**
      * 向上翻页加载更早历史消息（wp-12）：REST #8 `?before=<seq>&limit=50` → 返回行按 messageId
@@ -879,6 +917,82 @@ class DefaultHubClient(
      */
     private fun noteAvatarProfile(profile: AvatarProfile) {
         convergeAvatarProfile(avatarProfileState.value, profile)?.let { avatarProfileState.value = it }
+    }
+
+    // ── v1.5.2 会话形象覆盖档门面（#32/#33/#34，会话级形象覆盖档轮；**纯 REST 直调不走幂等
+    //    队列**——幂等覆盖写/204 终态/读面无 CommandReceipt 可追，同 #30/#31 口径） ──
+
+    /**
+     * 会话形象覆盖档保存（#32，v1.5.2 additive，幂等覆盖写；**200 回服务端权威档**——updatedAt
+     * 直接回填，客户端无二程 GET）：未登录抛 IllegalStateException；形状校验/非 ULID → 400
+     * HUB-BIZ-004、目标查无/无权 → 404 HUB-BIZ-002 防枚举按 HubException 冒泡呈现，不静默。
+     * 保存 = 先 PUT 成功再落本地（镜像 #31 口径，低频不敏感免回滚复杂度）；成功响应经
+     * [noteConversationAvatarProfile] per-key 收敛进 [conversationAvatarProfiles]，发起设备随后
+     * 自收的 conversation.avatar.updated 帧因 updatedAt 相等而幂等跳过（防回环双保险之二在
+     * 服务端同值不广播）。
+     */
+    suspend fun putConversationAvatarProfile(conversationId: String, profile: AvatarProfile): AvatarProfile {
+        val overrideApi = conversationAvatarApiOverride
+        val saved = if (overrideApi != null) {
+            overrideApi.putConversationAvatarProfile(conversationId, AvatarProfileRequest(profile)) // desktopTest 注入通道
+        } else {
+            val stack = runtime.authStack ?: throw IllegalStateException("未登录")
+            stack.auth.withBearer { stack.api.putConversationAvatarProfile(conversationId, AvatarProfileRequest(profile)) }
+        }
+        noteConversationAvatarProfile(conversationId, saved)
+        return saved
+    }
+
+    /**
+     * 会话形象覆盖档清除（#33，v1.5.2 additive）：204 幂等终态——无覆盖重复 DELETE 亦 204
+     * （幂等不依赖读状态）；「不存在/无权」统一 404 HUB-BIZ-002 防枚举，失败按 HubException
+     * 冒泡呈现。清除 = 先 DELETE 成功再移除本地键（镜像「先成功再落本地」口径）；键移除即
+     * 渲染回落 seed 派生默认——**本 store 只移除键、不造默认档**。
+     */
+    suspend fun deleteConversationAvatarProfile(conversationId: String) {
+        val overrideApi = conversationAvatarApiOverride
+        if (overrideApi != null) {
+            overrideApi.deleteConversationAvatarProfile(conversationId) // desktopTest 注入通道
+        } else {
+            val stack = runtime.authStack ?: throw IllegalStateException("未登录")
+            stack.auth.withBearer { stack.api.deleteConversationAvatarProfile(conversationId) }
+        }
+        noteConversationAvatarProfile(conversationId, null)
+    }
+
+    /**
+     * 会话形象覆盖档清单（#34，v1.5.2 additive，水合/显式刷新读面）：成功即**整体替换**落
+     * [conversationAvatarProfiles]（权威 = REST 读面全量清单——键缺席 = 覆盖已清除，快照整体
+     * 覆盖先例口径；与在途 PUT/DELETE 的毫秒级并发窗理论竞速由下个 sync.ready 回拉自愈）。
+     * 返回原清单透出（服务端 conversationId ULID 升序；空清单 = emptyMap 落表，非 null）。
+     */
+    suspend fun listConversationAvatarProfiles(): List<ConversationAvatarProfileEntry> {
+        val overrideApi = conversationAvatarApiOverride
+        val list = if (overrideApi != null) {
+            overrideApi.listConversationAvatarProfiles() // desktopTest 注入通道
+        } else {
+            val stack = runtime.authStack ?: throw IllegalStateException("未登录")
+            stack.auth.withBearer { stack.api.listConversationAvatarProfiles() }
+        }
+        conversationAvatarState.value = conversationAvatarMapFromEntries(list)
+        return list
+    }
+
+    /** 会话覆盖档登录/启动回拉体（[start] 与 sync.ready 钩子共用；失败由调用方 runCatching 静默）。 */
+    private suspend fun pullConversationAvatarProfiles() {
+        listConversationAvatarProfiles()
+    }
+
+    /**
+     * 会话覆盖档收敛落态（PUT 响应/DELETE 成功/推送帧三通道唯一入口，纯内存——[mergeConversationAvatarProfile]）：
+     * profile 帧 per-key updatedAt 大者胜（同值幂等跳过——发起设备自收帧防回环）；profile=null
+     * （DELETE 成功/清除帧）= 键移除，无 updatedAt 守卫（纯收敛信号，重复应用无副作用）；
+     * 未水合期清除帧保持 null 不虚假升格 emptyMap。
+     */
+    private fun noteConversationAvatarProfile(conversationId: String, profile: AvatarProfile?) {
+        mergeConversationAvatarProfile(conversationAvatarState.value, conversationId, profile)?.let {
+            conversationAvatarState.value = it
+        }
     }
 
     // ── v1.3.0 网关供给面管理门面（#25/#26/#27，多网关轮；纯 REST 直调不走幂等队列） ──

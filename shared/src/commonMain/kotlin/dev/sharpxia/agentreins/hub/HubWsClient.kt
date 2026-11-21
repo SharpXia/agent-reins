@@ -28,6 +28,17 @@ sealed interface HubServerFrame {
      * 本帧是加速器（收敛比较 updatedAt 大者胜在 [convergeAvatarProfile]，同值幂等跳过）。
      */
     data class AvatarUpdated(val profile: AvatarProfile) : HubServerFrame
+
+    /**
+     * 会话形象覆盖档更新控制帧（v1.5.2 additive，`{"type":"conversation.avatar.updated",
+     * "data":{"conversationId":…,"profile":<AvatarProfile|null>}}`）：**非事件域**同 [AvatarUpdated]
+     * 口径（不进事件类型闭集、不入 eventlog、不占 seq、无投影、零推送触发）。[profile] = null
+     * 是**合法清除帧**（端点 #33 广播，非脏帧——该会话覆盖已清除，回落 seed=hash(conversationId)
+     * 派生默认渲染）。best-effort 仅达同用户在线连接；权威 = REST 读面（端点 #34 列表 + #32
+     * 权威回包）：发起端自收 profile 帧因 updatedAt 与 PUT 响应相等而幂等跳过；null 帧为纯
+     * 收敛信号，重复应用无副作用；离线设备经登录/启动水合 #34 与重连 sync.ready 后回拉收敛。
+     */
+    data class ConversationAvatarUpdated(val conversationId: String, val profile: AvatarProfile?) : HubServerFrame
 }
 
 /** 连接关闭观测（R6：服务端主动断开不是错误，一律转断线恢复；仅 1000+superseded 不重连）。 */

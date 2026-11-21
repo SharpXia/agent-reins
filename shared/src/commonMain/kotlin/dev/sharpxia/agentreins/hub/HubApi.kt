@@ -10,6 +10,7 @@ import dev.sharpxia.agentreins.hub.auth.RefreshOk
 import dev.sharpxia.agentreins.hub.auth.RefreshRequest
 import dev.sharpxia.agentreins.hub.avatar.AvatarProfile
 import dev.sharpxia.agentreins.hub.avatar.AvatarProfileRequest
+import dev.sharpxia.agentreins.hub.avatar.ConversationAvatarProfileEntry
 import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
 import dev.sharpxia.agentreins.hub.projection.ApprovalDecisionRequest
 import dev.sharpxia.agentreins.hub.projection.BridgeTokenIssuedResponse
@@ -70,6 +71,16 @@ import dev.sharpxia.agentreins.hub.projection.CancelRunRequest
  *   形象档形状见 [AvatarProfile]；客户端义务：忽略未知字段、未知枚举/越界宽松回落（显示层）。
  *   本接口 getAvatarProfile/putAvatarProfile 给默认实现抛 UnsupportedOperationException
  *   （desktopTest 存量 fake 不在本批改动清单，生产实现 [DefaultHubApi] 必须覆盖——#28/#29 同款纪律）
+ * - v1.5.2 additive（会话级形象覆盖档轮，2026-11-21）：新端点 #32 PUT / #33 DELETE
+ *   /v1/conversations/{conversationId}/avatar-profile（用户级形象档的会话维度镜像：会话形象 =
+ *   对 seed=hash(conversationId) 派生默认的覆盖档，无覆盖回落派生默认零行为变化——#32 幂等
+ *   覆盖写 200 回服务端权威档、#33 清除 204 幂等终态无覆盖重复 DELETE 亦 204；「不存在与
+ *   无权」统一 404 HUB-BIZ-002 防枚举本层不区分；鉴权 s.bearer 非 bearerDevice 同 #30/#31）
+ *   与 #34 GET /v1/me/conversation-avatar-profiles（全量列表水合面，conversationId ULID
+ *   字典序升序，无覆盖 = 空数组非 null）；WSS 控制帧 conversation.avatar.updated
+ *   （profile=null = 合法清除帧；非事件域：不入 eventlog、不占 seq、无投影、零推送触发）。
+ *   清单条目形状见 [ConversationAvatarProfileEntry]；本接口三个新方法给默认实现抛
+ *   UnsupportedOperationException（同上款纪律，生产实现必须覆盖）
  */
 interface HubApi {
     // ── 认证（#1 / #2，公开端点） ─────────────────────────────────────────
@@ -265,5 +276,44 @@ interface HubApi {
      */
     suspend fun putAvatarProfile(req: AvatarProfileRequest): AvatarProfile {
         throw UnsupportedOperationException("putAvatarProfile 为 v1.5.0 新端点，实现方必须覆盖")
+    }
+
+    // ── 会话形象覆盖档（#32 / #33 / #34，v1.5.2 additive；s.bearer 非 bearerDevice——用户级偏好非设备绑定） ──
+
+    /**
+     * 会话形象覆盖档保存（#32，v1.5.2 additive，幂等覆盖写）：**返回 200 + AvatarProfile**
+     * （服务端权威 updatedAt 直接回填，客户端无二程 GET）；同值重 PUT 返回同 body、不更新
+     * updatedAt、不重复广播。请求体与 #31 同款 [AvatarProfileRequest]（updatedAt 不入请求；
+     * 形状校验拒绝不落库 → 400 HUB-BIZ-004，body ≤ 2KB 超限同码）；conversationId 非 ULID
+     * → 400，目标解析查无 / 归属判定不过 → 404 HUB-BIZ-002 防枚举（「不存在与无权」统一
+     * 同码，本层不区分）。保存成功且库面确有变更时服务端 best-effort 广播 WSS 控制帧
+     * conversation.avatar.updated（含发起设备自身——自收帧因 updatedAt 与本响应相等而幂等
+     * 跳过）。默认实现抛 UnsupportedOperationException（同 [getAvatarProfile] 纪律）。
+     */
+    suspend fun putConversationAvatarProfile(conversationId: String, req: AvatarProfileRequest): AvatarProfile {
+        throw UnsupportedOperationException("putConversationAvatarProfile 为 v1.5.2 新端点，实现方必须覆盖")
+    }
+
+    /**
+     * 会话形象覆盖档清除（#33，v1.5.2 additive）：**204 无响应体幂等终态**——无覆盖重复
+     * DELETE 亦 204（幂等不依赖读状态）；「不存在与无权」统一 404 HUB-BIZ-002 防枚举（非
+     * ULID → 400）。清除后 #34 列表不再含该条（清库行非墓碑——覆盖档只有「在/不在」两态）；
+     * 确有清除时 best-effort 广播 conversation.avatar.updated（data.profile=null，发起设备
+     * 自收 null 帧为纯收敛信号，重复应用无副作用）。默认实现抛 UnsupportedOperationException
+     * （同 [getAvatarProfile] 纪律）。
+     */
+    suspend fun deleteConversationAvatarProfile(conversationId: String) {
+        throw UnsupportedOperationException("deleteConversationAvatarProfile 为 v1.5.2 新端点，实现方必须覆盖")
+    }
+
+    /**
+     * 会话形象覆盖档列表（#34，v1.5.2 additive，登录/启动水合 + 显式刷新读面）：纯投影读
+     * 无副作用；条目 [ConversationAvatarProfileEntry] 按 conversationId ULID 字典序升序
+     * 确定性输出，**无任何覆盖 = 空数组（非 null）**；无单会话 404 语义——未覆盖会话客户端
+     * 恒走 seed 派生默认渲染；权威 = REST 读面（本列表 + #32 权威回包），快照（#13）构成
+     * 不动、覆盖档不入 snapshotResponse。默认实现抛 UnsupportedOperationException（同上款纪律）。
+     */
+    suspend fun listConversationAvatarProfiles(): List<ConversationAvatarProfileEntry> {
+        throw UnsupportedOperationException("listConversationAvatarProfiles 为 v1.5.2 新端点，实现方必须覆盖")
     }
 }

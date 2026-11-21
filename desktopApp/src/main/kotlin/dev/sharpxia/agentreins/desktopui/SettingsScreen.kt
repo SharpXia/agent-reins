@@ -50,11 +50,18 @@ import dev.sharpxia.agentreins.hub.auth.DeviceInfo
 import dev.sharpxia.agentreins.hub.projection.AgentStatusResponse
 import dev.sharpxia.agentreins.hub.avatar.AgentTint
 import dev.sharpxia.agentreins.hub.avatar.AVATAR_PRESETS
+import dev.sharpxia.agentreins.hub.avatar.BOT_STATE_DONE
+import dev.sharpxia.agentreins.hub.avatar.BOT_STATE_ERROR
 import dev.sharpxia.agentreins.hub.avatar.BOT_STATE_IDLE
+import dev.sharpxia.agentreins.hub.avatar.BOT_STATE_RUNNING
+import dev.sharpxia.agentreins.hub.avatar.BOT_STATE_THINKING
+import dev.sharpxia.agentreins.hub.avatar.BOT_STATE_WAITING
 import dev.sharpxia.agentreins.hub.avatar.AvatarMotion
 import dev.sharpxia.agentreins.hub.avatar.AvatarPalette
 import dev.sharpxia.agentreins.hub.avatar.AvatarProfile
 import dev.sharpxia.agentreins.hub.avatar.DEFAULT_AVATAR_PROFILE
+import dev.sharpxia.agentreins.hub.avatar.randomPresetExcluding
+import kotlin.random.Random
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -265,6 +272,12 @@ internal fun SettingsScreen(
                 )
             }
 
+            // DEBUG 状态走查卡（嘴部+幅度轮 2026-11-21）：env AGENTREINS_DEV_BOTPREVIEW=1 门控
+            // ——生产默认关、Release 零开销（门控在组合层，关档时走查卡不参与组合）
+            if (System.getenv("AGENTREINS_DEV_BOTPREVIEW") == "1") {
+                BotStateWalkthroughCard()
+            }
+
             // wp-14：关闭行为卡（开 = 关窗最小化到托盘，进程与同步/通知面保持运行，托盘
             // 「显示主窗」唤回；关 = 关窗直接退出进程。托盘「退出」菜单始终真退出）。
             val closeBehaviorHandler = onMinimizeToTrayOnClose
@@ -424,6 +437,15 @@ private fun DisplayPreferencesCard(
  * 其余维度；onSelect 组装完整档交壳层 PUT——**先 PUT 成功再更新本地**（失败显式错误可重试，
  * 不排队不回滚服务端）。编辑冲突（编辑期间收到远端更新）：顶部提示「其他设备已更新形象」
  * +一键拉取，不出发表单（设计稿 §syncMechanism 读路径④）。
+ *
+ * 形象随机轮 2026-11-21 增「随机换形象」：🎲 换一个 = 形状一键随机（randomPresetExcluding
+ * 排除 shown 档键——draft 感知，「连摇必换形」）、色/动效继承 shown；随机结果只进
+ * [randomDraft] 本地态（remember，不入偏好/仓），shown = draft ?: profile 换入预览与网格/
+ * 色点取值（draft 只改预览与高亮不 PUT）；「用这个形象」才走既有 onSelect→壳层 selectAvatar
+ * PUT 链（先 PUT 成功再落本地），「放弃」清 draft 零扰动。预设/色点/动效/恢复默认任一手动
+ * 点击先清 draft（手动控制作用在权威档上，预览不作数）；LaunchedEffect(profile) 覆盖拉取/
+ * 远端直收敛/保存成功三路 profile 变更的清 draft 义务（壳层 DesktopHubApp 不改签名）——
+ * 否则陈旧 draft 遮蔽权威档、确认旧形覆盖远端新档。
  */
 @Composable
 private fun AvatarPreferencesCard(
@@ -434,8 +456,15 @@ private fun AvatarPreferencesCard(
     onSelect: (AvatarProfile) -> Unit,
     onPullRemote: () -> Unit,
 ) {
+    // 随机预览草稿（形象随机轮）：UI 本地态；只注入 shown 驱动预览与高亮，确认才 PUT。
+    var randomDraft by remember { mutableStateOf<AvatarProfile?>(null) }
+    // 拉取（壳层 pullRemoteAvatar mergeRemote）/远端直收敛（shared 流 reconcileAvatar）/
+    // 保存成功（selectAvatar mergeRemote 回填）三路 profile 变更统一清 draft：AvatarProfile
+    // 数据类按值相等，三路都体现为 profile 新值触发本 effect（iOS .onChange(of:) 同口径）。
+    LaunchedEffect(profile) { randomDraft = null }
+    val shown = randomDraft ?: profile
     // 档色序号（AvatarPalette 声明序 = AgentTint 序契约；批次5 换装 BotCharacter 传参用）
-    val paletteIndex = AvatarPalette.entries.indexOf(profile.paletteId)
+    val paletteIndex = AvatarPalette.entries.indexOf(shown.paletteId)
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -443,7 +472,9 @@ private fun AvatarPreferencesCard(
                 if (saving) Text("保存中…", style = MaterialTheme.typography.bodySmall, color = Color(0xFF999999))
             }
 
-            // 编辑冲突提示（远端更新在途、未覆盖表单）：一键拉取收敛
+            // 编辑冲突提示（远端更新在途、未覆盖表单）：一键拉取收敛。拉取后 profile 变更
+            // 经上方 LaunchedEffect 清 draft，此处不另清（与 iOS 拉取 action 显式清等价——
+            // updatedAt 相同的无变化拉取本就无可清）
             if (remotePending != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -463,40 +494,66 @@ private fun AvatarPreferencesCard(
                     seed = botSettingsPreviewSeed,
                     state = BOT_STATE_IDLE,
                     size = 96.dp,
-                    motionEnabled = profile.motionLevel == AvatarMotion.STANDARD,
+                    motionEnabled = shown.motionLevel == AvatarMotion.STANDARD,
                     interactive = false,
-                    faceFactorsOverride = profile.faceFactors,
+                    faceFactorsOverride = shown.faceFactors,
                     paletteIndexOverride = paletteIndex,
                 )
                 Column(Modifier.padding(start = 16.dp)) {
                     Text(
-                        "造型 · ${AVATAR_PRESETS.firstOrNull { it.faceKey == profile.faceKey }?.zhName ?: "自定义"}",
+                        "造型 · ${AVATAR_PRESETS.firstOrNull { it.faceKey == shown.faceKey }?.zhName ?: "自定义"}",
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     Text(
-                        "配色 · ${profile.paletteId.wire}",
+                        "配色 · ${shown.paletteId.wire}",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFF777777),
                     )
                     Text(
-                        "动效 · ${if (profile.motionLevel == AvatarMotion.STANDARD) "标准" else "关闭"}",
+                        "动效 · ${if (shown.motionLevel == AvatarMotion.STANDARD) "标准" else "关闭"}",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFF777777),
                     )
+                    if (randomDraft != null) {
+                        // 随机预览标：明示当前预览未落档，确认才生效
+                        Text(
+                            "预览中 · 未保存",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFB45309),
+                        )
+                    }
                 }
             }
 
-            // 预设网格 8 款（两行四列；缩略 44dp 静态；选中 = faceKey 相等）
+            // 预设网格 8 款（两行四列；缩略 44dp 静态；选中 = faceKey 相等——draft 感知随 shown）
             Text("造型", style = MaterialTheme.typography.titleSmall)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("随机换形象", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                OutlinedButton(
+                    onClick = {
+                        // 只抽形（排除 shown 档键=连摇必换形）、色/动效继承 shown；结果只进
+                        // randomDraft 预览零 PUT——当前形象零扰动
+                        val next = randomPresetExcluding(shown.faceKey, Random.Default)
+                        randomDraft = AvatarProfile(next.faceFactors, shown.paletteId, shown.motionLevel, shown.updatedAt)
+                    },
+                    enabled = !saving,
+                ) { Text("🎲 换一个") }
+            }
             listOf(0, 4).forEach { start ->
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     AVATAR_PRESETS.subList(start, start + 4).forEach { preset ->
-                        val selected = preset.faceKey == profile.faceKey
+                        val selected = preset.faceKey == shown.faceKey
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(8.dp))
-                                .clickable { onSelect(AvatarProfile(preset.faceFactors, preset.recommendedPalette, profile.motionLevel, profile.updatedAt)) }
+                                .clickable {
+                                    // 手动选择先清随机草稿（形象随机轮）：手动控制作用在
+                                    // 权威档上，预览不作数（draft 态下 motion/updatedAt 与
+                                    // 权威档恒同值——dice 只改形且 profile 变更即清 draft）
+                                    randomDraft = null
+                                    onSelect(AvatarProfile(preset.faceFactors, preset.recommendedPalette, profile.motionLevel, profile.updatedAt))
+                                }
                                 .padding(4.dp),
                         ) {
                             BotCharacter(
@@ -518,11 +575,35 @@ private fun AvatarPreferencesCard(
                 }
             }
 
-            // 十色横排圆点（strong 色；选中描边）
+            // 随机预览确认行：确认走既有 onSelect→壳层 selectAvatar PUT 链（先 PUT 成功再落
+            // 本地），放弃清 draft 零扰动；remotePending 横幅在场强行确认 = 显式覆盖（与既有
+            // 即选即存同语义，服务端 LWW/幂等覆盖写兜底不改契约）
+            if (randomDraft != null) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "预览中 · 未保存",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFB45309),
+                        modifier = Modifier.weight(1f),
+                    )
+                    Button(
+                        onClick = {
+                            val target = randomDraft ?: return@Button
+                            randomDraft = null
+                            onSelect(target)
+                        },
+                        enabled = !saving,
+                    ) { Text("用这个形象") }
+                    Spacer(Modifier.width(8.dp))
+                    TextButton(onClick = { randomDraft = null }) { Text("放弃") }
+                }
+            }
+
+            // 十色横排圆点（strong 色；选中描边——draft 感知随 shown）
             Text("配色", style = MaterialTheme.typography.titleSmall)
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 AvatarPalette.entries.forEach { p ->
-                    val selected = p == profile.paletteId
+                    val selected = p == shown.paletteId
                     Box(
                         modifier = Modifier
                             .size(26.dp)
@@ -533,7 +614,10 @@ private fun AvatarPreferencesCard(
                                 color = if (selected) Color(0xFF2B6CB0) else Color(0xFFCCCCCC),
                                 shape = CircleShape,
                             )
-                            .clickable { onSelect(AvatarProfile(profile.faceFactors, p, profile.motionLevel, profile.updatedAt)) },
+                            .clickable {
+                                randomDraft = null // 手动改色先清随机草稿（同预设格口径）
+                                onSelect(AvatarProfile(profile.faceFactors, p, profile.motionLevel, profile.updatedAt))
+                            },
                     )
                 }
             }
@@ -542,9 +626,12 @@ private fun AvatarPreferencesCard(
             Text("动效", style = MaterialTheme.typography.titleSmall)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf(AvatarMotion.OFF to "关闭", AvatarMotion.STANDARD to "标准").forEach { (motion, label) ->
-                    val selected = motion == profile.motionLevel
+                    val selected = motion == shown.motionLevel
                     OutlinedButton(
-                        onClick = { onSelect(AvatarProfile(profile.faceFactors, profile.paletteId, motion, profile.updatedAt)) },
+                        onClick = {
+                            randomDraft = null // 手动切档先清随机草稿（同预设格口径）
+                            onSelect(AvatarProfile(profile.faceFactors, profile.paletteId, motion, profile.updatedAt))
+                        },
                         colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
                             contentColor = if (selected) Color(0xFF2B6CB0) else Color(0xFF777777),
                         ),
@@ -556,6 +643,7 @@ private fun AvatarPreferencesCard(
             }
 
             TextButton(onClick = {
+                randomDraft = null // 手动恢复默认先清随机草稿（同预设格口径）
                 onSelect(AvatarProfile(DEFAULT_AVATAR_PROFILE.faceFactors, AvatarPalette.GRAY, AvatarMotion.STANDARD, profile.updatedAt))
             }) { Text("恢复默认") }
 
@@ -565,6 +653,53 @@ private fun AvatarPreferencesCard(
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
                 )
+            }
+        }
+    }
+}
+
+/**
+ * DEBUG 状态走查卡（嘴部+幅度轮 2026-11-21；AGENTREINS_DEV_BOTPREVIEW=1 env 门控，生产默认
+ * 关、Release 零开销=门控在组合层不参与组合）：六态 × 24/32/36/40/96dp——24/40 = 需求自查
+ * 两档，32/36 = 聊天页头/列表行真实挂载档，96 = 设置页预览档；motion 强制开。用途 = 小尺寸
+ * 逐态可辨识度人工自查表（每态至少一个 ≥2px@24pt 的形状/缩放/旋转主信号 + 嘴形差异）。
+ * 种子取中性 botSettingsPreviewSeed、状态直接钉六态（生产不可达此卡）。
+ */
+@Composable
+private fun BotStateWalkthroughCard() {
+    val states = listOf(
+        BOT_STATE_IDLE to "IDLE 待机",
+        BOT_STATE_RUNNING to "RUNNING 执行",
+        BOT_STATE_THINKING to "THINKING 思考",
+        BOT_STATE_WAITING to "WAITING 等审批",
+        BOT_STATE_ERROR to "ERROR 出错",
+        BOT_STATE_DONE to "DONE 完成",
+    )
+    val sizes = listOf(24.dp, 32.dp, 36.dp, 40.dp, 96.dp)
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("状态走查（DEBUG）", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "六态 × 24/32/36/40/96dp 逐档自查：每态至少一个 ≥2px@24pt 的形状/缩放/旋转主信号 + 嘴形差异。",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF777777),
+            )
+            states.forEach { (state, label) ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(label, style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(116.dp))
+                    sizes.forEach { sz ->
+                        BotCharacter(
+                            seed = botSettingsPreviewSeed,
+                            state = state,
+                            size = sz,
+                            motionEnabled = true, // 走查强制动效
+                            interactive = false,
+                        )
+                    }
+                }
             }
         }
     }

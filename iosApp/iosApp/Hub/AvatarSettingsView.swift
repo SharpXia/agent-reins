@@ -7,19 +7,27 @@ import SwiftUI
 /// 网格（44pt 缩略、**motionEnabled=false 强制静态**——常驻循环多实例性能纪律沿用）+ 十色横排
 /// 圆点（strong 色）+ 动效档 segmented（关闭/标准）+「恢复默认」。保存 = **先 PUT 成功再更新本地**
 ///（低频不敏感，免回滚复杂度），失败显式错误不排队；编辑期间收到远端更新不出发表单，顶栏提示
-///「其他设备已更新形象」+ 一键拉取（设计稿 §syncMechanism 读路径④）。读档/保存/圆点/动效档
-/// 按钮逻辑批次5 零改动——只换渲染器。
+///「其他设备已更新形象」+ 一键拉取（设计稿 §syncMechanism 读路径④）。
+/// 形象随机轮 2026-11-21 增「随机换形象」：🎲 换一个 = 形状一键随机（排除 shown 档键——draft
+/// 感知，「连摇必换形」）、色/动效继承 shown；随机结果只进 [randomDraft] 预览（预览/网格高亮
+/// 随 shown），「用这个形象」才走既有 select()（先 PUT 成功再落本地），除确认外任何路径
+///（再摇/放弃/手动预设/色点/动效/恢复默认/拉取/远端收敛）零 PUT 且清 draft——当前形象零扰动。
+/// DEBUG 专属「状态走查」节：六态 × 24/32/36/40/96pt（32/36 = 列表行/聊天页头真实挂载档），
+/// motion 强制 true；#if DEBUG 编译期剔除，Release 零开销。
 struct AvatarSettingsView: View {
     @State private var hub = HubStore.shared
     @Environment(\.colorScheme) private var colorScheme
     @State private var draft: AvatarProfileModel?
     @State private var saving = false
     @State private var saveError: String?
+    /// 随机预览草稿（形象随机轮）：UI 本地态不入 store/UserDefaults；只注入 shown 驱动预览
+    /// 与高亮，确认「用这个形象」才走既有 select/PUT 链。
+    @State private var randomDraft: AvatarProfileModel?
 
     private var columns: [GridItem] = Array(repeating: GridItem(.flexible(), spacing: 12), count: 4)
 
-    /// 呈现档：编辑草稿优先（表单即时呈现所选），否则 store 权威档。
-    private var shown: AvatarProfileModel { draft ?? hub.avatar.profile }
+    /// 呈现档：随机预览草稿 > 编辑草稿（表单即时呈现所选）> store 权威档。
+    private var shown: AvatarProfileModel { randomDraft ?? draft ?? hub.avatar.profile }
 
     var body: some View {
         List {
@@ -39,6 +47,10 @@ struct AvatarSettingsView: View {
                         Text("配色 · \(shown.paletteId)").font(.caption).foregroundStyle(.secondary)
                         Text("动效 · \(shown.motionEnabled ? "标准" : "关闭")")
                             .font(.caption).foregroundStyle(.secondary)
+                        if randomDraft != nil {
+                            // 随机预览标（形象随机轮）：明示当前预览未落档，确认才生效
+                            Text("预览中 · 未保存").font(.caption).foregroundStyle(.orange)
+                        }
                         if saving {
                             HStack(spacing: 6) {
                                 ProgressView()
@@ -50,7 +62,8 @@ struct AvatarSettingsView: View {
                 .padding(.vertical, 4)
             }
 
-            // 编辑冲突提示（远端更新在途、未覆盖表单）：一键拉取收敛（读路径④）
+            // 编辑冲突提示（远端更新在途、未覆盖表单）：一键拉取收敛（读路径④）。
+            // 拉取同步清 randomDraft——否则陈旧随机草稿遮蔽拉取后的权威档、确认旧形可覆盖远端新档。
             if hub.avatar.remotePending != nil {
                 Section {
                     HStack {
@@ -59,6 +72,7 @@ struct AvatarSettingsView: View {
                             .foregroundStyle(.orange)
                         Spacer()
                         Button("拉取") {
+                            randomDraft = nil
                             draft = nil
                             saveError = nil
                             hub.avatar.adoptRemotePending()
@@ -68,6 +82,24 @@ struct AvatarSettingsView: View {
             }
 
             Section("造型") {
+                // 随机换形象（形象随机轮 2026-11-21）：只抽形，色/动效继承 shown（draft 感知）；
+                // 排除键 = shown.faceKey（连摇必换形），结果只进 randomDraft 预览零 PUT
+                HStack {
+                    Text("随机换形象").font(.callout)
+                    Spacer()
+                    Button("🎲 换一个") {
+                        let base = shown
+                        let preset = randomPresetExcluding(base.faceKey)
+                        randomDraft = AvatarProfileModel(
+                            faceFactors: preset.faceFactors,
+                            paletteId: base.paletteId,
+                            motionLevel: base.motionLevel,
+                            updatedAt: base.updatedAt,
+                        )
+                        saveError = nil
+                    }
+                    .disabled(saving)
+                }
                 LazyVGrid(columns: columns, spacing: 12) {
                     ForEach(AvatarPresetCatalog.all) { preset in
                         presetCell(preset)
@@ -77,6 +109,28 @@ struct AvatarSettingsView: View {
                 Text("挑选预设会同时应用推荐配色；圆点可单独改色。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            // 随机预览确认行（形象随机轮）：确认走既有 select()（先 PUT 成功再落本地）后
+            // 随 draft 一并清；放弃清 draft 零扰动。横幅在场强行确认 = 显式覆盖（与既有
+            // 即选即存同语义，服务端 LWW/幂等覆盖写兜底）。
+            if randomDraft != nil {
+                Section {
+                    HStack {
+                        Text("预览中 · 未保存")
+                            .font(.callout)
+                            .foregroundStyle(.orange)
+                        Spacer()
+                        Button("用这个形象") {
+                            guard let target = randomDraft else { return }
+                            randomDraft = nil
+                            select(target)
+                        }
+                        Button("放弃", role: .cancel) {
+                            randomDraft = nil
+                        }
+                    }
+                }
             }
 
             Section("配色") {
@@ -102,6 +156,7 @@ struct AvatarSettingsView: View {
 
             Section {
                 Button("恢复默认") {
+                    randomDraft = nil // 手动恢复默认先清随机草稿（形象随机轮，同预设格口径）
                     select(AvatarProfileModel(
                         faceFactors: AvatarProfileModel.defaultFactors,
                         paletteId: AgentTintName.GRAY.rawValue,
@@ -119,8 +174,39 @@ struct AvatarSettingsView: View {
                         .foregroundStyle(.red)
                 }
             }
+
+            #if DEBUG
+            // 状态走查（嘴部+幅度轮 2026-11-21，DEBUG 专属 #if DEBUG 编译期剔除）：六态 ×
+            // 24/32/36/40/96pt——24/40 = 需求自查两档，32/36 = 聊天页头/列表行真实挂载档，
+            // 96 = 设置页预览档；motion 强制 true（走查动效可辨度）。种子取中性
+            // botSettingsPreviewSeed，状态直接钉六态（生产不可达此节）。
+            Section("状态走查（DEBUG）") {
+                ForEach(BotWalkthroughCatalog.states, id: \.name) { item in
+                    HStack(spacing: 12) {
+                        Text(item.name)
+                            .font(.caption2)
+                            .frame(width: 64, alignment: .leading)
+                        ForEach(BotWalkthroughCatalog.sizes, id: \.self) { sz in
+                            BotCharacterView(
+                                seed: botSettingsPreviewSeed,
+                                state: item.state,
+                                size: sz,
+                                motionEnabled: true, // 走查强制动效
+                                interactive: false,
+                            )
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+            #endif
         }
         .navigationTitle("形象档（默认造型与动效）")
+        // 拉取/远端直收敛/保存成功三路 profile 变更统一清随机草稿（形象随机轮）：AvatarProfileModel
+        // Equatable——否则 shown=randomDraft??… 让权威档继续被陈旧草稿遮蔽、确认旧形覆盖远端新档
+        .onChange(of: hub.avatar.profile) { _, _ in
+            randomDraft = nil
+        }
     }
 
     // MARK: - 单元
@@ -144,7 +230,9 @@ struct AvatarSettingsView: View {
         .frame(maxWidth: .infinity)
         .contentShape(Rectangle())
         .onTapGesture {
-            // 预设 = 造型 + 推荐配色一并选（推荐语义；圆点可随后单独改色，两端同口径）
+            // 预设 = 造型 + 推荐配色一并选（推荐语义；圆点可随后单独改色，两端同口径）。
+            // 手动选择先清随机草稿（形象随机轮）：手动控制作用在权威档上，预览不作数
+            randomDraft = nil
             select(AvatarProfileModel(
                 faceFactors: preset.faceFactors,
                 paletteId: preset.recommendedPalette.rawValue,
@@ -170,6 +258,8 @@ struct AvatarSettingsView: View {
                 )
             )
             .onTapGesture {
+                // 手动改色先清随机草稿（形象随机轮，同预设格口径）
+                randomDraft = nil
                 select(AvatarProfileModel(
                     faceFactors: shown.faceFactors,
                     paletteId: name.rawValue,
@@ -185,6 +275,7 @@ struct AvatarSettingsView: View {
         Binding(
             get: { shown.motionEnabled },
             set: { on in
+                randomDraft = nil // 手动切档先清随机草稿（形象随机轮，同预设格口径）
                 select(AvatarProfileModel(
                     faceFactors: shown.faceFactors,
                     paletteId: shown.paletteId,
@@ -220,3 +311,34 @@ struct AvatarSettingsView: View {
         }
     }
 }
+
+/// 随机换形抽取（形象随机轮 2026-11-21；桌面 shared `randomPresetExcluding` 3 行镜像——
+/// 无跨端一致性要求不需金标）：排除传入 faceKey（draft 感知=调用方传 shown 档键）后随机
+/// 取一款，空表回退全目录（防御）。只抽形——色/动效由调用方继承 shown。
+private func randomPresetExcluding(_ currentFaceKey: String?) -> AvatarPreset {
+    let pool = AvatarPresetCatalog.all.filter { $0.faceKey != currentFaceKey }
+    return (pool.isEmpty ? AvatarPresetCatalog.all : pool).randomElement()!
+}
+
+#if DEBUG
+/// 状态走查目录（DEBUG 专属）：六态 × 五档尺寸（24/40 = 需求自查两档，32/36 = 聊天页头/
+/// 列表行真实挂载档，96 = 设置页预览档）。
+private enum BotWalkthroughCatalog {
+    struct Item: Identifiable {
+        let name: String
+        let state: BotState
+        var id: String { name }
+    }
+
+    static let states: [Item] = [
+        Item(name: "IDLE 待机", state: .idle),
+        Item(name: "RUNNING 执行", state: .running),
+        Item(name: "THINKING 思考", state: .thinking),
+        Item(name: "WAITING 等审批", state: .waiting),
+        Item(name: "ERROR 出错", state: .error),
+        Item(name: "DONE 完成", state: .done),
+    ]
+
+    static let sizes: [CGFloat] = [24, 32, 36, 40, 96]
+}
+#endif

@@ -956,7 +956,7 @@ internal fun ConversationScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         // 角色系统批次4：注视——指针在 composer 区移动时眼睛看向指针方向
-                        //（锚=角色中心近似 (16,14)、视野半径 120、窗幅 3.0×2.5，双端同表常量）
+                        //（锚=角色中心近似 (16,14)、视野半径 120、窗幅 4.5×3.5——2026-11-21 随眼窗扩容，双端同表常量）
                         .pointerInput(Unit) {
                             awaitPointerEventScope {
                                 while (true) {

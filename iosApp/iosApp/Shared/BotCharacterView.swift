@@ -124,15 +124,18 @@ private enum BotCharacterGoldLock {
 // 对焦眨眼：gaze 值跳变 >4 逻辑单位（欧氏距离，前值缺省 (0,0)）触发 90/110ms 包络一次，
 // 冷却 250ms；motionEnabled=false 只 snap 眼位不播眨眼（A3「功能性反馈非装饰」同口径）。
 // 触发源双端同观感：hover 注视（Catalyst/Mac）、输入聚焦下视、新消息一次性下瞥 400ms
-// （下视值 = BotGaze.down = (0, +2.5) 窗底）；注视锚/视野半径双端同表（GAZE_* 常量）。
+// （下视值 = BotGaze.down = (0, +windowY) 窗底，2026-11-21 扩窗后随常量 3.5）；注视锚/
+// 视野半径双端同表（GAZE_* 常量）。
 
-/// 附加眼位（批次4；100×100 逻辑单位，渲染端 clamp 眼窗 ±3.0/±2.5）。
+/// 附加眼位（批次4；100×100 逻辑单位，渲染端 clamp 眼窗 ±4.5/±3.5——2026-11-21 扩窗）。
 struct BotGaze: Equatable {
     let dx: CGFloat
     let dy: CGFloat
 
-    /// 下视窗底（输入聚焦/新消息下瞥共用值）。
-    static let down = BotGaze(dx: 0, dy: 2.5)
+    /// 下视窗底（输入聚焦/新消息下瞥共用值；引用 BotCharacterMotion.windowY 与桌面
+    /// BotCharacter.kt BotGaze.DOWN=BOT_EYE_WINDOW_Y 同口径——扩窗后字面量 2.5 到不了窗底，
+    /// 会与桌面「聚焦下视/新消息下瞥到窗底」观感分叉）。
+    static let down = BotGaze(dx: 0, dy: BotCharacterMotion.windowY)
 }
 
 /// 设置页档预览的中性种子（批次5）：botSeedFor("") = h=0 → 眼形圆角竖方/静息姿态 0/眨音
@@ -141,7 +144,7 @@ struct BotGaze: Equatable {
 let botSettingsPreviewSeed: BotSeed = botSeedFor("")
 
 /// 指针位置 → 注视 gaze（批次4；锚=悬停容器内角色中心近似 (16,14)、视野半径 120、窗幅
-/// 3.0×2.5——常量私有在 BotCharacterMotion，双端同表）。[location] 相对挂 onContinuousHover
+/// 4.5×3.5——2026-11-21 随眼窗扩容；常量私有在 BotCharacterMotion，双端同表）。[location] 相对挂 onContinuousHover
 /// 的容器坐标（桌面 onPointerEvent(Move) 同参镜像）。
 func botGazeToward(_ location: CGPoint) -> BotGaze {
     let nx = max(-1, min(1, (location.x - BotCharacterMotion.gazeAnchorX) / BotCharacterMotion.gazeRadius))
@@ -288,14 +291,18 @@ private func pt(_ x: CGFloat, _ y: CGFloat, _ s: CGFloat) -> CGPoint {
 // MARK: - 六态相位函数（桌面 desktopApp BotCharacter.kt 逐公式镜像，双端同表勿单端改值）
 //
 // 全部为 (seed, state, t, compact) 的纯时间函数（t = ms since 态进入）；motionEnabled=false
-// 钉逐态特征帧（staticPhaseMs）。体态三原语 rotate ±2°/scale 0.965–1.08/y-bob ±0.8；<40pt
-// compact：眼放大 13×18、幅度 ×1.6、眼窗恒 clamp ±3.0/±2.5。
+// 钉逐态特征帧（staticPhaseMs）。体态三原语 rotate ±5°(+THINKING +4°)/scale 0.95–1.16/
+// y-bob ±3.0（2026-11-21 幅度加大量：32/36pt 挂载档亚像素位移不可辨，主载荷换缩放/旋转/
+// 嘴形）；<40pt compact：眼放大 13×18、幅度 ×1.6、眼窗恒 clamp ±4.5/±3.5（新幅度表全通道
+// 极值 IDLE/THINKING/RUNNING/ERROR dx 4.48≤4.5、IDLE dy 3.2≤3.5、THINKING dy [−3.36,+1.76]
+// ⊂±3.5——零钉边，改幅度必按全幅口径含 rest±0.8/圈心项重算）。
 
 private enum BotCharacterMotion {
     static let compactThreshold: CGFloat = 40
     static let compactAmp: CGFloat = 1.6
 
-    // 眼：全量 11×15（圆角=半宽）、compact 放大 13×18；中心 (39,45)/(61,45)；眼窗 ±3.0/±2.5。
+    // 眼：全量 11×15（圆角=半宽）、compact 放大 13×18；中心 (39,45)/(61,45)；眼窗 ±4.5/±3.5
+    //（2026-11-21 扩容，旧 ±3.0/±2.5 下 compact 新幅度半周期被 clamp 钉边）。
     static let eyeW: CGFloat = 11
     static let eyeH: CGFloat = 15
     static let eyeWCompact: CGFloat = 13
@@ -303,8 +310,8 @@ private enum BotCharacterMotion {
     static let eyeCxL: CGFloat = 39
     static let eyeCxR: CGFloat = 61
     static let eyeCy: CGFloat = 45
-    static let windowX: CGFloat = 3.0
-    static let windowY: CGFloat = 2.5
+    static let windowX: CGFloat = 4.5
+    static let windowY: CGFloat = 3.5
 
     // 开心弧（下半圆环）：全量 11×7 / compact 13×8，圆帽描边 3。
     static let arcW: CGFloat = 11
@@ -312,6 +319,39 @@ private enum BotCharacterMotion {
     static let arcWCompact: CGFloat = 13
     static let arcHCompact: CGFloat = 8
     static let arcStroke: CGFloat = 3
+
+    // 嘴（嘴部轮 2026-11-21）：二次曲线唇线，中心 (50,67)。定稿口径全腔高制（勿混全高/半高）：
+    // 全宽 16（compact 20）、全腔高 10（compact 13）、描边 3（3.5，仅闭/抿唇线）、曲度控制偏
+    // ±5（±6，quad 中点实际位移半值）、DONE wide 极值 1.35（→compact 全宽 27）；开/抿分界
+    // open<0.04 走圆帽唇线。与桌面 BOT_MOUTH_* 常量表逐字对锁勿单端改。
+    static let mouthCx: CGFloat = 50
+    static let mouthCy: CGFloat = 67
+    static let mouthW: CGFloat = 16
+    static let mouthWCompact: CGFloat = 20
+    static let mouthCavityH: CGFloat = 10
+    static let mouthCavityHCompact: CGFloat = 13
+    static let mouthStroke: CGFloat = 3
+    static let mouthStrokeCompact: CGFloat = 3.5
+    static let mouthCurveCtrl: CGFloat = 5
+    static let mouthCurveCtrlCompact: CGFloat = 6
+    static let mouthWideMax: CGFloat = 1.35
+    static let mouthOpenFillMin: CGFloat = 0.04
+    static let mouthIdleOpenBase: CGFloat = 0.10
+    static let mouthIdleOpenAmp: CGFloat = 0.12
+    static let mouthIdleCurve: CGFloat = 0.55
+    static let mouthThinkOpen: CGFloat = 0.45
+    static let mouthThinkWide: CGFloat = 0.70
+    static let mouthThinkDx: CGFloat = 1.5
+    static let mouthRunOpenBase: CGFloat = 0.30
+    static let mouthRunOpenAmp: CGFloat = 0.45
+    static let mouthWaitCurve: CGFloat = -0.15
+    static let mouthSighOpen: CGFloat = 0.35
+    static let mouthSighCurve: CGFloat = -0.45
+    static let mouthErrorCurve: CGFloat = -0.5
+    static let mouthErrorTremble: CGFloat = 0.25
+    static let mouthDoneOpen: CGFloat = 0.85
+    static let mouthDoneCurve: CGFloat = 0.7
+    static let mouthDoneWideAmp: CGFloat = 0.35
 
     // 静息姿态四档（poseIndex → 倾角° × 静息眼位 x；规格 −1.2°/0°/+1.2° × ∓0.8）。
     static let restTilt: [CGFloat] = [-1.2, 0, 1.2, -1.2]
@@ -324,11 +364,12 @@ private enum BotCharacterMotion {
     // 眼神交互常量（批次4；桌面 BotCharacter.kt 双端同表勿单端改值）：注视锚=角色中心在
     // 悬停容器内的近似点（角色行首 32/36pt，(16,14) 即眼心邻域）、视野半径 120（饱和后按
     // 窗幅比例取单位方向）；对焦眨眼阈值/冷却（包络复用 blinkCloseMs/blinkOpenMs）。
+    // 窗幅 2026-11-21 随眼窗扩容同步 4.5×3.5（=windowX/windowY，hover 注视可达窗沿）。
     static let gazeAnchorX: CGFloat = 16
     static let gazeAnchorY: CGFloat = 14
     static let gazeRadius: CGFloat = 120
-    static let gazeAmpX: CGFloat = 3.0
-    static let gazeAmpY: CGFloat = 2.5
+    static let gazeAmpX: CGFloat = 4.5
+    static let gazeAmpY: CGFloat = 3.5
     static let focusBlinkThreshold: CGFloat = 4
     static let focusBlinkCooldownMs: Double = 250
 
@@ -346,6 +387,15 @@ private enum BotCharacterMotion {
         let arc: Bool
     }
 
+    /// 嘴帧（嘴部轮 2026-11-21；桌面 BotMouthFrame 同形镜像）：open ∈[0,1]（0=唇线、
+    /// 1=全腔高）/ curve ∈[−1,1]（>0 笑=中点下垂、<0 撇）/ wide 宽度倍率 / dx 水平漂移。
+    struct MouthFrame {
+        let open: CGFloat
+        let curve: CGFloat
+        let wide: CGFloat
+        let dx: CGFloat
+    }
+
     static func pose(_ seed: BotSeed, _ state: BotState, _ t: CGFloat, _ compact: Bool) -> Pose {
         let amp: CGFloat = compact ? compactAmp : 1
         let rest = restTilt[seed.poseIndex.clamped(0...3)] * amp
@@ -354,19 +404,19 @@ private enum BotCharacterMotion {
         case .idle:
             return Pose(scale: breathScale(t), rotation: rest, offsetY: 0)
         case .thinking:
-            return Pose(scale: 1, rotation: rest + 1.5 * amp, offsetY: 0)
+            return Pose(scale: 1, rotation: rest + 4.0 * amp, offsetY: 0)
         case .running:
-            return Pose(scale: 1, rotation: rest, offsetY: -0.8 * amp * sin(tau * t / 500))
+            return Pose(scale: 1, rotation: rest, offsetY: -3.0 * amp * sin(tau * t / 500))
         case .waiting:
             return Pose(
-                scale: 1 + 0.045 * amp * (0.5 - 0.5 * cos(tau * t / 1600)),
-                rotation: rest + 2.0 * amp * sin(tau * t / 1600),
+                scale: 1 + 0.08 * amp * (0.5 - 0.5 * cos(tau * t / 1600)),
+                rotation: rest + 5.0 * amp * sin(tau * t / 1600),
                 offsetY: 0,
             )
         case .error:
-            return Pose(scale: 0.965, rotation: rest, offsetY: 0)
+            return Pose(scale: 0.95, rotation: rest, offsetY: 0)
         case .done:
-            return Pose(scale: 1 + 0.08 * amp * sin(.pi * min(t, 450) / 450), rotation: rest, offsetY: 0)
+            return Pose(scale: 1 + 0.16 * amp * sin(.pi * min(t, 450) / 450), rotation: rest, offsetY: 0)
         }
     }
 
@@ -379,14 +429,14 @@ private enum BotCharacterMotion {
         var arc = false
         switch state {
         case .idle:
-            dx += 1.5 * amp * sin(tau * t / 7000)                    // lissajous ±1.5@7s
-            dy += 1.5 * amp * sin(2 * tau * t / 7000)
+            dx += 2.0 * amp * sin(tau * t / 7000)                    // lissajous ±2.0@7s（compact 4.48≤4.5）
+            dy += 2.0 * amp * sin(2 * tau * t / 7000)                // 3.2≤3.5
             scaleY = 1 - blinkEnvelope(t.truncatingRemainder(dividingBy: CGFloat(max(seed.blinkTempoMs, 1))))
         case .thinking:
-            dx += 2.2 * amp * cos(tau * t / 2400)                    // 绕圈 r=(2.2,−1.8)、圈心上偏 1.2
-            dy += -1.2 * amp + 1.8 * amp * sin(tau * t / 2400)
+            dx += 2.0 * amp * cos(tau * t / 2400)                    // 绕圈 R=(2.0,1.6)、圈心 −0.5（dy 全程进窗）
+            dy += -0.5 * amp + 1.6 * amp * sin(tau * t / 2400)
         case .running:
-            dx += 2.0 * amp * sweepTriangle(t)                       // 横扫 ±2.0 三角波 380ms/程
+            dx += 2.0 * amp * sweepTriangle(t)                       // 横扫 ±2.0 三角波 380ms/程（compact 4.48）
         case .waiting:
             let u = t.truncatingRemainder(dividingBy: 2200)          // 双连眨：90/110 两组隔 160ms
             if u < 200 {
@@ -397,12 +447,12 @@ private enum BotCharacterMotion {
         case .error:
             scaleY = squintScale
             let u = t.truncatingRemainder(dividingBy: 2000)
-            if u < 300 { dx += 1.2 * amp * sin(2 * tau * u / 300) }  // 横抖 ±1.2×3@300ms
+            if u < 300 { dx += 2.0 * amp * sin(2 * tau * u / 300) }  // 横抖 ±2.0×3@300ms（compact 4.48）
         case .done:
             arc = true
         }
         if let gaze {
-            dx += gaze.dx // 附加眼位恒过眼窗 clamp（±3.0/±2.5 安全域不变）
+            dx += gaze.dx // 附加眼位恒过眼窗 clamp（±4.5/±3.5；AMP=窗，注视可达窗沿）
             dy += gaze.dy
         }
         return EyeFrame(
@@ -413,13 +463,61 @@ private enum BotCharacterMotion {
         )
     }
 
-    /// IDLE 呼吸关键帧（1250ms：1.00@0 → 1.02@313 → 0.99@625 → 1.00@1000 → 持住，线性段）。
+    /// 逐态嘴形（嘴部轮 2026-11-21；桌面 botMouthFrame 逐公式镜像勿单端改）：
+    /// IDLE 呼吸微张笑 / THINKING 小 o+随眼圈 dx 漂移 / RUNNING 升余弦开合@380ms（振荡项落
+    /// [0,1] 勿 base±amp 直加）/ WAITING 抿扁+周期叹气 u∈[560,900]@2200ms / ERROR 下弯扁嘴
+    /// +抖窗内曲度颤 ±0.25 / DONE 450ms 包络大笑 open 0.85、wide 1.35 极值。
+    static func mouthFrame(_ state: BotState, _ t: CGFloat, _ compact: Bool) -> MouthFrame {
+        let amp: CGFloat = compact ? compactAmp : 1
+        let tau: CGFloat = 2 * .pi
+        var open: CGFloat = 0
+        var curve: CGFloat = 0
+        var wide: CGFloat = 1
+        var dx: CGFloat = 0
+        switch state {
+        case .idle:
+            open = mouthIdleOpenBase + mouthIdleOpenAmp * (0.5 - 0.5 * cos(tau * t / 1250))
+            curve = mouthIdleCurve
+        case .thinking:
+            open = mouthThinkOpen
+            wide = mouthThinkWide
+            dx = mouthThinkDx * amp * cos(tau * t / 2400)
+        case .running:
+            open = mouthRunOpenBase + mouthRunOpenAmp * (0.5 - 0.5 * cos(tau * t / 380))
+        case .waiting:
+            curve = mouthWaitCurve
+            let u = t.truncatingRemainder(dividingBy: 2200)
+            if u >= 560 && u < 900 {
+                let sigh = sin(.pi * (u - 560) / 340)                 // 叹气半正弦包络 ∈[0,1]
+                open = mouthSighOpen * sigh
+                curve = lerp(mouthWaitCurve, mouthSighCurve, sigh)
+            }
+        case .error:
+            curve = mouthErrorCurve
+            let u = t.truncatingRemainder(dividingBy: 2000)
+            if u < 300 { curve += mouthErrorTremble * sin(2 * tau * u / 300) }
+        case .done:
+            let env = sin(.pi * min(t, 450) / 450)
+            open = mouthDoneOpen * env
+            wide = 1 + mouthDoneWideAmp * env
+            curve = mouthDoneCurve
+        }
+        return MouthFrame(
+            open: open.clamped(0...1),                                // 值域 coerce 兜底（sin(π) 浮点尾差）
+            curve: curve.clamped(-1...1),
+            wide: wide.clamped(0.5...mouthWideMax),
+            dx: dx,
+        )
+    }
+
+    /// IDLE 呼吸关键帧（1250ms：1.000@0 → 1.035@313 → 0.980@625 → 1.000@1000 → 持住，线性段；
+    /// 加幅有度：IDLE 是六态对比基线）。
     static func breathScale(_ t: CGFloat) -> CGFloat {
         let p = t.truncatingRemainder(dividingBy: 1250)
-        if p < 313 { return lerp(1.00, 1.02, p / 313) }
-        if p < 625 { return lerp(1.02, 0.99, (p - 313) / 312) }
-        if p < 1000 { return lerp(0.99, 1.00, (p - 625) / 375) }
-        return 1.00
+        if p < 313 { return lerp(1.000, 1.035, p / 313) }
+        if p < 625 { return lerp(1.035, 0.980, (p - 313) / 312) }
+        if p < 1000 { return lerp(0.980, 1.000, (p - 625) / 375) }
+        return 1.000
     }
 
     /// 眨眼包络（快闭前 90ms 线性 → 慢开后 110ms 线性；RobotAvatar.swift:327-334 同式）。
@@ -437,14 +535,15 @@ private enum BotCharacterMotion {
         return 1 - 4 * abs(p - 0.5)
     }
 
-    /// motionEnabled=false 逐态特征帧钉点（ms）：峰值/上偏/眯眼可辨帧。
+    /// motionEnabled=false 逐态特征帧钉点（ms）：峰值/上偏/眯眼可辨帧（嘴部同步出特征形，
+    /// A6「off 档静止」= 嘴出特征形不出动画）。
     static func staticPhaseMs(_ state: BotState) -> Double {
         switch state {
-        case .running: return 125 // y-bob 峰值
-        case .waiting: return 800 // 脉冲峰值 1.045（compact 1.072）、正视不眨
-        case .error: return 500   // 横抖窗外、眯眼定格
-        case .done: return 225    // 弹跳峰值 1.08 + U 弧
-        default: return 0         // IDLE/THINKING：静息 / 绕圈起点（上偏+右视）
+        case .running: return 125 // y-bob 峰值 −3.0 + 嘴开合中程 open≈0.63
+        case .waiting: return 1000 // 2026-11-21 800→1000：避开嘴部叹气窗 [560,900] 呈抿嘴 + 脉冲 1.068（compact 1.109）正视不眨
+        case .error: return 500   // 横抖窗外、眯眼 + 下弯扁嘴（曲度 −0.5）定格
+        case .done: return 225    // 弹跳峰值 1.16 + U 弧 + 开口大笑（开 0.85/宽 1.35）
+        default: return 0         // IDLE/THINKING：静息微张笑 / 小 o + 绕圈起点（圈心 −0.5+右视）
         }
     }
 
@@ -462,17 +561,20 @@ private extension CGFloat {
 
 // MARK: - 渲染器
 //
-// 单体圆身 + 一对大竖眼，无嘴无眉无四肢：身体 = 既有 12 点 Catmull-Rom blob 管线原样复用
+// 单体圆身 + 一对大竖眼 + 一张嘴，无眉无四肢：身体 = 既有 12 点 Catmull-Rom blob 管线原样复用
 // （ClayFaceShape，基半径 44，AvatarPresetCatalog[bodyIndex].faceFactors 十二值表，零新几何
 // 分支）；眼 = 竖圆角矩形 11×15（圆角=半宽）@ (39,45)/(61,45)，墨色 inkForFace 对比墨，
-// 眼窗平移恒 clamp（44 基半径下安全域不变，规格 §eyeGeometry）。渲染尺寸档 28/32/36/44/96；
-// size < 40 走 compact（沿用 RobotAvatar.swift:267-268 分支机制）。设置页 44pt 预设缩略
-// 仍由调用方强制 motionEnabled=false（AvatarIdleMotion 常驻循环多实例纪律，批次5 落位）。
+// 眼窗平移恒 clamp ±4.5/±3.5（2026-11-21 扩窗后安全域复核有余量，见 BotCharacter.kt 头注释）；
+// 嘴 = 二次曲线唇线 @ (50,67)（嘴部轮 2026-11-21，逐态嘴形与幅度表同相位，嘴色与眼同帧
+// inkForFace 对比墨）。渲染尺寸档 28/32/36/44/96；size < 40 走 compact（沿用
+// RobotAvatar.swift:267-268 分支机制）。设置页 44pt 预设缩略仍由调用方强制 motionEnabled=false
+//（AvatarIdleMotion 常驻循环多实例纪律，批次5 落位）。
 //
 // 性能纪律：TimelineView(.animation(minimumInterval: 1/20, paused: !visible || !motionEnabled))
 // （RobotAvatar.swift:262 机制）+ onAppear/onDisappear 门控——出屏/关档即停帧，零常驻循环；
-// 体态施于组合层 transform（scale/rotate/offset，blob path 不随帧重建）；[interactive] 为
-// 批次4 眼神交互预留位（注视/下瞥/对焦眨眼三路触发），批次1 恒无交互行为。
+// 体态施于组合层 transform（scale/rotate/offset，blob path 不随帧重建）；嘴部只加 1–2 段
+// quad 小 path/唇线（成本同级于既有逐帧眼 roundedRect path，无逐帧 blob 重建）；[interactive]
+// 为批次4 眼神交互面（注视/下瞥/对焦眨眼三路触发）。
 struct BotCharacterView: View {
     let seed: BotSeed
     let state: BotState
@@ -529,6 +631,9 @@ struct BotCharacterView: View {
                 Canvas { ctx, canvasSize in
                     let s = min(canvasSize.width, canvasSize.height) / 100
                     Self.drawEyes(&ctx, seed: seed, frame: frame, s: s, ink: ink, compact: compact)
+                    // 嘴与眼同一帧 ink（inkForFace 单点计算两处消费——深色 palette/暗色模式下
+                    // 固定深墨不可见，对比墨纪律）；体态（呼吸/摇/弹）已施于组合层
+                    Self.drawMouth(&ctx, frame: BotCharacterMotion.mouthFrame(state, t, compact), s: s, ink: ink, compact: compact)
                 }
             }
             .scaleEffect(pose.scale)
@@ -603,6 +708,48 @@ struct BotCharacterView: View {
             default:
                 ctx.fill(Path(ellipseIn: rect), with: .color(ink))
             }
+        }
+    }
+
+    // 嘴绘制（嘴部轮 2026-11-21；桌面 BotCharacter.kt drawMouth 逐公式镜像）：open < 0.04
+    // 闭/抿嘴 = 圆帽二次唇线（控制点 y = 中心 + curve×曲度偏移，quad 中点实际位移半值）；
+    // 否则张嘴 = 上下唇两条二次曲线围腔填充（上唇控制 −open×腔高、下唇 +open×腔高 → 腔中点
+    // 全高 = open×全腔高）。唇线段数 ≤2、无逐帧 blob 重建；嘴色 = 与眼同帧对比墨（入参 ink，
+    // 禁在此固定色）。
+    private static func drawMouth(
+        _ ctx: inout GraphicsContext,
+        frame: BotCharacterMotion.MouthFrame,
+        s: CGFloat,
+        ink: Color,
+        compact: Bool,
+    ) {
+        let halfW = (compact ? BotCharacterMotion.mouthWCompact : BotCharacterMotion.mouthW) * frame.wide / 2
+        let ctrl = compact ? BotCharacterMotion.mouthCurveCtrlCompact : BotCharacterMotion.mouthCurveCtrl
+        let cavity = compact ? BotCharacterMotion.mouthCavityHCompact : BotCharacterMotion.mouthCavityH
+        let cx = BotCharacterMotion.mouthCx + frame.dx
+        let left = CGPoint(x: (cx - halfW) * s, y: BotCharacterMotion.mouthCy * s)
+        let right = CGPoint(x: (cx + halfW) * s, y: BotCharacterMotion.mouthCy * s)
+        let midX = cx * s
+        let ctrlY = BotCharacterMotion.mouthCy + frame.curve * ctrl
+        if frame.open < BotCharacterMotion.mouthOpenFillMin {
+            var lip = Path()
+            lip.move(to: left)
+            lip.addQuadCurve(to: right, control: CGPoint(x: midX, y: ctrlY * s))
+            ctx.stroke(
+                lip,
+                with: .color(ink),
+                style: StrokeStyle(
+                    lineWidth: (compact ? BotCharacterMotion.mouthStrokeCompact : BotCharacterMotion.mouthStroke) * s,
+                    lineCap: .round,
+                ),
+            )
+        } else {
+            var cavityPath = Path()
+            cavityPath.move(to: left)
+            cavityPath.addQuadCurve(to: right, control: CGPoint(x: midX, y: (ctrlY - frame.open * cavity) * s))
+            cavityPath.addQuadCurve(to: left, control: CGPoint(x: midX, y: (ctrlY + frame.open * cavity) * s))
+            cavityPath.closeSubpath()
+            ctx.fill(cavityPath, with: .color(ink))
         }
     }
 }

@@ -1,5 +1,7 @@
 package dev.sharpxia.agentreins.hub.avatar
 
+import kotlin.random.Random
+
 /**
  * AvatarSpec Kotlin 复活（AvatarSpec.kt/AgentTint.kt 旧稿实体已不在仓内，重建源 =
  * avatar-spec-20261029.md STRONG 表 + iOS RobotAvatar.swift:41-91 / InkTheme.swift:202-242
@@ -149,3 +151,16 @@ val AVATAR_PRESETS: List<AvatarPreset> = listOf(
         AvatarPalette.ORANGE,
     ),
 )
+
+/**
+ * 随机换形抽取（形象随机轮 2026-11-21）：从 [AVATAR_PRESETS] 随机取一款、排除 [currentFaceKey]
+ * 指向的造型——排除键 = 调用方「当前呈现档」（shown，随机预览草稿感知）的规范化 face 串，
+ * 钉死在 shown 而非权威档才能保证「连摇必换形」（否则连摇可重复摇中正在预览的草稿形）。
+ * 过滤后空表回退全目录（防御；目录恒 8 款实际不可达）。[random] 显式注入保可重复（测试
+ * 定种子）；结果恒在目录闭集内。只抽形不动色/动效——颜色由调用方继承 shown 手动选择。
+ */
+fun randomPresetExcluding(currentFaceKey: String?, random: Random): AvatarPreset {
+    val pool = AVATAR_PRESETS.filter { it.faceKey != currentFaceKey }
+    val candidates = pool.ifEmpty { AVATAR_PRESETS }
+    return candidates[random.nextInt(candidates.size)]
+}

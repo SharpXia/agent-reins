@@ -846,9 +846,14 @@ struct HubChatView: View {
         hub.setDraftText(cmd.name + " ", conversationId: conv.conversationId)
     }
 
-    // ── 斜杠面板键盘导航（2026-11-20 Mac 键盘交互轮，用户拍板：↑↓ 选择 / Enter 直接发送 /
-    // Tab 预填进输入框补空格）。nil = 未动过键盘（视觉高亮落第 0 行）；仅面板可见时拦截
-    // 按键，修饰器在 TextField 上 Catalyst 门控挂载（iOS 触控面零变化）。
+    // ── composer 键位（2026-11-21 回车语义轮；2026-11-20 Mac 键盘交互轮 ↑↓/Tab 原样保留）──
+    // 回车语义矩阵与斜杠面板键位一张表（拦截层 ComposerKeyHandlers，分流序全表见其头注释，
+    // 与桌面 SlashCommandRules.resolveEnterKey 逐支对齐）：IME 组合中全键让行 → Shift+Enter
+    // 强制换行 → 空白草稿消费 no-op → ⌘Enter 强制发送 → 面板可见 Enter=原样发送当前输入
+    //（2026-11-20 版「Enter 发送高亮命令」按用户口径废止——原样发送不走补全，高亮只服务
+    // ↑↓ 视觉与 Tab 补全，slashHandleReturn 随之退役）→ 单行发送 / 多行换行。
+    // nil = 未动过键盘（视觉高亮落第 0 行）；↑↓/Tab 仅面板可见时拦截，修饰器在 TextField
+    // 上 Catalyst 门控挂载（iOS 触控面零变化）。
 
     @State private var slashKeyboardIndex: Int?
 
@@ -866,12 +871,8 @@ struct HubChatView: View {
         slashKeyboardIndex = (base + delta + count) % count
     }
 
-    private func slashHandleReturn() -> Bool {
-        guard let i = slashActiveIndex else { return false }
-        selectSlashCommand(slashSuggestions[i])
-        return true
-    }
-
+    /// Tab = 把高亮（无键盘动作即首行）的完整斜杠命令补全进输入框并追加一个空格
+    ///（prefillSlashCommand），等待用户续写参数或照常发送；面板门在拦截层已过。
     private func slashHandleTab() -> Bool {
         guard let i = slashActiveIndex else { return false }
         prefillSlashCommand(slashSuggestions[i])
@@ -1301,14 +1302,19 @@ struct HubChatView: View {
                 .accessibilityLabel("添加图片（最多 \(HubStore.maxDraftAttachments) 张）")
                 TextField("发消息…", text: draftBinding, axis: .vertical)
                     .focused($composerFocused) // 批次4：输入聚焦下视（角色 gaze 后三路之一）
-                    // 2026-11-20 Mac 键盘交互轮：斜杠面板可见时 ↑↓ 选择 / Enter 直接发送 /
-                    // Tab 预填+空格（面板不可见全部透传，输入行为零变化；Catalyst 门控在修饰器内）
-                    .modifier(SlashComposerKeyHandlers(
-                        enabled: composerFocused && !slashSuggestions.isEmpty,
-                        onUp: { slashMoveSelection(-1) },
-                        onDown: { slashMoveSelection(1) },
-                        onReturn: { slashHandleReturn() },
-                        onTab: { slashHandleTab() },
+                    // 2026-11-21 回车语义轮：Enter 生效门=聚焦+IME（面板可见性下沉为 Enter
+                    // 分流内的行为分支——「非斜杠单行草稿 Enter=发送」在本挂载下真正可达）；
+                    // ↑↓/Tab 另挂三重门（聚焦+IME+面板可见）。分流序全表见 ComposerKeyHandlers
+                    // 头注释；shift/⌘ 读 press.modifiers 键值实时值，面板/空白/多行是渲染期
+                    // 快照 flag（HubStore @Observable 草稿变化即重渲染）。
+                    .modifier(ComposerKeyHandlers(
+                        isFocused: composerFocused,
+                        panelVisible: !slashSuggestions.isEmpty,
+                        draftTextIsBlank: draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                        draftIsMultiline: draftText.contains("\n"),
+                        onSend: { sendDraft() },
+                        onMoveHighlight: { slashMoveSelection($0) },
+                        onTabComplete: { slashHandleTab() },
                     ))
                     .lineLimit(1...4)
                     .padding(8)
@@ -1356,10 +1362,14 @@ struct HubChatView: View {
                             Image(systemName: "arrow.up.circle.fill").font(.title2)
                         }
                         .disabled(!draftHasContent)
-                        // UxPlan item3：⌘Return 发送——multiline TextField(axis:.vertical) 的
-                        // plain Return 即换行、onSubmit 不触发，「Enter 直发」需 composer 换
-                        // NSTextView（本轮 deferred）；⌘Return 与换行零冲突。仅 Catalyst 挂
-                        //（iPad 硬件键盘无此惯例，不引入歧义）。
+                        // UxPlan item3：⌘Return 发送。2026-11-21 回车语义轮注记：旧注「Enter
+                        // 直发需 composer 换 NSTextView」结论已过时——onKeyPress(.return) 返回
+                        // .handled 即可吞掉 multiline TextField 的默认换行，单行裸 Enter=发送与
+                        // 多行 ⌘Enter=强发已在 ComposerKeyHandlers 实装；本快捷键与其并存构成
+                        // 双通道（两者都可能先收到事件，发送在途由 HubStore.sendingDraftFor 防
+                        // 重保证单次；键盘快捷键在发送按钮被 ProgressView 替换后自然离场，彼时
+                        // 仅 onKeyPress 通道消费）。仅 Catalyst 挂（iPad 硬件键盘无此惯例，
+                        // 不引入歧义）。
                         #if targetEnvironment(macCatalyst)
                         .keyboardShortcut(.return, modifiers: .command)
                         #endif
@@ -1910,40 +1920,76 @@ private struct SlashCommandPanel: View {
     }
 }
 
-/// 2026-11-20 Mac 键盘交互轮：composer 上的斜杠面板按键拦截——↑↓ 移动高亮、Enter 直接
-/// 发送高亮命令、Tab 预填进输入框补空格。仅 enabled（面板可见且 composer 聚焦）时消费，
-/// 面板不可见全部透传（输入行为零变化）。onKeyPress 系 iOS 17 API（部署目标 15.0 →
-/// 可用性门内挂）；Catalyst 门控——iOS 触控软键盘无此交互诉求，零变化。
-private struct SlashComposerKeyHandlers: ViewModifier {
-    let enabled: Bool
-    let onUp: () -> Void
-    let onDown: () -> Void
-    /// 返回 true = 已消费（高亮命令已发送）。
-    let onReturn: () -> Bool
+/// 2026-11-21 回车语义轮：composer 键位拦截（2026-11-20 Mac 键盘交互轮的 Enter 语义按用户
+/// 口径重排 + 普通回车矩阵补齐，2026-11-17 UX 轮「Enter 直发需 composer 换 NSTextView」的
+/// deferred 前提已被 onKeyPress .handled 可吞默认换行推翻）。拆成两个 onKeyPress 挂载：
+/// - Enter（keys:[.return]，仅门聚焦+IME，不看面板）分流序——首个命中生效，与桌面
+///   resolveEnterKey 一张表（前缀序号 = 优先级）：
+///   ① Shift → .ignored（任何情况强制换行）；
+///   ② 空白草稿 → .handled（消费 no-op 不发不换行；先于 ⌘ 判定——空白+⌘Enter 与发送中
+///     +⌘Enter 不落默认换行）；
+///   ③ ⌘ → 强制发送（onSend + .handled；发送在途由 HubStore.sendingDraftFor 防重保证
+///     单次——发送按钮在场时与 ⌘Return 键盘快捷键构成双通道，任一路只发一次）；
+///   ④ 面板可见 → 原样发送当前输入（不走补全；与分支⑤单行同果，保留分支只为表意——
+///     「面板可见 Enter 直接发送」的用户口径）；
+///   ⑤ 多行 → .ignored（需求2：已多行 Enter=插换行，让 TextField 默认行为）；单行 → 发送。
+/// - ↑↓/Tab（keys:[.upArrow,.downArrow,.tab]，三重门聚焦+IME+面板可见）：↑↓ 移动高亮、
+///   Tab 补全高亮（无键盘动作即首行）命令+空格。
+/// Shift/⌘ 读 press.modifiers 键值实时值（渲染期快照会失真）；panelVisible/空白/多行是
+/// 渲染期快照 flag（HubStore @Observable 草稿变化即重渲染，若实测「刚输入的换行未被计入
+/// 多行」竞态，回退改 keypress 时经 store 读现值——风险在案）。IME 组合门 = ComposerIME
+/// 组合期探测，组合态变化不触发 SwiftUI 重渲染，只能在 action 内逐键调用（enabled 类
+/// 渲染期快照会失真）。onKeyPress 系 iOS 17 API（部署目标 15.0 → 可用性门内挂）；Catalyst
+/// 门控——iOS 触控软键盘无键盘交互诉求，整段编译期剔除零变化。
+private struct ComposerKeyHandlers: ViewModifier {
+    /// Enter 生效门：聚焦 + IME（面板可见性下沉为 Enter 分流内的行为分支）。
+    let isFocused: Bool
+    /// 渲染期快照：斜杠面板可见（= !slashSuggestions.isEmpty）。
+    let panelVisible: Bool
+    /// 渲染期快照：草稿纯文本 trim 后为空（不含附件——附件独发走发送键，与桌面 Ignored
+    /// 口径一致；勿与 draftHasContent 混用，后者含附件）。
+    let draftTextIsBlank: Bool
+    /// 渲染期快照：草稿已含换行（多行）。
+    let draftIsMultiline: Bool
+    let onSend: () -> Void
+    /// ↑↓ 移动高亮（±1，环绕）。
+    let onMoveHighlight: (Int) -> Void
     /// 返回 true = 已消费（高亮命令已预填）。
-    let onTab: () -> Bool
+    let onTabComplete: () -> Bool
 
     func body(content: Content) -> some View {
         #if targetEnvironment(macCatalyst)
         if #available(iOS 17.0, *) {
             content
-                .onKeyPress(.upArrow) {
-                    guard enabled else { return .ignored }
-                    onUp()
+                .onKeyPress(keys: [.return]) { press in
+                    guard isFocused, !ComposerIME.isComposing() else { return .ignored }
+                    let m = press.modifiers
+                    if m.contains(.shift) { return .ignored } // ① 任何情况强制换行
+                    if draftTextIsBlank { return .handled } // ② 空白兜底 no-op（先于 ⌘ 判定）
+                    if m.contains(.command) { // ③ ⌘Enter 强制发送
+                        onSend()
+                        return .handled
+                    }
+                    if panelVisible { // ④ 面板可见=原样发送当前输入（不走补全）
+                        onSend()
+                        return .handled
+                    }
+                    if draftIsMultiline { return .ignored } // ⑤ 多行=默认插换行
+                    onSend() // ⑤ 单行=发送
                     return .handled
                 }
-                .onKeyPress(.downArrow) {
-                    guard enabled else { return .ignored }
-                    onDown()
-                    return .handled
-                }
-                .onKeyPress(.return) {
-                    guard enabled else { return .ignored }
-                    return onReturn() ? .handled : .ignored
-                }
-                .onKeyPress(.tab) {
-                    guard enabled else { return .ignored }
-                    return onTab() ? .handled : .ignored
+                .onKeyPress(keys: [.upArrow, .downArrow, .tab]) { press in
+                    guard isFocused, !ComposerIME.isComposing(), panelVisible else { return .ignored }
+                    switch press.key {
+                    case .upArrow:
+                        onMoveHighlight(-1)
+                        return .handled
+                    case .downArrow:
+                        onMoveHighlight(1)
+                        return .handled
+                    default:
+                        return onTabComplete() ? .handled : .ignored
+                    }
                 }
         } else {
             content
@@ -1953,6 +1999,36 @@ private struct SlashComposerKeyHandlers: ViewModifier {
         #endif
     }
 }
+
+#if targetEnvironment(macCatalyst)
+/// IME 组合期探测（2026-11-21 回车语义轮）：组合中（拼音未上屏）Enter 绝不能触发发送或
+/// 换行副作用、↑↓ 属候选词导航、Tab 属候选选定——全键让行默认行为。探测 = 首响应者是
+/// UITextInput 且 markedTextRange 非 nil（依赖「SwiftUI 多行 TextField 背后是 UITextView」
+/// 这一 backing 实现细节，社区共识非 API 承诺——真机中文 IME 走查是验收门，探测落空的
+/// 回退路线 = 旧 deferred 的 NSTextView 层拦截）。整段 Catalyst 门控，iOS 编译期零残留。
+private enum ComposerIME {
+    /// 组合期判定（须在 onKeyPress action 内逐键调用——组合态变化不触发 SwiftUI 重渲染，
+    /// 渲染期快照会失真）。
+    static func isComposing() -> Bool {
+        guard let scene = UIApplication.shared.connectedScenes.first(where: {
+            $0.activationState == .foregroundActive
+        }) as? UIWindowScene, let window = scene.keyWindow else { return false }
+        return hasMarkedText(view: window)
+    }
+
+    /// 递归找 isFirstResponder，命中且为 UITextInput 时读 markedTextRange。
+    private static func hasMarkedText(view: UIView) -> Bool {
+        if view.isFirstResponder, let input = view as? UITextInput,
+           input.markedTextRange != nil {
+            return true
+        }
+        for subview in view.subviews where hasMarkedText(view: subview) {
+            return true
+        }
+        return false
+    }
+}
+#endif
 
 /// #22（2026-11-08）：斜杠交互卡——模型目录卡（端点 #22 数据面）。/model 无参命令回复
 /// 落定后出现于时间线尾部（interactiveCard 判定），分页网格展示模型按钮，点按钮

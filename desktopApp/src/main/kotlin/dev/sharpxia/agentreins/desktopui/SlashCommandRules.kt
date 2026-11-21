@@ -7,8 +7,18 @@ import dev.sharpxia.agentreins.hub.projection.CommandListItem
  * 同 TimelineScroll.kt / MessageActions.kt 分层纪律）：
  * - 斜杠命令目录：客户端自建初版六命令（iOS wp-14 SlashCommandCatalog 全量复刻——命令名/
  *   描述/带参位逐条对齐，HubViews.swift:775-800 同口径），筛选 = 前缀匹配 + 参数书写段退出；
- * - Enter 键裁决：桌面补齐的键盘发送语义（iOS 竖排 TextField 无此项，桌面独立定义）——
- *   Enter（无 Shift）发送、Shift+Enter 换行、Cmd/Ctrl+Enter 兜底发送、空白草稿不发送。
+ * - Enter 键裁决（2026-11-21 回车语义轮重排，与 Catalyst HubViews.ComposerKeyHandlers
+ *   共用一张无歧义优先级表，首个命中生效）：
+ *   0. IME 组合中（composition != null）→ 全键让行默认（调用侧门，纯函数层不涉）；
+ *   1. Shift+Enter（含 Shift+Cmd/Ctrl）→ Newline 强制换行（Shift 是显式换行意图）；
+ *   2. 空白草稿 → Ignored（消费 no-op 不发不换行；先于 ⌘ 判定——空白+⌘Enter 不落默认换行）；
+ *   3. Cmd/Ctrl+Enter 非空 → Send（强制发送，天然满足多行 ⌘Enter）；
+ *   4. 非空 + 面板可见 → Send（原样发送当前输入不走补全；面板可见⇔草稿无换行故必单行）；
+ *   5. 非空白单行 → Send；非空白多行 → Newline（裸 Enter 不消费，让 TextField 默认插换行）。
+ *   相对旧口径的唯一行为变更 = 多行裸 Enter 从 Send 改 Newline（「单行(尚无换行)才发送」）。
+ * - 面板键盘导航（同轮桌面补齐，镜像 iOS HubViews.slashActiveIndex/slashMoveSelection）：
+ *   ↑↓ 环绕移动高亮、Tab 补全高亮（无键盘动作即首行）命令+空格；重置口径 = Tab/发送/预填
+ *   后显式清空（iOS 只 clamp 不重置——两端口径差异在案）。
  *
  * 目录描述是客户端提示、不构成 Gateway 行为承诺（iOS 同纪律）：选中后的发送只是普通
  * message.send 文本（桥侧 chat.send 原样透传 message，Hub 命令面零改动、无协议风险）。
@@ -110,17 +120,43 @@ internal enum class EnterKeyBehavior {
 }
 
 /**
- * wp-6：Enter 键裁决——Enter（无 Shift）发送、Shift+Enter 换行、Cmd/Ctrl+Enter 兜底发送；
- * 空白草稿一律不发送（与发送键 isNotBlank 防线同口径），但普通/修饰键回车仍消费掉（防在
- * 草稿误插换行）。Shift 优先于 Cmd/Ctrl（Shift+Cmd+Enter = 换行，Shift 是「换行」显式意图）。
+ * wp-6 + 2026-11-21 回车语义轮：Enter 键裁决——分流序与头注释优先级表逐支对应（与 Catalyst
+ * ComposerKeyHandlers 一张表）。注释序号指向头表分支号；代码求值序与表序等价（②空白兜底
+ * 写在末支，因 ③④⑤ 各自带 isNotBlank 前置，空白草稿只能落入末支）。空白判据 = isNotBlank
+ *（纯文本，不含附件——附件独发走发送键，ConversationScreen 发送键 enabled 同口径）。
+ * [slashPanelVisible] 缺省 false：既有调用点与旧单测（不含面板用例）零破坏。
  */
 internal fun resolveEnterKey(
     isShiftPressed: Boolean,
     isMetaOrCtrlPressed: Boolean,
     draft: String,
+    slashPanelVisible: Boolean = false,
 ): EnterKeyBehavior = when {
-    isShiftPressed -> EnterKeyBehavior.Newline // Shift（含 Shift+Cmd/Ctrl）= 显式换行意图
-    isMetaOrCtrlPressed && draft.isNotBlank() -> EnterKeyBehavior.Send // Cmd/Ctrl+Enter 兜底发送
-    !isMetaOrCtrlPressed && draft.isNotBlank() -> EnterKeyBehavior.Send // 裸 Enter 发送
-    else -> EnterKeyBehavior.Ignored // 空白草稿（任意修饰组合）不发送，回车消费防误插换行
+    isShiftPressed -> EnterKeyBehavior.Newline // ① Shift（含 Shift+Cmd/Ctrl）= 显式换行意图
+    isMetaOrCtrlPressed && draft.isNotBlank() -> EnterKeyBehavior.Send // ③ Cmd/Ctrl+Enter 强制发送
+    slashPanelVisible && draft.isNotBlank() -> EnterKeyBehavior.Send // ④ 面板可见=原样发送（不走补全）
+    !draft.contains('\n') && draft.isNotBlank() -> EnterKeyBehavior.Send // ⑤ 单行裸 Enter=发送
+    draft.isNotBlank() -> EnterKeyBehavior.Newline // ⑤ 多行裸 Enter=换行（不消费，TextField 默认插换行）
+    else -> EnterKeyBehavior.Ignored // ② 空白草稿（任意修饰组合）消费不发不换行（先于 ⌘ 判定）
+}
+
+/**
+ * 2026-11-21 面板键位轮（桌面补齐 ↑↓/Tab，此前为零键盘导航）：生效高亮行——镜像 iOS
+ * HubViews.slashActiveIndex 的 clamp 口径（越界收敛到尾行、负值收敛到首行）；raw=null
+ * （未动过键盘）落第 0 行；count≤0（面板不可见）恒 null。重置口径两端口径差异知情：
+ * 桌面调用侧在 Tab 补全/发送/预填后显式重置（iOS 只 clamp 不重置，「↑↓ 保持现状」轮未修）。
+ */
+internal fun slashActiveIndex(raw: Int?, count: Int): Int? {
+    if (count <= 0) return null
+    return (raw ?: 0).coerceIn(0, count - 1)
+}
+
+/**
+ * 2026-11-21 面板键位轮：高亮环绕移动——镜像 iOS slashMoveSelection（从 clamp 后基线走
+ * delta 步，首行 ↑ 回末行、末行 ↓ 回首行）；双取模防任意 delta 越界（iOS 单取模公式在
+ * delta=±1 时与本品等值）。count≤0 恒 null。
+ */
+internal fun slashMovedIndex(current: Int?, delta: Int, count: Int): Int? {
+    val base = slashActiveIndex(current, count) ?: return null
+    return ((base + delta) % count + count) % count
 }

@@ -101,4 +101,72 @@ class SlashCommandRulesTest {
         assertEquals(EnterKeyBehavior.Ignored, resolveEnterKey(false, false, "   \n "))
         assertEquals(EnterKeyBehavior.Ignored, resolveEnterKey(false, true, ""))
     }
+
+    // ── 2026-11-21 回车语义轮：多行矩阵 + 面板可见分支（与 Catalyst ComposerKeyHandlers 一张表）──
+
+    @Test
+    fun multilinePlainEnterNewlinesInsteadOfSend() {
+        // 需求2：已多行时裸 Enter 插入换行（不再发送）——相对旧口径的唯一行为变更
+        assertEquals(EnterKeyBehavior.Newline, resolveEnterKey(false, false, "第一行\n第二行"))
+        assertEquals(EnterKeyBehavior.Newline, resolveEnterKey(false, false, "第一行\n"))
+    }
+
+    @Test
+    fun panelVisibleEnterSendsDraftAsIs() {
+        // 需求3：面板可见 Enter = 原样发送当前输入（不走补全；面板可见⇔草稿无换行故必单行）
+        assertEquals(EnterKeyBehavior.Send, resolveEnterKey(false, false, "/com", slashPanelVisible = true))
+        assertEquals(EnterKeyBehavior.Send, resolveEnterKey(false, false, "/", slashPanelVisible = true))
+        // 面板不可见同 draft 不受影响（走单行分支，同果但语义独立）
+        assertEquals(EnterKeyBehavior.Send, resolveEnterKey(false, false, "/com"))
+    }
+
+    @Test
+    fun shiftEnterNewlinesEvenWithPanelVisible() {
+        // Shift 优先级高于面板分支：任何情况强制换行
+        assertEquals(EnterKeyBehavior.Newline, resolveEnterKey(true, false, "/com", slashPanelVisible = true))
+        assertEquals(EnterKeyBehavior.Newline, resolveEnterKey(true, true, "/com", slashPanelVisible = true))
+    }
+
+    @Test
+    fun cmdEnterForceSendsMultilineDraft() {
+        // 需求2：Cmd+Enter 多行时强制发送（旧口径 Cmd+非空已发送，多行分支为明示回归锚）
+        assertEquals(EnterKeyBehavior.Send, resolveEnterKey(false, true, "第一行\n第二行"))
+    }
+
+    @Test
+    fun cmdEnterOnBlankDraftIgnored() {
+        // 空白兜底先于 ⌘ 判定：空白（含纯换行）+Cmd 不发送、不落默认换行（消费 no-op）
+        assertEquals(EnterKeyBehavior.Ignored, resolveEnterKey(false, true, "  \n"))
+        assertEquals(EnterKeyBehavior.Ignored, resolveEnterKey(false, true, ""))
+    }
+
+    // ── 2026-11-21 面板键位轮：高亮 clamp / 环绕（镜像 iOS slashActiveIndex/slashMoveSelection）──
+
+    @Test
+    fun slashActiveIndexClampsAndDefaultsToZero() {
+        assertEquals(0, slashActiveIndex(null, 6)) // 未动过键盘 = 首行
+        assertEquals(0, slashActiveIndex(0, 6))
+        assertEquals(5, slashActiveIndex(5, 6))
+        assertEquals(0, slashActiveIndex(-3, 6)) // 负越界收敛首行
+        assertEquals(5, slashActiveIndex(99, 6)) // 正越界收敛尾行
+    }
+
+    @Test
+    fun slashActiveIndexNullWhenPanelHidden() {
+        assertEquals(null, slashActiveIndex(null, 0))
+        assertEquals(null, slashActiveIndex(2, 0))
+        assertEquals(null, slashMovedIndex(0, 1, 0))
+    }
+
+    @Test
+    fun slashMovedIndexWrapsAround() {
+        assertEquals(1, slashMovedIndex(0, 1, 6)) // 末行 ↓ 回首行的前一步
+        assertEquals(5, slashMovedIndex(0, -1, 6)) // 首行 ↑ 回末行（环绕）
+        assertEquals(0, slashMovedIndex(5, 1, 6)) // 末行 ↓ 回首行（环绕）
+        assertEquals(4, slashMovedIndex(5, -1, 6))
+        assertEquals(1, slashMovedIndex(null, 1, 6)) // 未动过键盘从首行起步
+        assertEquals(0, slashMovedIndex(2, -2, 6))
+        assertEquals(2, slashMovedIndex(2, 6, 6)) // 整圈回原位
+        assertEquals(0, slashMovedIndex(2, 10, 6)) // 大步长越界仍收敛域内（双取模）
+    }
 }

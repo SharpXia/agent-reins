@@ -8,6 +8,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ContextMenuArea
 import androidx.compose.foundation.ContextMenuItem
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -248,8 +249,12 @@ internal fun thinkCommand(modelsList: ModelsList?): SlashCommand? {
  *   带参命令预填命令文本续写参数；无命中/进入参数书写段自动收起，其余输入零干扰）；
  * - 动态目录（2026-11-07 轮）：目录 = 端点 #21 动态条目 ∪ 静态六（动态优先静态保底），
  *   "/" 草稿触发拉取、5 分钟 TTL 内存缓存、失败回落静态六（见 SlashCommandsCache）；
- * - Enter（无 Shift）发送、Shift+Enter 换行、Cmd/Ctrl+Enter 兜底发送（裁决纯函数
- *   resolveEnterKey；IME 组合中的 Enter 属提交候选词，不触发）；
+ * - Enter 键位矩阵（2026-11-21 回车语义轮，裁决纯函数 resolveEnterKey 全表，与 Catalyst
+ *   ComposerKeyHandlers 一张表）：IME 组合中全键让行（组合期 Enter 属提交候选词）；
+ *   Shift+Enter 任何情况强制换行；空白草稿消费不发送；Cmd/Ctrl+Enter 强制发送（多行含）；
+ *   面板可见 Enter=原样发送当前输入（不走补全）；单行裸 Enter 发送、多行裸 Enter 换行
+ *  （不再发送）。↑↓ 移面板高亮（环绕）、Tab 补全高亮（无键盘动作即首行）命令+空格
+ *  （面板可见时消费，不可见透传）；
  * - 活跃 run 期间「运行中发送将排队」提示（iOS wp-14 同文案同语义：chat.send 不透传
  *   queueMode，发送照常、按 Gateway 默认队列语义排队；发送键位仍是 wp-8② Stop）。
  * 判定纯函数在 TimelineScroll.kt（:desktopApp:test 回归锚），composer 规则纯函数在
@@ -507,6 +512,12 @@ internal fun ConversationScreen(
         }
     }
 
+    // 2026-11-21 面板键位轮：斜杠面板键盘高亮行（nil=未动过键盘，高亮落第 0 行；派生生效值
+    // 见下方 slashHighlightIndex）。显式重置口径：Tab 补全/发送/预填后清空——面板重开高亮
+    // 回首行（iOS 只 clamp 不重置，「↑↓ 保持现状」轮未修——两端口径差异知情在案）。
+    // 会话切换随 HubShell key(conversationId) 整体重挂自然重置，无需额外 key。
+    var slashKeyboardIndex by remember { mutableStateOf<Int?>(null) }
+
     // wp-6：发送一条（发送键 / Enter / 无参斜杠命令选中三路同一通道）——commands 幂等队列，
     // sendMessage 每次生成新幂等键（ADR-07）；空白草稿禁发（与发送键 isNotBlank 防线同口径）。
     // v1.2.0 多模态：纯图片消息允许空文本（契约「message 与 attachments 至少一项非空」，服务端
@@ -517,6 +528,7 @@ internal fun ConversationScreen(
         val attachments = draftAttachments
         input = TextFieldValue("")
         draftAttachments = emptyList()
+        slashKeyboardIndex = null // 发送后草稿清空、面板收起：高亮回 0（重开口径）
         scope.launch { client.commands?.sendMessage(conversationId, text, attachments) }
     }
 
@@ -584,13 +596,16 @@ internal fun ConversationScreen(
     // 裸发由 Gateway 回用法提示，需要写参数时走行尾 ✎ 预填路径（prefillSlashCommand）。
     fun selectSlashCommand(cmd: SlashCommand) {
         input = TextFieldValue("")
+        slashKeyboardIndex = null // 点行发送：面板收起，高亮回 0（重开口径）
         scope.launch { client.commands?.sendMessage(conversationId, cmd.name) }
     }
 
     // 2026-11-08 修复轮：行尾 ✎ = 预填命令文本（含尾随空格、光标落行尾）进输入框续写参数，
-    // 等待用户发送（不直接发送）。
+    // 等待用户发送（不直接发送）。2026-11-21 面板键位轮：Tab 补全同走此函数（补全后草稿带
+    // 空格 → 面板收起 → 高亮态清空重开口径）。
     fun prefillSlashCommand(cmd: SlashCommand) {
         input = TextFieldValue(cmd.name + " ", TextRange(cmd.name.length + 1))
+        slashKeyboardIndex = null
     }
 
     // 2026-11-07 动态目录轮：动态斜杠命令目录（REST 端点 #21）会话态 + 草稿触发拉取（下方
@@ -635,6 +650,9 @@ internal fun ConversationScreen(
         forDraft = input.text,
         catalog = mergedSlashCommands(dynamicCommands?.commands ?: emptyList()),
     )
+    // 2026-11-21 面板键位轮：生效高亮行（↑↓ 移动 / Tab 补全 / 面板行底渲染三方消费）——
+    // clamp 口径镜像 iOS slashActiveIndex（纯函数见 SlashCommandRules.slashActiveIndex）。
+    val slashHighlightIndex = slashActiveIndex(slashKeyboardIndex, slashSuggestions.size)
 
     // 交互卡数据面（2026-11-08 修复轮泛化 + 同日自检轮补齐）：`/model`、`/models` → 模型
     // 目录卡（REST #22；models 为列表型指令，结构化数据面同源——点按钮仍发 `/model <id>`
@@ -864,6 +882,7 @@ internal fun ConversationScreen(
 
         // wp-6：斜杠命令建议面板——draft 由 "/" 起手时悬浮于发送区上方（iOS wp-14 同位），
         // 选中即动作；无命中/进入参数书写段自动收起，其余输入零干扰。
+        // 2026-11-21 面板键位轮：highlightIndex = 键盘高亮行（↑↓/Tab 消费，行底渲染见面板）。
         AnimatedVisibility(
             visible = slashSuggestions.isNotEmpty(),
             enter = fadeIn() + expandVertically(expandFrom = Alignment.Bottom),
@@ -871,6 +890,7 @@ internal fun ConversationScreen(
         ) {
             SlashCommandPanel(
                 suggestions = slashSuggestions,
+                highlightIndex = slashHighlightIndex,
                 onSelect = { selectSlashCommand(it) },
                 onPrefill = { prefillSlashCommand(it) },
                 modifier = Modifier.padding(horizontal = 14.dp),
@@ -987,26 +1007,60 @@ internal fun ConversationScreen(
                             .weight(1f)
                             .onFocusChanged { composerFocused = it.isFocused } // 批次4：聚焦下视
                             .onPreviewKeyEvent { event ->
-                                // wp-6：Enter 键裁决在 preview 相拦截（先于 TextField 默认换行）；
-                                // IME 组合中的 Enter 属提交候选词，让行默认行为（不消费不发送）。
-                                val isEnterDown = event.type == KeyEventType.KeyDown &&
-                                    (event.key == Key.Enter || event.key == Key.NumPadEnter)
-                                if (!isEnterDown || input.composition != null) {
-                                    return@onPreviewKeyEvent false
-                                }
-                                when (
-                                    resolveEnterKey(
-                                        isShiftPressed = event.isShiftPressed,
-                                        isMetaOrCtrlPressed =
-                                            event.isCtrlPressed || event.isMetaPressed,
-                                        draft = input.text,
-                                    )
-                                ) {
-                                    EnterKeyBehavior.Newline -> false
-                                    EnterKeyBehavior.Ignored -> true
-                                    EnterKeyBehavior.Send -> {
-                                        sendDraft()
-                                        true
+                                // wp-6 + 2026-11-21 回车语义轮：键位拦截在 preview 相（先于
+                                // TextField 默认行为）。分流序 = SlashCommandRules 头注释优先级表
+                                //（与 Catalyst ComposerKeyHandlers 一张表）：
+                                //   IME 组合中（composition != null）→ 全键让行默认（组合期
+                                //   Enter 属提交候选词、↑↓ 属候选词导航、Tab 属候选选定）；
+                                //   Enter → resolveEnterKey（Shift 换行 / 空白消费 / Cmd 强发 /
+                                //   面板可见原样发送 / 单行发送、多行换行）；
+                                //   ↑↓/Tab → 仅面板可见时消费（移高亮 / 补全高亮+空格），
+                                //   面板不可见透传（Tab 照常走焦点遍历等系统默认）。
+                                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                                val isEnter = event.key == Key.Enter || event.key == Key.NumPadEnter
+                                val isPanelNav = slashSuggestions.isNotEmpty() &&
+                                    (event.key == Key.DirectionUp ||
+                                        event.key == Key.DirectionDown ||
+                                        event.key == Key.Tab)
+                                if (!isEnter && !isPanelNav) return@onPreviewKeyEvent false
+                                if (input.composition != null) return@onPreviewKeyEvent false
+                                if (isEnter) {
+                                    when (
+                                        resolveEnterKey(
+                                            isShiftPressed = event.isShiftPressed,
+                                            isMetaOrCtrlPressed =
+                                                event.isCtrlPressed || event.isMetaPressed,
+                                            draft = input.text,
+                                            slashPanelVisible = slashSuggestions.isNotEmpty(),
+                                        )
+                                    ) {
+                                        EnterKeyBehavior.Newline -> false
+                                        EnterKeyBehavior.Ignored -> true
+                                        EnterKeyBehavior.Send -> {
+                                            sendDraft()
+                                            true
+                                        }
+                                    }
+                                } else {
+                                    when (event.key) {
+                                        Key.DirectionUp -> {
+                                            slashKeyboardIndex = slashMovedIndex(
+                                                slashKeyboardIndex, -1, slashSuggestions.size,
+                                            )
+                                            true
+                                        }
+                                        Key.DirectionDown -> {
+                                            slashKeyboardIndex = slashMovedIndex(
+                                                slashKeyboardIndex, 1, slashSuggestions.size,
+                                            )
+                                            true
+                                        }
+                                        else -> { // Key.Tab（isPanelNav 门内必为面板可见）
+                                            slashSuggestions.getOrNull(
+                                                slashHighlightIndex ?: 0,
+                                            )?.let { prefillSlashCommand(it) }
+                                            true
+                                        }
                                     }
                                 }
                             },
@@ -1048,8 +1102,8 @@ internal fun ConversationScreen(
                         }
                         // 空正文防线（发送侧）：空白草稿禁发（isNotBlank = 去空白后非空），点击再兜一层。
                         // v1.2.0 多模态：纯附件草稿（文本空、附件非空）放行——契约允许空文本消息，
-                        // sendDraft 内再兜「两者皆空禁发」。（Enter 仍按 resolveEnterKey 既有口径
-                        // 对空白草稿不发送：附件独发走发送键，纯函数层零改动。）
+                        // sendDraft 内再兜「两者皆空禁发」。（Enter 空白判据 = 纯文本 isNotBlank
+                        // 不含附件——附件独发走发送键；2026-11-21 回车语义轮该口径双端保持不变。）
                         Button(
                             onClick = { sendDraft() },
                             enabled = input.text.isNotBlank() || draftAttachments.isNotEmpty(),
@@ -1317,6 +1371,8 @@ private fun FailedReasonLine(m: UiMessage) {
  * wp-6：斜杠命令建议面板——发送区上方轻量目录（输入 "/" 即出、选中即动作；iOS wp-14
  * SlashCommandPanel 同构）。纵向滚动承载溢出（目录超出可视行数时内滚，上限 ≈4 行对齐 iOS
  * panelMaxHeight=148）；纯本地视图零网络，不劫持键盘焦点。
+ * 2026-11-21 面板键位轮：行底键盘高亮（highlightIndex，↑↓ 移动 / Tab 补全的视觉面，iOS
+ * 同轮 accent 薄底对位）。
  */
 private const val SLASH_PANEL_MAX_HEIGHT_DP = 148
 
@@ -1326,6 +1382,8 @@ private fun SlashCommandPanel(
     onSelect: (SlashCommand) -> Unit,
     /** 2026-11-08 修复轮：行尾 ✎ = 预填命令文本进输入框（带尾随空格）续写参数。 */
     onPrefill: (SlashCommand) -> Unit,
+    /** 2026-11-21 面板键位轮：键盘高亮行（↑↓/Tab 消费方；null=无高亮态，视觉同旧行）。 */
+    highlightIndex: Int? = null,
     modifier: Modifier = Modifier,
 ) {
     Surface(
@@ -1340,7 +1398,21 @@ private fun SlashCommandPanel(
                 .verticalScroll(rememberScrollState()),
         ) {
             suggestions.forEachIndexed { index, cmd ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                // 键盘高亮行底（对位 iOS accent 0.16 薄底，桌面取 primary≈0.12 alpha 同「轻
+                // 强调」观感；与行内 hover/点击共存不冲突）。
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            if (index == highlightIndex) {
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                            } else {
+                                Color.Transparent
+                            },
+                            RoundedCornerShape(8.dp),
+                        ),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     Row(
                         modifier = Modifier
                             .weight(1f)

@@ -2,6 +2,7 @@ package dev.sharpxia.agentreins.desktopui
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -89,6 +90,45 @@ class StreamingTypewriterPacingTest {
             shown = minOf(target, shown + typewriterRevealStep(target - shown))
             total++
             assertTrue(total < 120, "$total tick 未收敛")
+        }
+        assertEquals(target, shown)
+    }
+
+    // ── ⑤ 揭示索引贴齐代码点边界（2026-11-21 终审：代理对不劈半——iOS 字素索引天然无此问题，桌面侧补齐） ──
+
+    @Test
+    fun revealIndexSnapsForwardOffSurrogatePairs() {
+        // "a😀b" UTF-16 = [a, 高位D83D, 低位DE00, b]，长度 4：劈点在第 2 码元
+        val text = "a😀b"
+        assertEquals(3, typewriterSnapToCodePointBoundary(text, 2)) // 对中间 → +1 收全对
+        assertEquals(1, typewriterSnapToCodePointBoundary(text, 1)) // BMP 字符后 = 安全边界，原样
+        assertEquals(3, typewriterSnapToCodePointBoundary(text, 3)) // 对后边界，原样
+        assertEquals(4, typewriterSnapToCodePointBoundary(text, 4)) // 串尾（substring 全长恒安全），原样
+        // 常规中文流（终审关切：零行为变化）
+        assertEquals(1, typewriterSnapToCodePointBoundary("中文", 1))
+        assertEquals(2, typewriterSnapToCodePointBoundary("中文", 2))
+        // 孤立高位代理（残缺内容）后跟普通字符：不构成代理对，不误贴
+        val lone = "a\uD83Db"
+        assertEquals(1, typewriterSnapToCodePointBoundary(lone, 1))
+    }
+
+    @Test
+    fun revealSimulationNeverSplitsSurrogatePairs() {
+        // 模拟揭示循环（步进 + clamp + 边界贴齐，同 StreamingTypewriterText 求值序）：
+        // BMP/非 BMP 交错流逐 tick 断言已揭示前缀永不劈开代理对
+        val content = "流" + "😀".repeat(50) + "尾"
+        val target = content.length
+        var shown = 0
+        while (shown < target) {
+            shown = typewriterSnapToCodePointBoundary(
+                content,
+                minOf(target, shown + typewriterRevealStep(target - shown)),
+            )
+            assertTrue(shown <= target, "贴齐越界 @ shown=$shown")
+            assertFalse(
+                content.substring(0, shown).last().isHighSurrogate(),
+                "tick 前缀劈开代理对 @ shown=$shown",
+            )
         }
         assertEquals(target, shown)
     }

@@ -143,7 +143,7 @@ internal fun resolveEnterKey(
     slashPanelVisible && draft.isNotBlank() -> EnterKeyBehavior.Send // ④ 面板可见=原样发送（不走补全）
     !draft.contains('\n') && draft.isNotBlank() -> EnterKeyBehavior.Send // ⑤ 单行裸 Enter=发送
     draft.isNotBlank() -> EnterKeyBehavior.Newline // ⑤ 多行裸 Enter=换行（不消费，TextField 默认插换行）
-    else -> EnterKeyBehavior.Ignored // ② 空白草稿（任意修饰组合）消费不发不换行（先于 ⌘ 判定）
+    else -> EnterKeyBehavior.Ignored // ② 空白草稿（除 Shift 外的修饰组合——Shift+空白已由①支换行让行）消费不发不换行（先于 ⌘ 判定）
 }
 
 /**

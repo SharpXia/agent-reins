@@ -1268,9 +1268,9 @@ internal fun streamingRowPresentation(
 internal fun assistantPlaceholderText(thinkingNow: Boolean, agentLabel: String): String =
     (if (thinkingNow) "正在思考…" else "$agentLabel 正在处理中…") + "▌"
 
-/** 洪泛档阈值（字符，> 阈值转洪泛档）：2s 合并窗典型几百字，8192 已是洪泛输出（桥合并缓冲
- *  硬帽 256KiB 量级）——此量级逐字档追平成本失衡，快速追平无体感损失（与 iOS StreamingTypewriter
- *  floodBacklogChars 双端对锁）。 */
+/** 洪泛档阈值（字符：桌面按 UTF-16 码元/iOS 按字素计量，> 阈值转洪泛档）：2s 合并窗典型几百字，
+ *  8192 已是洪泛输出（桥合并缓冲硬帽 256KiB 量级）——此量级逐字档追平成本失衡，快速追平无
+ *  体感损失（与 iOS StreamingTypewriter floodBacklogChars 双端对锁，单位口径见 typewriterRevealStep 注）。 */
 internal const val TYPEWRITER_FLOOD_BACKLOG_CHARS = 8192
 
 /**
@@ -1283,9 +1283,29 @@ internal const val TYPEWRITER_FLOOD_BACKLOG_CHARS = 8192
  *   本已不可信（恒 8 档需 16s+），快速追平无体感损失。
  * 与 iOS HubViews.swift StreamingTypewriter（revealStep 双档 + 16ms tick）双端注释对锁——单端
  * 改值必须双端同步，桌面回归锚兼作两端行为契约不漂移（StreamingRowPresentationTest 同纪律）。
+ * 计量单位知情差异（2026-11-21 终审钉口径）：同参数（8192 阈值、/12、/3）按各自单位计量——
+ * 桌面 = UTF-16 码元（String.length/substring），iOS = 字素 Cluster（String.count/prefix）；
+ * 非 BMP（emoji 等）内容揭示速度/洪泛档触发点轻微漂移属知情差异，常规中文流两端逐字等价。
  */
 internal fun typewriterRevealStep(backlog: Int): Int =
     if (backlog > TYPEWRITER_FLOOD_BACKLOG_CHARS) backlog / 3 else maxOf(8, backlog / 12)
+
+/**
+ * 2026-11-21 终审修复：揭示索引贴齐 UTF-16 代码点边界——[revealed] 恰落在代理对中间（前一位
+ * 高位代理、当位低位代理）则 +1 收全对，防 substring(0, revealed) 劈对出单 tick 替换字形
+ * （iOS 字素索引天然无此问题，桌面侧对齐补齐）；其余情形（对前后边界、串尾、孤立代理）
+ * 原样返回。揭示循环与显示前缀两处调用（打字机步进值表的代码点边界版回归锚在
+ * StreamingTypewriterPacingTest）。
+ */
+internal fun typewriterSnapToCodePointBoundary(content: String, revealed: Int): Int =
+    if (revealed in 1 until content.length &&
+        content[revealed - 1].isHighSurrogate() &&
+        content[revealed].isLowSurrogate()
+    ) {
+        revealed + 1
+    } else {
+        revealed
+    }
 
 /** 打字机 tick 周期（毫秒，iOS StreamingTypewriter.tickNanos = 16_000_000 对应值）。 */
 private const val TYPEWRITER_TICK_MS = 16L
@@ -1401,9 +1421,12 @@ private fun AssistantMessageRow(
  * - 挂载首帧贴齐现有内容（快照行/列表滚动往返物化不重打；列表 key=messageId 行身份稳定，
  *   本组合项 @State 跨重组存活，仅挂载/重挂载时贴齐），仅存活期间的 append 逐字；
  * - 改写跳变（replace=true 语义、内容收缩、非前缀续写）不逐字、直接贴齐；
- * - 行收敛 final 时外层分支切回整段 MarkdownText（本组合项离场），剩余积压一次性补齐。
+ * - 行收敛 final 时外层分支切回整段 MarkdownText（本组合项离场），剩余积压一次性补齐；
+ * - 揭示索引贴齐代码点边界（typewriterSnapToCodePointBoundary）：代理对不劈半、单 tick 替换
+ *   字形不再出现（iOS 字素索引天然无此问题，2026-11-21 终审修复）。
  *
- * 步长 = typewriterRevealStep(积压) @ TYPEWRITER_TICK_MS——与 iOS 同参数对锁（见纯函数注）。
+ * 步长 = typewriterRevealStep(积压) @ TYPEWRITER_TICK_MS——与 iOS 同参数对锁（见纯函数注；
+ * 计量单位桌面 UTF-16 码元/iOS 字素 Cluster，知情差异同注）。
  * 揭示前缀喂 MarkdownText（showCursor=true，▌ 光标随前缀移动）；MarkdownText 本体零改动。
  */
 @Composable
@@ -1431,12 +1454,20 @@ private fun StreamingTypewriterText(content: String, modifier: Modifier = Modifi
         var shown = progress.coerceAtMost(target)
         revealedCount = shown
         while (shown < target) {
-            shown = (shown + typewriterRevealStep(target - shown)).coerceAtMost(target)
+            // 推进后贴齐代码点边界（代理对劈半则 +1 收全对，步进不受影响——步长下限 8 ≫ 1）
+            shown = typewriterSnapToCodePointBoundary(
+                content,
+                (shown + typewriterRevealStep(target - shown)).coerceAtMost(target),
+            )
             revealedCount = shown
             delay(TYPEWRITER_TICK_MS) // 新内容到达经 LaunchedEffect(content) 重启，取消本循环（iOS task(id:) 同语义）
         }
     }
-    val revealed = (revealedCount ?: content.length).coerceIn(0, content.length)
+    // 显示面前再贴齐一次（防御性：挂载/跳变直贴的全长索引本就是安全边界，此处恒 no-op）
+    val revealed = typewriterSnapToCodePointBoundary(
+        content,
+        (revealedCount ?: content.length).coerceIn(0, content.length),
+    )
     MarkdownText(
         content = content.substring(0, revealed),
         showCursor = true,

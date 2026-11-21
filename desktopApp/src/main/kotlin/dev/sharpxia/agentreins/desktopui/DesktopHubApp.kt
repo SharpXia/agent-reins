@@ -337,6 +337,8 @@ private fun HubShell(
                     // avatarPrefs UI 镜像，远端收敛/本端保存两路刷新；SettingsScreen:465 同口径）
                     awaitingApprovalIds = awaitingApprovalIds,
                     motionEnabled = avatarUi.motionLevel == AvatarMotion.STANDARD,
+                    // 会话级换形象轮（v1.5.2）：全局动效现值喂会话换装 dialog（预览门控+PUT 载荷）
+                    globalMotion = avatarUi.motionLevel,
                     modifier = Modifier.weight(1f),
                 )
                 Surface(color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)) {
@@ -412,6 +414,8 @@ private fun HubShell(
                                         thinkingIndicator = thinkingIndicator,
                                         // 角色系统批次4：composer 行首交互角色动效门控
                                         motionEnabled = avatarUi.motionLevel == AvatarMotion.STANDARD,
+                                        // 会话级换形象轮（v1.5.2）：全局动效现值喂会话换装 dialog
+                                        globalMotion = avatarUi.motionLevel,
                                     )
                                 }
                             } else {

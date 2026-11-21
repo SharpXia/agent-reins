@@ -55,6 +55,9 @@ import dev.sharpxia.agentreins.hub.DefaultHubClient
 import dev.sharpxia.agentreins.hub.UiAgentRef
 import dev.sharpxia.agentreins.hub.UiConversation
 import dev.sharpxia.agentreins.hub.UiGateway
+import dev.sharpxia.agentreins.hub.avatar.AvatarMotion
+import dev.sharpxia.agentreins.hub.avatar.AvatarPalette
+import dev.sharpxia.agentreins.hub.avatar.AvatarProfile
 import dev.sharpxia.agentreins.hub.avatar.botSeedFor
 import dev.sharpxia.agentreins.hub.avatar.botStateFor
 import dev.sharpxia.agentreins.hub.projection.SessionSummary
@@ -109,9 +112,16 @@ internal fun ConversationListPanel(
     // 角色系统批次3：动效档总开关（avatarPrefs UI 镜像 motionLevel==STANDARD，SettingsScreen:465 同口径；
     // off 档组件内不建帧循环，批次1 A6）
     motionEnabled: Boolean = true,
+    // 会话级换形象轮（v1.5.2，2026-11-21）：全局形象档动效现值（avatarUi.motionLevel 同源）——
+    // 会话换装 dialog 预览动效门控与 PUT 载荷 motionLevel（动效不进会话 sheet，仍全局档）
+    globalMotion: AvatarMotion = AvatarMotion.STANDARD,
 ) {
     // 多网关轮（§3.2）：会话行网关名 caption 数据面（hub.gateways 快照/事件/回拉三路同源）
     val gateways by client.observeGateways().collectAsState(initial = emptyList())
+    // 会话级换形象轮：会话覆盖档映射（契约 v1.5.2 #34 水合面；null=未水合、emptyMap=已水合
+    // 无覆盖、键缺席=无覆盖走 seed 派生——store 不造默认值）。StateFlow 帧驱动自动刷新，
+    // 卡片按 conversationId 直查不缓存副本
+    val conversationAvatars by client.conversationAvatarProfiles.collectAsState()
     // wp-7 会话操作瞬态（面板级持有，跨卡片/弹窗存活；提交协程挂面板 scope——弹窗中途关闭
     // 不取消在途请求，结果仍经事件流回流投影，UI 态写已离场快照无副作用）
     val scope = rememberCoroutineScope()
@@ -128,6 +138,8 @@ internal fun ConversationListPanel(
     var createError by remember { mutableStateOf<String?>(null) }
     // v1.4.0「管理会话」目标（会话卡右键菜单；nil = 关）
     var sessionsManagerTarget by remember { mutableStateOf<AgentSessionsTarget?>(null) }
+    // 会话级换形象轮：「换形象」目标（会话卡右键菜单；nil = 关）
+    var avatarTarget by remember { mutableStateOf<UiConversation?>(null) }
 
     fun renameNow(conv: UiConversation, label: String) {
         renameError = null
@@ -234,12 +246,15 @@ internal fun ConversationListPanel(
                             awaitingApproval = conv.conversationId in awaitingApprovalIds,
                             motionEnabled = motionEnabled,
                             gatewayName = gatewayNameFor(gateways, conv.gatewayId),
+                            // 会话级换形象轮：覆盖档直查（map[conversationId]，StateFlow 帧驱动）
+                            avatarOverride = conversationAvatars?.get(conv.conversationId),
                             onToggleMute = onToggleMute,
                             onRename = { renameTarget = it },
                             onCompact = { compactNow(it) },
                             onManageSessions = {
                                 sessionsManagerTarget = AgentSessionsTarget(conv.gatewayId, conv.agentId)
                             },
+                            onChangeAvatar = { avatarTarget = conv },
                             onClick = { onSelect(conv.conversationId) },
                         )
                     }
@@ -283,6 +298,18 @@ internal fun ConversationListPanel(
             onDismiss = { sessionsManagerTarget = null },
         )
     }
+
+    // 会话级换形象对话框（#32 PUT / #33 DELETE；PUT/DELETE 成功经 shared 门面收敛进
+    // conversationAvatarProfiles，本卡片列表帧驱动自动刷新）
+    avatarTarget?.let { conv ->
+        ConversationAvatarDialog(
+            client = client,
+            conversationId = conv.conversationId,
+            conversationLabel = conv.label,
+            globalMotion = globalMotion,
+            onDismiss = { avatarTarget = null },
+        )
+    }
 }
 
 @OptIn(ExperimentalComposeUiApi::class)
@@ -295,10 +322,13 @@ private fun ConversationCard(
     awaitingApproval: Boolean,
     motionEnabled: Boolean,
     gatewayName: String,
+    // 会话级换形象轮：本会话覆盖档（null = 无覆盖/未水合——渲染走 seed 派生零变化）
+    avatarOverride: AvatarProfile?,
     onToggleMute: (conversationId: String, muted: Boolean) -> Unit,
     onRename: (UiConversation) -> Unit,
     onCompact: (UiConversation) -> Unit,
     onManageSessions: () -> Unit,
+    onChangeAvatar: () -> Unit,
     onClick: () -> Unit,
 ) {
     val bg = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent
@@ -357,6 +387,9 @@ private fun ConversationCard(
                 // 纯函数同参消费（botStateFor）；列表行不细分 THINKING（workActivity 逐行订阅
                 // 违纪律，设计边界①两档合一呈 RUNNING）。帧门控在组件内（withFrameNanos 循环
                 // 仅 motionEnabled=true 分支创建，LazyColumn 出屏 dispose 即停帧）。
+                // 会话级换形象轮（v1.5.2）：有覆盖 = 造型/配色从覆盖档注入（seed 照传——眼形/
+                // 姿态/眨音仍由会话身份派生）；无覆盖/null = 现状派生零变化（override 传 null
+                // 即 seed 域）。
                 BotCharacter(
                     seed = botSeedFor(conv.conversationId),
                     state = botStateFor(
@@ -369,6 +402,8 @@ private fun ConversationCard(
                     size = 36.dp,
                     motionEnabled = motionEnabled,
                     interactive = false,
+                    faceFactorsOverride = avatarOverride?.faceFactors,
+                    paletteIndexOverride = avatarOverride?.let { AvatarPalette.entries.indexOf(it.paletteId) },
                 )
                 Spacer(Modifier.width(10.dp))
                 Text(
@@ -431,6 +466,14 @@ private fun ConversationCard(
                 onClick = {
                     menuOpen = false
                     onRename(conv)
+                },
+            )
+            // 会话级换形象轮（v1.5.2）：入口①——右键「换形象」打开会话换装对话框（#32/#33）
+            DropdownMenuItem(
+                text = { Text("换形象") },
+                onClick = {
+                    menuOpen = false
+                    onChangeAvatar()
                 },
             )
             // wp-7：压缩上下文（#18）。在途/活跃 run 期间禁用（iOS HubViews 菜单

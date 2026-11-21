@@ -82,6 +82,8 @@ import androidx.compose.ui.unit.sp
 import dev.sharpxia.agentreins.hub.DefaultHubClient
 import dev.sharpxia.agentreins.hub.HubException
 import dev.sharpxia.agentreins.hub.UiApproval
+import dev.sharpxia.agentreins.hub.avatar.AvatarMotion
+import dev.sharpxia.agentreins.hub.avatar.AvatarPalette
 import dev.sharpxia.agentreins.hub.avatar.botSeedFor
 import dev.sharpxia.agentreins.hub.avatar.botStateFor
 import dev.sharpxia.agentreins.hub.projection.AttachmentRef
@@ -280,6 +282,9 @@ internal fun ConversationScreen(
     // 角色系统批次4：动效档总开关（avatarPrefs UI 镜像，SettingsScreen:465 同口径）——
     // composer 行首交互角色的 motion 门控。
     motionEnabled: Boolean,
+    // 会话级换形象轮（v1.5.2，2026-11-21）：全局形象档动效现值（avatarUi.motionLevel 同源）——
+    // 会话换装 dialog 预览动效门控与 PUT 载荷 motionLevel（动效不进会话 sheet，仍全局档）
+    globalMotion: AvatarMotion = AvatarMotion.STANDARD,
 ) {
     val messages by client.observeMessages(conversationId).collectAsState(initial = emptyList())
     // wp-15：工作过程披露条数据面（hubToolEvents + hubRunStatus 两表合流快照）——此前零消费，
@@ -321,6 +326,13 @@ internal fun ConversationScreen(
     // DefaultEventProjector.setRun 在 resolveConversation 失败时直接 return，不落库）置灰为
     // 「结束中」提示态，不假设 runId 恒有值、不误触。
     val canCancelRun = !liveConv?.activeRunId.isNullOrEmpty()
+
+    // 会话级换形象轮（v1.5.2）：会话覆盖档（契约 #34 水合面；null map=未水合、键缺席=无覆盖
+    // 走 seed 派生——store 不造默认值）。StateFlow 帧驱动自动刷新，conversationId 直查不缓存
+    // 副本；dialog 入口② = 页头角色点按。
+    val conversationAvatars by client.conversationAvatarProfiles.collectAsState()
+    val avatarOverride = conversationAvatars?.get(conversationId)
+    var avatarDialogOpen by remember { mutableStateOf(false) }
 
     // ── 角色系统批次4：composer 行首 32dp 交互角色的眼神触发面（与 iOS HubChatView 同参同观感）──
     // 触发三路：输入聚焦下视（onFocusChanged）、composer 区指针注视（pointerInput Move，
@@ -989,20 +1001,26 @@ internal fun ConversationScreen(
                     // 细分只在聊天页（workActivity wp-15）；ERROR=末条消息 failed（全覆盖于
                     // 聊天页）；DONE 瞬时窗见上方 LaunchedEffect；「正在思考…▌」占位行文字信号
                     // 保留为读屏锚（assistantPlaceholderText）。
-                    BotCharacter(
-                        seed = botSeedFor(conversationId),
-                        state = botStateFor(
-                            hasActiveRun = isRunActive,
-                            thinkingNow = chatThinkingNow,
-                            awaitingApproval = chatAwaitingApproval,
-                            lastMessageFailed = chatLastMessageFailed,
-                            doneTransient = doneTransient,
-                        ),
-                        size = 32.dp,
-                        motionEnabled = motionEnabled,
-                        interactive = true,
-                        gaze = chatGaze,
-                    )
+                    // 会话级换形象轮（v1.5.2）：有覆盖 = 造型/配色从覆盖档注入（seed 照传）；
+                    // 无覆盖/null = 现状派生零变化。点按 = 换装 dialog 入口②（聊天页角色）。
+                    Box(Modifier.clickable { avatarDialogOpen = true }) {
+                        BotCharacter(
+                            seed = botSeedFor(conversationId),
+                            state = botStateFor(
+                                hasActiveRun = isRunActive,
+                                thinkingNow = chatThinkingNow,
+                                awaitingApproval = chatAwaitingApproval,
+                                lastMessageFailed = chatLastMessageFailed,
+                                doneTransient = doneTransient,
+                            ),
+                            size = 32.dp,
+                            motionEnabled = motionEnabled,
+                            interactive = true,
+                            gaze = chatGaze,
+                            faceFactorsOverride = avatarOverride?.faceFactors,
+                            paletteIndexOverride = avatarOverride?.let { AvatarPalette.entries.indexOf(it.paletteId) },
+                        )
+                    }
                     Spacer(Modifier.width(10.dp))
                     OutlinedTextField(
                         value = input,
@@ -1123,6 +1141,18 @@ internal fun ConversationScreen(
                 }
             }
         }
+    }
+
+    // 会话级换装对话框（#32 PUT / #33 DELETE；成功经 shared 门面收敛进
+    // conversationAvatarProfiles，本页角色渲染帧驱动自动刷新）
+    if (avatarDialogOpen) {
+        ConversationAvatarDialog(
+            client = client,
+            conversationId = conversationId,
+            conversationLabel = label,
+            globalMotion = globalMotion,
+            onDismiss = { avatarDialogOpen = false },
+        )
     }
 }
 

@@ -482,10 +482,17 @@ private struct NewConversationAgentRow: View {
 struct HubConversationRow: View {
     @State private var hub = HubStore.shared
     let c: UiConversation
+    /// 选中态翻色（2026-11-21 观感整治轮）：Mac 侧栏选中胶囊是近白/近黑实色高亮块
+    ///（selectionFill 令牌），行内五处文字钉死 .tertiary/.secondary 时白字糊进高亮块
+    ///（beta-0.5.22 用户截图实证「选中行内容看不清」）。选中即整行切 onSelection/
+    /// onSelectionMuted 令牌对（明暗对比度 16.61~5.27:1 实测见 InkTheme.swift）。
+    /// 默认 false：iOS 会话列表调用点（HubHomeView）不传参零变化。
+    var selected: Bool = false
     /// DONE 瞬时窗（角色系统批次2）：hasActiveRun 真→假 触发 900ms 完成弹跳后回落 IDLE。
     /// generation 防 900ms 窗内新 run 启动的陈旧回调误清（真→假→真 序列每次跳变 +1 作废旧窗）。
     @State private var botDoneGeneration = 0
     @State private var botDoneTransient = false
+    @Environment(\.inkColors) private var ink
 
     private var title: String {
         if !c.label.isEmpty { return c.label }
@@ -522,26 +529,32 @@ struct HubConversationRow: View {
             )
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    Text(title).fontWeight(.semibold).lineLimit(1)
+                    // 选中翻色五处之一（标题）：未选中 = 系统主文字（今日原样）。
+                    Text(title)
+                        .fontWeight(.semibold).lineLimit(1)
+                        .foregroundStyle(selected ? AnyShapeStyle(ink.onSelection) : AnyShapeStyle(.primary))
                     if c.reconciling {
-                        Text("对账中").font(.caption2).foregroundStyle(.secondary)
+                        Text("对账中").font(.caption2)
+                            .foregroundStyle(selected ? AnyShapeStyle(ink.onSelectionMuted) : AnyShapeStyle(.secondary))
                     }
                     Spacer(minLength: 0)
                     // #1（2026-11-08）：最近活跃时间（title 行右侧弱化展示——桌面
                     // ConversationCard preview 行 formatTs 同族 parity；解析失败省略不占位）
                     Text(formatMessageTimeISO(c.lastActiveAt))
                         .font(.caption2)
-                        .foregroundStyle(.tertiary)
                         .lineLimit(1)
+                        .foregroundStyle(selected ? AnyShapeStyle(ink.onSelectionMuted) : AnyShapeStyle(.tertiary))
                 }
                 // 多网关轮（§3.2）：标题下网关名 caption——多网关混排列表的归属歧义就此消除；
                 // hub.gateways 按 gatewayId 查名，空名/未知回退 gatewayId 尾段（gatewayDisplayName 口径）
                 Text(hub.gatewayDisplayName(c.gatewayId))
                     .font(.caption2)
-                    .foregroundStyle(.tertiary)
                     .lineLimit(1)
+                    .foregroundStyle(selected ? AnyShapeStyle(ink.onSelectionMuted) : AnyShapeStyle(.tertiary))
                 if !c.preview.isEmpty {
-                    Text(c.preview).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
+                    Text(c.preview).font(.footnote)
+                        .lineLimit(1)
+                        .foregroundStyle(selected ? AnyShapeStyle(ink.onSelectionMuted) : AnyShapeStyle(.secondary))
                 }
             }
             Spacer()
@@ -1166,15 +1179,12 @@ struct HubChatView: View {
                             proxy.scrollTo("bottom", anchor: .bottom)
                         }
                     } label: {
-                        Image(systemName: "chevron.down.circle.fill")
-                            .font(.title3)
-                            .foregroundStyle(.secondary)
-                            .padding(9)
-                            // 2026-11-20 Mac 观感轮：thinMaterial→实色（半透明材质在 Mac 上
-                            // 叠出雾面，用户拍板去透明；elevated 双模式自适应）
-                            .background(Circle().fill(ink.elevated))
-                            .overlay(Circle().stroke(ink.borderTertiary, lineWidth: 1))
-                            .hoverCircle()
+                        // 2026-11-21 观感整治轮：统一圆钮面收口——glyph 弃 .circle.fill
+                        //（fill 字形即半透明盘，「雾面」真身）改裸 chevron.down，面/描边/
+                        // hover 全部内聚在 inkIconButtonFace（controlFace 实色，明暗对比度
+                        // 令牌对保证）。布局（trailing/bottom padding）留在调用点。
+                        Image(systemName: "chevron.down")
+                            .inkIconButtonFace(iconFont: .title3, padding: 9)
                     }
                     .padding(.trailing, 12)
                     .padding(.bottom, 6)
@@ -1288,6 +1298,9 @@ struct HubChatView: View {
                 }
                 .controlSize(.small)
                 .buttonBorderShape(.capsule)
+                // 2026-11-21 观感整治轮：tint 对齐 controlFace 令牌（系统托管控件胶囊底
+                // 不可拆，只对齐面系令牌；label 实际响应度四态走查实测拍板，疑留见提交注）。
+                .tint(ink.controlFace)
                 #endif
                 // v1.3 发送链：图片选择入口（PHPicker 出程式面板，无需相册权限）；多选上限
                 // 9 张（契约 v1.2.1 attachments maxItems）。上传/失败细节在 pending 预览区呈现。
@@ -1299,7 +1312,14 @@ struct HubChatView: View {
                     Image(systemName: "photo")
                         .font(.title3)
                 }
+                // 2026-11-21 观感整治轮：全平台 .buttonStyle(.plain) 灭 Catalyst 默认 bezel
+                //（「雾面圆钮」真身之一）；iOS 无显式 style→plain 零面变化（走查核）。
+                .buttonStyle(.plain)
                 .accessibilityLabel("添加图片（最多 \(HubStore.maxDraftAttachments) 张）")
+                #if targetEnvironment(macCatalyst)
+                // 面仅 Catalyst（先例 macContentColumn postfix #if：iOS 编译期剔除零变化）。
+                .inkIconButtonFace(iconFont: .title3, padding: 6)
+                #endif
                 TextField("发消息…", text: draftBinding, axis: .vertical)
                     .focused($composerFocused) // 批次4：输入聚焦下视（角色 gaze 后三路之一）
                     // 2026-11-21 回车语义轮：Enter 生效门=聚焦+IME（面板可见性下沉为 Enter
@@ -1336,9 +1356,13 @@ struct HubChatView: View {
                     } label: {
                         Image(systemName: "stop.circle.fill").font(.title2)
                     }
+                    // 2026-11-21 观感整治轮：.plain 灭 bezel（同 photo 键注）；Catalyst 挂
+                    // 统一圆钮面，iOS 零面变化（走查核）。
+                    .buttonStyle(.plain)
                     .accessibilityLabel("停止生成")
                     // UxPlan item3：⌘. 停止生成（macOS 惯例的中止键），仅 Catalyst。
                     #if targetEnvironment(macCatalyst)
+                    .inkIconButtonFace(iconFont: .title2, padding: 6)
                     .keyboardShortcut(".", modifiers: .command)
                     #endif
                 } else {
@@ -1362,6 +1386,9 @@ struct HubChatView: View {
                             Image(systemName: "arrow.up.circle.fill").font(.title2)
                         }
                         .disabled(!draftHasContent)
+                        // 2026-11-21 观感整治轮：.plain 灭 bezel（同 photo 键注）；Catalyst 挂
+                        // 统一圆钮面，iOS 零面变化（走查核）。
+                        .buttonStyle(.plain)
                         // UxPlan item3：⌘Return 发送。2026-11-21 回车语义轮注记：旧注「Enter
                         // 直发需 composer 换 NSTextView」结论已过时——onKeyPress(.return) 返回
                         // .handled 即可吞掉 multiline TextField 的默认换行，单行裸 Enter=发送与
@@ -1371,6 +1398,7 @@ struct HubChatView: View {
                         // 仅 onKeyPress 通道消费）。仅 Catalyst 挂（iPad 硬件键盘无此惯例，
                         // 不引入歧义）。
                         #if targetEnvironment(macCatalyst)
+                        .inkIconButtonFace(iconFont: .title2, padding: 6)
                         .keyboardShortcut(.return, modifiers: .command)
                         #endif
                     }
@@ -1748,14 +1776,13 @@ private struct DraftAttachmentChipsRow: View {
                 ? "图片上传失败，点按重试"
                 : (d.uploading ? "图片上传中" : "已选图片附件，点按查看"))
             .hoverHighlight(cornerRadius: 10)
-            // ✕ 撤除角标
+            // ✕ 撤除角标（2026-11-21 观感整治轮：同回底钮收口进 inkIconButtonFace——glyph
+            // 弃 .circle.fill 半透明盘改裸 xmark，面实色；offset 布局位移留在调用点）
             Button {
                 onRemove(d.id)
             } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .background(Circle().fill(ink.elevated)) // 2026-11-20 Mac 观感轮：材质→实色（同回底钮）
+                Image(systemName: "xmark")
+                    .inkIconButtonFace(iconFont: .subheadline, padding: 0)
             }
             .offset(x: 6, y: -6)
             .accessibilityLabel("移除该图片")
@@ -3948,47 +3975,6 @@ private struct AgentOnlineDot: View {
     }
 }
 
-// ── UxPlan item7：自绘按钮面 hover 反馈（指针设备高亮；触屏无 hover 事件即空转，跨平台
-//    无害，故不作 Catalyst 门控）——Catalyst 系统控件自动 hover，.buttonStyle(.plain) 自绘
-//    面需补。半透明 primary 覆盖层压在既有底色上，allowsHitTesting 关闭不抢手势。 ──
-
-private struct HoverFillModifier: ViewModifier {
-    @State private var hovering = false
-    var cornerRadius: CGFloat
-
-    func body(content: Content) -> some View {
-        content
-            .overlay(
-                RoundedRectangle(cornerRadius: cornerRadius)
-                    .fill(Color.primary.opacity(hovering ? 0.07 : 0))
-                    .allowsHitTesting(false)
-            )
-            .onHover { hovering = $0 }
-    }
-}
-
-private struct HoverCircleModifier: ViewModifier {
-    @State private var hovering = false
-
-    func body(content: Content) -> some View {
-        content
-            .overlay(
-                Circle()
-                    .fill(Color.primary.opacity(hovering ? 0.07 : 0))
-                    .allowsHitTesting(false)
-            )
-            .onHover { hovering = $0 }
-    }
-}
-
-private extension View {
-    /// 矩形交互面 hover 高亮（斜杠面板行/交互卡按钮/附件 chip）。
-    func hoverHighlight(cornerRadius: CGFloat) -> some View {
-        modifier(HoverFillModifier(cornerRadius: cornerRadius))
-    }
-
-    /// 圆形交互面 hover 高亮（回底悬浮按钮）。
-    func hoverCircle() -> some View {
-        modifier(HoverCircleModifier())
-    }
-}
+// ── UxPlan item7：自绘按钮面 hover 反馈（HoverFillModifier/HoverCircleModifier/
+//    hoverHighlight/hoverCircle）已于 2026-11-21 观感整治轮整体迁入 Shared/Components.swift
+//    （单一真相，并在此之上建统一圆钮面 InkIconButtonFace），本文件六处消费点同模块直用。 ──

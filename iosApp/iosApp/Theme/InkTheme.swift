@@ -2,8 +2,21 @@ import SwiftUI
 
 // MARK: - 墨水系设计令牌（M3 InkColors/InkType/InkShapes 逐值移植）
 
+// 选中面/按钮面三条铁律（2026-11-21 观感整治轮评审定稿；违反即复现「白字压近白底」同款 bug）：
+// 1. `.tint` 只作交互控件着色，不作隐式文本色来源——行内文字一律显式令牌
+//    （.tint(colors.ink) 把 app accent 劫持成近白/近黑单色，beta-0.5.22 侧栏选中胶囊
+//    与行内浅灰白字同色的根因即「系统选中面吃 accent + 行内文字钉死 tertiary」叠加）。
+// 2. 系统选中面（List(selection:)/sidebar 胶囊）必须作用域覆盖 selectionFill 令牌，
+//    不得裸吃全局 tint——防未来全局 tint 漂移时选中面随行漂移。
+// 3. 新圆钮一律走统一面组件 `inkIconButtonFace`（Components.swift），禁就地
+//    `Circle().fill(...)`——就地拼面是半透明材质/雾面残留的根源（c01acea 只换了
+//    两处看不见的背景层，真身 glyph 半透明盘与默认 bezel 漏网）。
+
 /// 颜色令牌：与 composeApp `ui/theme/InkColors.kt` 同源同值。
 /// FuncColors 四件套在 Swift 里折平为带前缀的属性（infoText/infoBorder/...）。
+/// 选中面六令牌（selectionFill/onSelection/onSelectionMuted/controlFace/onControlFace/
+/// onControlFaceMuted）为本仓自有（2026-11-21 观感整治轮扩容），Kotlin 侧无对应——全部
+/// 不透明实色，明暗成对，对比度为本轮 python3 WCAG 2.x 相对亮度公式实测。
 struct InkColors {
     let isDark: Bool
     let ink: Color
@@ -38,6 +51,21 @@ struct InkColors {
     let shimmerBase: Color
     let awaiting: Color
     let awaitingSubtle: Color
+    // ── 选中面（sidebar 胶囊 + 行内文字对）──
+    /// 系统选中胶囊面（List(selection:) 作用域 .tint 钉住此令牌）。今日与全局 tint 同值
+    /// （light=ink:45 / dark=ink:83），作用是钉住令牌防全局 tint 漂移，非本轮变色项。
+    let selectionFill: Color
+    /// 选中行主文字（标题）。light 0xFCFCFC 对 selectionFill 16.61:1 / dark 0x121212 对 17.18:1。
+    let onSelection: Color
+    /// 选中行弱化文字（时间戳/网关名/预览/对账中）。light 8.13:1 / dark 5.27:1。
+    let onSelectionMuted: Color
+    // ── 按钮面（统一圆钮 inkIconButtonFace 用）──
+    /// 圆钮实色面（替代半透明材质/雾面 bezel）。light 0xFFFFFF / dark 0x2A2A2A。
+    let controlFace: Color
+    /// 圆钮面上主图形（glyph）。light 对 controlFace 17.04:1 / dark 12.26:1。
+    let onControlFace: Color
+    /// 圆钮面上弱化图形（预留成对令牌）。light 5.10:1 / dark 6.04:1。
+    let onControlFaceMuted: Color
 
     static func light() -> InkColors {
         InkColors(
@@ -73,7 +101,13 @@ struct InkColors {
             warningSubtle: Color(hex: 0xF59312, alpha: 0x17),
             shimmerBase: Color(hex: 0x1C1C1C, alpha: 0x40),
             awaiting: Color(hex: 0x0B6DD3),
-            awaitingSubtle: Color(hex: 0x1680F3, alpha: 0x17)
+            awaitingSubtle: Color(hex: 0x1680F3, alpha: 0x17),
+            selectionFill: Color(hex: 0x1C1C1C),       // = ink（今日与全局 tint 同值）
+            onSelection: Color(hex: 0xFCFCFC),         // 16.61:1 on selectionFill
+            onSelectionMuted: Color(hex: 0xB3B3B3),    //  8.13:1 on selectionFill
+            controlFace: Color(hex: 0xFFFFFF),
+            onControlFace: Color(hex: 0x1C1C1C),       // 17.04:1 on controlFace
+            onControlFaceMuted: Color(hex: 0x6E6E6E)   //  5.10:1 on controlFace
         )
     }
 
@@ -111,7 +145,13 @@ struct InkColors {
             warningSubtle: Color(hex: 0xF69412, alpha: 0x12),
             shimmerBase: Color(hex: 0xF5F5F5, alpha: 0x38),
             awaiting: Color(hex: 0x4D9BFF),
-            awaitingSubtle: Color(hex: 0x1884FC, alpha: 0x12)
+            awaitingSubtle: Color(hex: 0x1884FC, alpha: 0x12),
+            selectionFill: Color(hex: 0xF5F5F5),       // = ink（今日与全局 tint 同值）
+            onSelection: Color(hex: 0x121212),         // 17.18:1 on selectionFill
+            onSelectionMuted: Color(hex: 0x666666),    //  5.27:1 on selectionFill
+            controlFace: Color(hex: 0x2A2A2A),
+            onControlFace: Color(hex: 0xEDEDED),       // 12.26:1 on controlFace
+            onControlFaceMuted: Color(hex: 0xA8A8A8)   //  6.04:1 on controlFace
         )
     }
 }

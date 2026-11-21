@@ -255,3 +255,84 @@ struct InkSheetAction: View {
         .buttonStyle(.plain)
     }
 }
+
+// MARK: - hover 反馈（UxPlan item7，2026-11-21 观感整治轮自 HubViews.swift 整体迁入）
+
+/// 自绘按钮面 hover 反馈（指针设备高亮；触屏无 hover 事件即空转，跨平台无害，故不作
+/// Catalyst 门控）——Catalyst 系统控件自动 hover，.buttonStyle(.plain) 自绘面需补。
+/// 半透明 primary 覆盖层压在既有底色上，allowsHitTesting 关闭不抢手势。
+/// private→internal（2026-11-21 观感整治轮）：单一真相迁本文件，HubViews 六处消费点
+///（hoverCircle 回底钮 + hoverHighlight 附件 chip/斜杠面板行/交互卡按钮×2/消息行×2）
+/// 与本文件 InkIconButtonFace 同模块复用，禁双份拷贝。
+struct HoverFillModifier: ViewModifier {
+    @State private var hovering = false
+    var cornerRadius: CGFloat
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .fill(Color.primary.opacity(hovering ? 0.07 : 0))
+                    .allowsHitTesting(false)
+            )
+            .onHover { hovering = $0 }
+    }
+}
+
+struct HoverCircleModifier: ViewModifier {
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(
+                Circle()
+                    .fill(Color.primary.opacity(hovering ? 0.07 : 0))
+                    .allowsHitTesting(false)
+            )
+            .onHover { hovering = $0 }
+    }
+}
+
+extension View {
+    /// 矩形交互面 hover 高亮（斜杠面板行/交互卡按钮/附件 chip）。
+    func hoverHighlight(cornerRadius: CGFloat) -> some View {
+        modifier(HoverFillModifier(cornerRadius: cornerRadius))
+    }
+
+    /// 圆形交互面 hover 高亮（回底悬浮按钮/统一圆钮面）。
+    func hoverCircle() -> some View {
+        modifier(HoverCircleModifier())
+    }
+}
+
+// MARK: - 统一圆钮面（2026-11-21 观感整治轮）
+
+/// 圆形图标按钮统一交互面（InkTheme 铁律③）：实色 controlFace 底 + borderSecondary 描边
+/// + onControlFace 单色 glyph + hover 内聚。消灭就地 `Circle().fill`/半透明材质/系统
+/// 默认 bezel 三类雾面残留（beta-0.5.22 实测）；明暗对比度由令牌对保证
+///（onControlFace 对 controlFace：light 17.04:1 / dark 12.26:1）。
+/// 参数化 iconFont/padding（回底钮 .title3/9、附件撤除角标 .subheadline/0、composer
+/// 三键 .title3|.title2/6）；shape 现阶段仅 Circle（两形态调用点皆圆）。offset 等布局
+/// 位移留在调用点，不进本面。
+struct InkIconButtonFace: ViewModifier {
+    @Environment(\.inkColors) private var ink
+    var iconFont: Font
+    var padding: CGFloat
+
+    func body(content: Content) -> some View {
+        content
+            .font(iconFont)
+            .foregroundStyle(ink.onControlFace)
+            .padding(padding)
+            .background(Circle().fill(ink.controlFace))
+            .overlay(Circle().strokeBorder(ink.borderSecondary, lineWidth: 1))
+            .hoverCircle()
+    }
+}
+
+extension View {
+    /// 统一圆钮面挂载（见 InkIconButtonFace 注）。
+    func inkIconButtonFace(iconFont: Font, padding: CGFloat) -> some View {
+        modifier(InkIconButtonFace(iconFont: iconFont, padding: padding))
+    }
+}

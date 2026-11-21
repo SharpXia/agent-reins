@@ -19,6 +19,9 @@ import composeApp
 /// （同 $hub.showNewConversation 一态一挂）。
 struct MacSplitRoot: View {
     @State private var hub = HubStore.shared
+    /// 选中面/行内文字令牌（2026-11-21 观感整治轮：List 作用域 .tint 钉 selectionFill +
+    /// 选中行翻色，见 sidebarList 注）。
+    @Environment(\.inkColors) private var ink
     /// 侧栏行删除确认目标（本地瞬态；终动作全走 hub.deleteConversation 同 store 入口，
     /// 同 HubHomeView 的 deleteTarget 口径与文案——已知跨面复制，B3 既有先例）。
     @State private var deleteTarget: UiConversation?
@@ -123,7 +126,12 @@ struct MacSplitRoot: View {
                                            description: Text("网关接入后会话将自动出现，也可从右上角新建"))
                 } else {
                     ForEach(hub.conversations, id: \.conversationId) { c in
-                        HubConversationRow(c: c)
+                        HubConversationRow(
+                            c: c,
+                            // 选中翻色（2026-11-21 观感整治轮）：由 sidebarSelection 派生——
+                            // 胶囊（selectionFill）与行内文字（onSelection 系）同令牌域定色。
+                            selected: sidebarSelection.wrappedValue == .conversation(c.conversationId)
+                        )
                             .tag(MacSidebarEntry.conversation(c.conversationId))
                             .contextMenu {
                                 // 与 HubHomeView 行右键同动作同文案（parity，不单独门控）。
@@ -150,15 +158,28 @@ struct MacSplitRoot: View {
                 }
             }
             Section("系统") {
+                // 系统侧栏行的 Label/图标默认吃 accent（本 app 被 .tint(colors.ink) 劫持为
+                // 近白/近黑单色，InkTheme.swift:277）；选中时同 HubConversationRow 翻
+                // onSelection 令牌，未选中显式钉 .primary（系统 Label 无处传参，与
+                // HubConversationRow 的选中通道对齐——beta-0.5.22「设置行白字压近白胶囊」
+                // 同款 bug 的预防收口）。
                 Label("设置", systemImage: "gearshape.fill")
+                    .foregroundStyle(sidebarSelection.wrappedValue == .settings
+                                     ? AnyShapeStyle(ink.onSelection) : AnyShapeStyle(.primary))
                     .tag(MacSidebarEntry.settings)
             }
         }
         // 字号环境放大（见 sidebarList 注）：语义字体随环境放大一级，Section 头/系统行同效。
         .environment(\.dynamicTypeSize, .large)
+        // 2026-11-21 观感整治轮（铁律②）：选中胶囊作用域钉住 selectionFill 令牌，脱离全局
+        // tint 的隐式来源——今日两模式 selectionFill 与全局 tint 同值（light=ink:45 /
+        // dark=ink:83），本行是 no-op，防的是未来全局 tint 漂移时选中面随行漂移。
+        .tint(ink.selectionFill)
         // 2026-11-20 Mac 观感轮：sidebar 样式——plain 样式的选中高亮是近白实底
         //（暗色模式下白底压白字，用户截图实证「选中行内容看不清」）；sidebar 样式
         // 选中=系统 accent 半透明胶囊+primary 文字，双模式对比度由系统保证。
+        //（2026-11-21 注：accent 已被全局 .tint(colors.ink) 劫持为近白/近黑，胶囊并不
+        // 自动获得对比度保证——对比度改由行内文字翻色 onSelection 系令牌承载，见上。）
         .listStyle(.sidebar)
         // 「新建」钮已迁 detail 列（补完项③）：原挂本列 .toolbar，侧栏折叠（detailOnly）
         // 后按钮随列隐藏，折叠态动作面只剩菜单栏 ⌘N——现挂 detailColumn 的 NavigationStack，

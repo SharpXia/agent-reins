@@ -311,28 +311,38 @@ extension View {
 /// + onControlFace 单色 glyph + hover 内聚。消灭就地 `Circle().fill`/半透明材质/系统
 /// 默认 bezel 三类雾面残留（beta-0.5.22 实测）；明暗对比度由令牌对保证
 ///（onControlFace 对 controlFace：light 17.04:1 / dark 12.26:1）。
-/// 参数化 iconFont/padding（回底钮 .title3/9、附件撤除角标 .subheadline/0、composer
-/// 三键 .title3|.title2/6）；shape 现阶段仅 Circle（两形态调用点皆圆）。offset 等布局
-/// 位移留在调用点，不进本面。
+///
+/// 几何纪律（2026-11-21 独立走查②修正）：**先方形化再贴圆**——SwiftUI `Circle()` 在
+/// 非方形帧内是内切椭圆，裸字形 bbox 多非 1:1（chevron.down≈1.6:1/photo≈1.3:1），
+/// 等 padding 不改纵横比；故以显式 `diameter` 出方帧，Circle 恒正圆。
+/// 禁用态显式（走查⑤）：`.plain`/automatic 风格都不保证禁用淡出（borderless 系经典
+/// 缺口），本面读 `\.isEnabled`——禁用=onControlFaceMuted+opacity 0.4，小尺寸可辨识。
+/// 注意：isEnabled 经环境传播，面须挂在 Button **label 内**（.disabled 作用域内才读得到）。
+/// 参数 iconFont/diameter（回底钮 .title3/38、附件撤除角标 .subheadline/14、composer
+/// photo .title3/32、stop/send .title2/34）；shape 现阶段仅 Circle。offset 等布局位移
+/// 留在调用点，不进本面。
 struct InkIconButtonFace: ViewModifier {
     @Environment(\.inkColors) private var ink
+    @Environment(\.isEnabled) private var enabled
     var iconFont: Font
-    var padding: CGFloat
+    var diameter: CGFloat
 
     func body(content: Content) -> some View {
         content
             .font(iconFont)
-            .foregroundStyle(ink.onControlFace)
-            .padding(padding)
+            .foregroundStyle(enabled ? AnyShapeStyle(ink.onControlFace)
+                                     : AnyShapeStyle(ink.onControlFaceMuted))
+            .frame(width: diameter, height: diameter)
             .background(Circle().fill(ink.controlFace))
             .overlay(Circle().strokeBorder(ink.borderSecondary, lineWidth: 1))
+            .opacity(enabled ? 1 : 0.4)
             .hoverCircle()
     }
 }
 
 extension View {
-    /// 统一圆钮面挂载（见 InkIconButtonFace 注）。
-    func inkIconButtonFace(iconFont: Font, padding: CGFloat) -> some View {
-        modifier(InkIconButtonFace(iconFont: iconFont, padding: padding))
+    /// 统一圆钮面挂载（见 InkIconButtonFace 注；调用点在 Button label 内）。
+    func inkIconButtonFace(iconFont: Font, diameter: CGFloat) -> some View {
+        modifier(InkIconButtonFace(iconFont: iconFont, diameter: diameter))
     }
 }

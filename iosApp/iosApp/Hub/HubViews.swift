@@ -1179,13 +1179,17 @@ struct HubChatView: View {
                             proxy.scrollTo("bottom", anchor: .bottom)
                         }
                     } label: {
-                        // 2026-11-21 观感整治轮：统一圆钮面收口——glyph 弃 .circle.fill
-                        //（fill 字形即半透明盘，「雾面」真身）改裸 chevron.down，面/描边/
-                        // hover 全部内聚在 inkIconButtonFace（controlFace 实色，明暗对比度
-                        // 令牌对保证）。布局（trailing/bottom padding）留在调用点。
+                        // 2026-11-21 观感整治轮（走查①②修正）：统一圆钮面收口——glyph 弃
+                        // .circle.fill（fill 字形即半透明盘，「雾面」真身）改裸 chevron.down；
+                        // 面走 inkIconButtonFace（diameter 方帧保证正圆，走查②），hover 由面
+                        // 内聚 hoverCircle 兜住，不依赖系统 hover。走查①补 .buttonStyle(.plain)：
+                        // automatic 默认样式在 Catalyst 上的 hover bezel 会包在实色面外继续
+                        // 渲染（半透明浅灰残留同源），与 photo/stop/send 同口径灭掉（按压
+                        // 反馈丢失同口径接受）。
                         Image(systemName: "chevron.down")
-                            .inkIconButtonFace(iconFont: .title3, padding: 9)
+                            .inkIconButtonFace(iconFont: .title3, diameter: 38)
                     }
+                    .buttonStyle(.plain)
                     .padding(.trailing, 12)
                     .padding(.bottom, 6)
                     .accessibilityLabel("回到底部")
@@ -1298,9 +1302,14 @@ struct HubChatView: View {
                 }
                 .controlSize(.small)
                 .buttonBorderShape(.capsule)
-                // 2026-11-21 观感整治轮：tint 对齐 controlFace 令牌（系统托管控件胶囊底
-                // 不可拆，只对齐面系令牌；label 实际响应度四态走查实测拍板，疑留见提交注）。
-                .tint(ink.controlFace)
+                // 2026-11-21 观感整治轮（走查③修正）：tint 取 onControlFace（面系令牌对里
+                // 「面上可读」的一侧）——先前列 controlFace：亮色 0xFFFFFF 无论 tint 落在胶囊
+                // 底还是 label 上都与 composer 底（surfaceTertiary≈#F0F0F0）几乎同色=亮色
+                // 回退红线。onControlFace 亮色 0x1C1C1C 恰=上一版继承的全局 tint 同值、暗色
+                // 0xEDEDED≈全局 tint 0xF5F5F5——两种 tint 语义（胶囊底/label 色）下都与
+                // beta-0.5.22 已发包观感几乎一致，零回退； PasteButton 系统托管控件对 tint
+                // 的实际语义仍以四态走查实测拍板为准（本注释即拍板前状态）。
+                .tint(ink.onControlFace)
                 #endif
                 // v1.3 发送链：图片选择入口（PHPicker 出程式面板，无需相册权限）；多选上限
                 // 9 张（契约 v1.2.1 attachments maxItems）。上传/失败细节在 pending 预览区呈现。
@@ -1311,15 +1320,17 @@ struct HubChatView: View {
                 ) {
                     Image(systemName: "photo")
                         .font(.title3)
+                    // 面仅 Catalyst（先例 macContentColumn postfix #if：iOS 编译期剔除零
+                    // 变化）；挂 label 内——isEnabled 环境才能传播到面（走查⑤口径，本键
+                    // 恒可用、统一挂法）。
+                    #if targetEnvironment(macCatalyst)
+                        .inkIconButtonFace(iconFont: .title3, diameter: 32)
+                    #endif
                 }
                 // 2026-11-21 观感整治轮：全平台 .buttonStyle(.plain) 灭 Catalyst 默认 bezel
                 //（「雾面圆钮」真身之一）；iOS 无显式 style→plain 零面变化（走查核）。
                 .buttonStyle(.plain)
                 .accessibilityLabel("添加图片（最多 \(HubStore.maxDraftAttachments) 张）")
-                #if targetEnvironment(macCatalyst)
-                // 面仅 Catalyst（先例 macContentColumn postfix #if：iOS 编译期剔除零变化）。
-                .inkIconButtonFace(iconFont: .title3, padding: 6)
-                #endif
                 TextField("发消息…", text: draftBinding, axis: .vertical)
                     .focused($composerFocused) // 批次4：输入聚焦下视（角色 gaze 后三路之一）
                     // 2026-11-21 回车语义轮：Enter 生效门=聚焦+IME（面板可见性下沉为 Enter
@@ -1354,7 +1365,13 @@ struct HubChatView: View {
                     Button {
                         hub.stopRun()
                     } label: {
-                        Image(systemName: "stop.circle.fill").font(.title2)
+                        // 走查④：字形弃 .circle.fill 改裸 stop（与 photo/回底/角标统一「裸
+                        // 字形+面」语言，消灭盘中盘）；面挂 label 内（isEnabled 环境可达，
+                        // 走查⑤口径，本键恒可用）。
+                        Image(systemName: "stop").font(.title2)
+                        #if targetEnvironment(macCatalyst)
+                            .inkIconButtonFace(iconFont: .title2, diameter: 34)
+                        #endif
                     }
                     // 2026-11-21 观感整治轮：.plain 灭 bezel（同 photo 键注）；Catalyst 挂
                     // 统一圆钮面，iOS 零面变化（走查核）。
@@ -1362,7 +1379,6 @@ struct HubChatView: View {
                     .accessibilityLabel("停止生成")
                     // UxPlan item3：⌘. 停止生成（macOS 惯例的中止键），仅 Catalyst。
                     #if targetEnvironment(macCatalyst)
-                    .inkIconButtonFace(iconFont: .title2, padding: 6)
                     .keyboardShortcut(".", modifiers: .command)
                     #endif
                 } else {
@@ -1383,7 +1399,14 @@ struct HubChatView: View {
                         Button {
                             sendDraft()
                         } label: {
-                            Image(systemName: "arrow.up.circle.fill").font(.title2)
+                            // 走查④：字形弃 .circle.fill 改裸 arrow.up（与 photo/stop/回底
+                            // 统一「裸字形+面」语言）；面挂 label 内——.disabled 的 isEnabled
+                            // 环境传播到面，禁用态显式 onControlFaceMuted+0.4（走查⑤：
+                            // .plain 不保证系统淡出，小钮可辨识度自担）。
+                            Image(systemName: "arrow.up").font(.title2)
+                            #if targetEnvironment(macCatalyst)
+                                .inkIconButtonFace(iconFont: .title2, diameter: 34)
+                            #endif
                         }
                         .disabled(!draftHasContent)
                         // 2026-11-21 观感整治轮：.plain 灭 bezel（同 photo 键注）；Catalyst 挂
@@ -1398,7 +1421,6 @@ struct HubChatView: View {
                         // 仅 onKeyPress 通道消费）。仅 Catalyst 挂（iPad 硬件键盘无此惯例，
                         // 不引入歧义）。
                         #if targetEnvironment(macCatalyst)
-                        .inkIconButtonFace(iconFont: .title2, padding: 6)
                         .keyboardShortcut(.return, modifiers: .command)
                         #endif
                     }
@@ -1776,14 +1798,17 @@ private struct DraftAttachmentChipsRow: View {
                 ? "图片上传失败，点按重试"
                 : (d.uploading ? "图片上传中" : "已选图片附件，点按查看"))
             .hoverHighlight(cornerRadius: 10)
-            // ✕ 撤除角标（2026-11-21 观感整治轮：同回底钮收口进 inkIconButtonFace——glyph
-            // 弃 .circle.fill 半透明盘改裸 xmark，面实色；offset 布局位移留在调用点）
+            // ✕ 撤除角标（2026-11-21 观感整治轮，走查①②修正：同回底钮收口进
+            // inkIconButtonFace——glyph 弃 .circle.fill 半透明盘改裸 xmark，面实色方帧
+            // 正圆（diameter 14≈旧 .circle.fill 足迹），.plain 灭 automatic bezel（同回底钮注）；
+            // offset 布局位移留在调用点）
             Button {
                 onRemove(d.id)
             } label: {
                 Image(systemName: "xmark")
-                    .inkIconButtonFace(iconFont: .subheadline, padding: 0)
+                    .inkIconButtonFace(iconFont: .subheadline, diameter: 14)
             }
+            .buttonStyle(.plain)
             .offset(x: 6, y: -6)
             .accessibilityLabel("移除该图片")
         }

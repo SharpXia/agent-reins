@@ -3713,8 +3713,12 @@ private struct PagedChoiceGrid<Item, ID: Hashable, Card: View>: View {
 /// wp-7 可选增强：流式行 typewriter 渐进揭示（grokbot 逐字体感）。
 ///
 /// 数据侧 2s 合并大块到达（bridge 2s 窗，delta-coalesce DEFAULT_COALESCE_WINDOW_MS=2_000），
-/// 渲染侧从「已见前缀」向新内容逐字放出：步长 = max(8, 积压/12) @ 16ms——慢流 ≈500 字/秒
-/// 打字感，大块积压 ~12 步（≈200ms）内追平，积压不跨下一块。
+/// 渲染侧从「已见前缀」向新内容逐字放出，双档步长 @ 16ms（2026-11-21 走查②与桌面
+/// desktopui/ConversationScreen.kt typewriterRevealStep 双端对锁，单端改值必须双端同步）：
+/// - 常规档 max(8, 积压/12)：慢流 ≈500 字/秒打字感，大块积压 ~12 步（≈200ms）内追平，积压不跨下一块；
+/// - 洪泛档 积压/3（积压>8192 字）：特大块（桥合并缓冲硬帽 256KiB 量级）走几何档需 ~90 tick、
+///   每 tick 对已揭示前缀整体重解析累计 ~45×积压，主线程掉帧；洪泛档 ~9 tick 追平、累计
+///   ~2×积压——此量级逐字观感本已不可信，快速追平无体感损失。
 ///
 /// 语义边界：
 /// - 挂载首帧贴齐现有内容（快照行/滚动往返物化不重打），仅本行存活期间的 append 逐字；
@@ -3730,6 +3734,13 @@ private struct StreamingTypewriter: View {
     @State private var lastSeen = ""
 
     private static let tickNanos: UInt64 = 16_000_000
+    /// 洪泛档阈值（字符，> 阈值转洪泛档；与桌面 TYPEWRITER_FLOOD_BACKLOG_CHARS 同值对锁）。
+    private static let floodBacklogChars = 8_192
+
+    /// 双档步长（与桌面 typewriterRevealStep 同表；回归值表锁在桌面 StreamingTypewriterPacingTest）。
+    private static func revealStep(_ backlog: Int) -> Int {
+        backlog > floodBacklogChars ? backlog / 3 : max(8, backlog / 12)
+    }
 
     var body: some View {
         // streaming=true：typewriter 逐字前缀行跳过 JSON 卡嗅探（仅 final 嗅探，对位桌面
@@ -3756,7 +3767,7 @@ private struct StreamingTypewriter: View {
                 var shown = min(progress, target)
                 revealedCount = shown
                 while shown < target && !Task.isCancelled {
-                    shown = min(target, shown + max(8, (target - shown) / 12))
+                    shown = min(target, shown + Self.revealStep(target - shown))
                     revealedCount = shown
                     try? await Task.sleep(nanoseconds: Self.tickNanos)
                 }

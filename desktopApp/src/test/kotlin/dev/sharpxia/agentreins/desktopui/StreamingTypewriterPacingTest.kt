@@ -8,9 +8,10 @@ import kotlin.test.assertTrue
  * 2026-11-21 流式单行归一轮：打字机步进纯函数单测（:desktopApp:test 锁行为不只锁存取——
  * StreamingRowPresentationTest/TimelineScrollTest 纯函数回归锚同纪律）。
  *
- * 桌面↔iOS parity 契约：iOS 侧 HubViews.swift StreamingTypewriter 步长
- * `max(8, (target - shown) / 12)` @ 16ms——本表锁 desktopui.typewriterRevealStep 同参数；
- * iOS 无单测 target，桌面回归锚兼作两端行为契约不漂移（单端改值须双端同步）。
+ * 桌面↔iOS parity 契约：iOS 侧 HubViews.swift StreamingTypewriter `revealStep` 双档 @ 16ms
+ * ——本表锁 desktopui.typewriterRevealStep 同参数；iOS 无单测 target，桌面回归锚兼作两端
+ * 行为契约不漂移（单端改值须双端同步）。2026-11-21 走查②双端同扩洪泛档（积压>8192 转
+ * 积压/3：特大块几何档累计重解析 ~45×积压字符掉帧，洪泛档 ~5 tick 累计 ~2×积压）。
  */
 class StreamingTypewriterPacingTest {
 
@@ -57,5 +58,38 @@ class StreamingTypewriterPacingTest {
         // 上界 60 防步进公式被改成更慢档（更快的 /6、/12→/24 由①②值表另锁）。
         assertTrue(steps in 40..60, "收敛步数 $steps 越界（几何 ~38 + 尾段 12 = 50 量级）")
         assertEquals(0, target - shown)
+    }
+
+    // ── ④ 洪泛档（2026-11-21 走查②）：积压 >8192 转 积压/3 快速追平，特大块不逐字拖帧 ──
+
+    @Test
+    fun floodTierActivatesAboveThreshold() {
+        // 阈值边界：8192 本身仍常规档（> 才洪泛），8193 起洪泛
+        assertEquals(682, typewriterRevealStep(8192))   // 8192/12=682
+        assertEquals(2731, typewriterRevealStep(8193))  // 8193/3=2731
+        // 桥合并缓冲硬帽量级（256KiB）：步长比例档，不再是几何档的 backlog/12
+        assertEquals(65536 / 3, typewriterRevealStep(65536))
+        assertEquals(262144 / 3, typewriterRevealStep(262144))
+    }
+
+    @Test
+    fun floodBacklogConvergesBoundedTicks() {
+        // 洪泛相位 ~2/3 递减：256KiB → 8.2k 约 7 tick；余量 ≤8192 回常规档（既有最坏情形封顶）
+        var shown = 0
+        val target = 262144
+        var floodTicks = 0
+        while (target - shown > TYPEWRITER_FLOOD_BACKLOG_CHARS) {
+            shown = minOf(target, shown + typewriterRevealStep(target - shown))
+            floodTicks++
+            assertTrue(floodTicks < 20, "洪泛相位 $floodTicks tick 未收口（~9 tick 量级）")
+        }
+        // 全程（洪泛 + 常规尾段）以有界 tick 收敛：洪泛 ~9 + 常规几何 ~49 + 恒 8 尾段 12 ≈ 70
+        var total = floodTicks
+        while (shown < target) {
+            shown = minOf(target, shown + typewriterRevealStep(target - shown))
+            total++
+            assertTrue(total < 120, "$total tick 未收敛")
+        }
+        assertEquals(target, shown)
     }
 }

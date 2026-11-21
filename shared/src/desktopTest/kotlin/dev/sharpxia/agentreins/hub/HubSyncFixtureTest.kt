@@ -31,7 +31,10 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** P2 同步层 fixture 测试（契约 v1.1）：①四帧判别解码 ②快照覆盖投影 ③事件投影（conversationId 路由 + 映射学习）④入口幂等/水位。 */
+/** P2 同步层 fixture 测试（契约 v1.1）：①四帧判别解码 ②快照覆盖投影 ③事件投影（conversationId 路由 + 映射学习）④入口幂等/水位。
+ *  回归任务实名 **:shared:desktopTest**（2026-11-21 流式单行归一轮走查①纠名）：本文件在 shared
+ *  模块 desktopTest 源集——composeApp 无测试源集，:composeApp:desktopTest 任务图不含任何测试
+ *  编译/执行（dry-run 实证），声明门禁清单必须写 :shared:desktopTest，勿以 composeApp 域名代之。 */
 class HubSyncFixtureTest {
 
     private fun newDb(): HubDatabase {

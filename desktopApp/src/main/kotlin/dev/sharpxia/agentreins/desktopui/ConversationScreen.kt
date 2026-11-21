@@ -1268,13 +1268,24 @@ internal fun streamingRowPresentation(
 internal fun assistantPlaceholderText(thinkingNow: Boolean, agentLabel: String): String =
     (if (thinkingNow) "正在思考…" else "$agentLabel 正在处理中…") + "▌"
 
+/** 洪泛档阈值（字符，> 阈值转洪泛档）：2s 合并窗典型几百字，8192 已是洪泛输出（桥合并缓冲
+ *  硬帽 256KiB 量级）——此量级逐字档追平成本失衡，快速追平无体感损失（与 iOS StreamingTypewriter
+ *  floodBacklogChars 双端对锁）。 */
+internal const val TYPEWRITER_FLOOD_BACKLOG_CHARS = 8192
+
 /**
- * 打字机步进（2026-11-21 流式单行归一轮，:desktopApp:test 回归锚）：步长 = max(8, 积压/12)
- * ——慢流恒 8 字/16ms（≈500 字/秒打字感下限），大块积压 ~12 步（≈200ms）内追平、积压不跨
- * 下一块。与 iOS HubViews.swift StreamingTypewriter 同参数（16ms tick + 本函数）双端注释对锁
- * ——单端改值必须双端同步，桌面回归锚兼作两端行为契约不漂移（StreamingRowPresentationTest 同纪律）。
+ * 打字机步进（2026-11-21 流式单行归一轮；同日走查②扩洪泛档，:desktopApp:test 回归锚）：
+ * - 常规档 max(8, 积压/12)：慢流恒 8 字/16ms（≈500 字/秒打字感下限），大块积压 ~12 步（≈200ms）
+ *   内追平、积压不跨下一块；
+ * - 洪泛档 积压/3（积压>8192 字）：特大块若走几何档需 ~90 tick、且揭示循环每 tick 对已揭示前缀
+ *   整体重嗅探+重解析（MarkdownText remember(content)），累计解析 ~45×积压字符，主线程掉帧；
+ *   洪泛档 256KiB 量级 ~9 tick 追平、累计 ~2×积压（阈值邻域 1 tick）。>8k 字积压下逐字观感
+ *   本已不可信（恒 8 档需 16s+），快速追平无体感损失。
+ * 与 iOS HubViews.swift StreamingTypewriter（revealStep 双档 + 16ms tick）双端注释对锁——单端
+ * 改值必须双端同步，桌面回归锚兼作两端行为契约不漂移（StreamingRowPresentationTest 同纪律）。
  */
-internal fun typewriterRevealStep(backlog: Int): Int = maxOf(8, backlog / 12)
+internal fun typewriterRevealStep(backlog: Int): Int =
+    if (backlog > TYPEWRITER_FLOOD_BACKLOG_CHARS) backlog / 3 else maxOf(8, backlog / 12)
 
 /** 打字机 tick 周期（毫秒，iOS StreamingTypewriter.tickNanos = 16_000_000 对应值）。 */
 private const val TYPEWRITER_TICK_MS = 16L

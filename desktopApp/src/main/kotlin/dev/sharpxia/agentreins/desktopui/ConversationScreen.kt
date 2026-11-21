@@ -1268,6 +1268,17 @@ internal fun streamingRowPresentation(
 internal fun assistantPlaceholderText(thinkingNow: Boolean, agentLabel: String): String =
     (if (thinkingNow) "正在思考…" else "$agentLabel 正在处理中…") + "▌"
 
+/**
+ * 打字机步进（2026-11-21 流式单行归一轮，:desktopApp:test 回归锚）：步长 = max(8, 积压/12)
+ * ——慢流恒 8 字/16ms（≈500 字/秒打字感下限），大块积压 ~12 步（≈200ms）内追平、积压不跨
+ * 下一块。与 iOS HubViews.swift StreamingTypewriter 同参数（16ms tick + 本函数）双端注释对锁
+ * ——单端改值必须双端同步，桌面回归锚兼作两端行为契约不漂移（StreamingRowPresentationTest 同纪律）。
+ */
+internal fun typewriterRevealStep(backlog: Int): Int = maxOf(8, backlog / 12)
+
+/** 打字机 tick 周期（毫秒，iOS StreamingTypewriter.tickNanos = 16_000_000 对应值）。 */
+private const val TYPEWRITER_TICK_MS = 16L
+
 @Composable
 private fun AssistantMessageRow(
     m: UiMessage,
@@ -1338,11 +1349,21 @@ private fun AssistantMessageRow(
                 // wp-18：助手行走轻量 Markdown 渲染器（标题/列表/代码块/粗斜体，流式行尾随
                 // ▌ 光标）；无 Markdown 语素或解析异常时内置回退 wp-6 纯文本路径
                 // 光标随 presentation 门控（=Progressive）：僵尸流式行无 ▌（2026-11-19 清账①）。
-                else -> MarkdownText(
-                    content = m.content,
-                    showCursor = presentation == StreamingRowPresentation.Progressive,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                )
+                // 2026-11-21 流式单行归一轮：Progressive 改挂打字机包装（挂载贴齐/前缀增长逐字/
+                // 跳变贴齐，与 iOS StreamingTypewriter 同参数）——投影层行键归一为单行原地追加后，
+                // 桌面增量块不再整块瞬显；final/failed/僵尸行仍整段 Markdown 渲染。
+                else -> if (presentation == StreamingRowPresentation.Progressive) {
+                    StreamingTypewriterText(
+                        content = m.content,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
+                } else {
+                    MarkdownText(
+                        content = m.content,
+                        showCursor = false, // Progressive 已上走打字机分支；此处恒非进行中行
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
+                }
             }
         }
         Row(
@@ -1358,6 +1379,58 @@ private fun AssistantMessageRow(
         }
         FailedReasonLine(m)
     }
+}
+
+/**
+ * 2026-11-21 流式单行归一轮：桌面打字机包装（iOS HubViews.swift StreamingTypewriter 镜像）。
+ * 投影层行键归一为 dstream:<runId> 单行原地追加后，delta 块（桥 2s 合并窗）经本组件从
+ * 「已见前缀」向新内容逐字放出，消除整块瞬显。
+ *
+ * 语义边界（与 iOS 逐条对齐）：
+ * - 挂载首帧贴齐现有内容（快照行/列表滚动往返物化不重打；列表 key=messageId 行身份稳定，
+ *   本组合项 @State 跨重组存活，仅挂载/重挂载时贴齐），仅存活期间的 append 逐字；
+ * - 改写跳变（replace=true 语义、内容收缩、非前缀续写）不逐字、直接贴齐；
+ * - 行收敛 final 时外层分支切回整段 MarkdownText（本组合项离场），剩余积压一次性补齐。
+ *
+ * 步长 = typewriterRevealStep(积压) @ TYPEWRITER_TICK_MS——与 iOS 同参数对锁（见纯函数注）。
+ * 揭示前缀喂 MarkdownText（showCursor=true，▌ 光标随前缀移动）；MarkdownText 本体零改动。
+ */
+@Composable
+private fun StreamingTypewriterText(content: String, modifier: Modifier = Modifier) {
+    // 已揭示字符数；null = 未初始化（挂载即贴齐现内容，不重打）。
+    var revealedCount by remember { mutableStateOf<Int?>(null) }
+    // 上一帧内容（区分 append 前缀增长与改写跳变）。
+    var lastSeen by remember { mutableStateOf("") }
+    LaunchedEffect(content) {
+        val target = content.length
+        val progress = revealedCount
+        if (progress == null) {
+            // 挂载首帧贴齐（iOS onAppear 同语义：首跑即初始化，竞态兜底并入）
+            revealedCount = target
+            lastSeen = content
+            return@LaunchedEffect
+        }
+        if (!content.startsWith(lastSeen)) {
+            // 非前缀跳变（改写/收缩）：直接贴齐
+            revealedCount = target
+            lastSeen = content
+            return@LaunchedEffect
+        }
+        lastSeen = content
+        var shown = progress.coerceAtMost(target)
+        revealedCount = shown
+        while (shown < target) {
+            shown = (shown + typewriterRevealStep(target - shown)).coerceAtMost(target)
+            revealedCount = shown
+            delay(TYPEWRITER_TICK_MS) // 新内容到达经 LaunchedEffect(content) 重启，取消本循环（iOS task(id:) 同语义）
+        }
+    }
+    val revealed = (revealedCount ?: content.length).coerceIn(0, content.length)
+    MarkdownText(
+        content = content.substring(0, revealed),
+        showCursor = true,
+        modifier = modifier,
+    )
 }
 
 /** wp-8③：失败原因行（六值脱敏闭集 → 人读文案；未分类失败 reason=NULL 不虚构文案）。 */

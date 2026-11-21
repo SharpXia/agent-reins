@@ -13,7 +13,18 @@ import kotlin.concurrent.Volatile
 // ── 事件载荷 DTO（hub-wss-frames-v1.schema.json $defs/Data* 镜像，v1.1；宽松解析，未知字段忽略） ──
 
 @Serializable
-private data class DataMessageDelta(val messageId: String, val deltaText: String, val replace: Boolean? = null)
+private data class DataMessageDelta(
+    val messageId: String,
+    val deltaText: String,
+    val replace: Boolean? = null,
+    /**
+     * 2026-11-21 流式单行归一轮 additive（开放对象 additive 键，宽松解析纪律；桥侧两实现现网
+     * 均发送：openclaw normalize/index.ts 恒 dstream:<runId>、hermes normalize.ts 逐窗发送）：
+     * true = 本帧 messageId 是 run 域合成锚（无锚 chat.delta 的合并产物），投影行键可按信封
+     * runId 归一（见 onMessageDelta）。缺省/缺信封 runId = 旧行为（按 d.messageId 建行）。
+     */
+    val runScoped: Boolean? = null,
+)
 
 /** v1.1：openclawId/sessionId 已撤（App 面禁出 openclaw 锚字段，02 R7）。
  *  2026-11-06 真机修复：sourceMessageSeq 契约必填（hub-wss-frames-v1 DataMessageCreated required），
@@ -348,7 +359,16 @@ class DefaultEventProjector(
 
     private fun onMessageDelta(envelope: EventEnvelope) {
         val d = decode(DataMessageDelta.serializer(), envelope.data) ?: return skip()
-        val row = db.hubQueries.selectMessage(d.messageId).executeAsOneOrNull()
+        // 行键归一（2026-11-21 流式单行归一轮）：runScoped=true 且信封 runId 在场时，行键统一取
+        // dstream:<envelope.runId>——run 域单行不变量：同一 run 流式期间投影库至多一条 streaming
+        // 行，增量数据原地追加。OpenClaw 无锚路径 messageId 现值即 dstream:<runId>，归一后同串
+        // 零行为差；Hermes 合并器每 2s 窗给异锚 messageId（dstream:<admissionId>:<seq> 哈希），
+        // 归一前每窗新建一行（多行并存、created 才合成一条），归一后各窗收口为单行追加。
+        // 缺 runId（退化形态，如 dstream:unknown:<seq>）回退 d.messageId = 旧行为。
+        val rowKey =
+            if (d.runScoped == true && !envelope.runId.isNullOrEmpty()) "dstream:" + envelope.runId
+            else d.messageId
+        val row = db.hubQueries.selectMessage(rowKey).executeAsOneOrNull()
         if (row == null) {
             // 缺行建 streaming 占位行（v4，wp-5①）：wp-1 探针定档「无锚」——本宿主 Gateway 的
             // chat.delta 不带 __openclaw 信封，合并产物 messageId = dstream:<runId>（run 域合成
@@ -361,11 +381,12 @@ class DefaultEventProjector(
             val conv = db.hubQueries.selectConversation(convId).executeAsOneOrNull() ?: return skip()
             if (conv.hasActiveRun == 0L) return skip()
             db.hubQueries.upsertMessage(
-                messageId = d.messageId,
+                messageId = rowKey,
                 conversationId = convId,
                 // 占位行 seq 取当前权威 lastSeq+1（显示序压到末尾；服务端消息 seq 口径不被污染——
                 // 不推进 lastSeq。禁止 MAX(messages.seq)+1：乐观用户行 seq=Long.MAX_VALUE 会溢出）。
-                // 同会话多占位行可能并列——异锚/终态清除下为瞬态，可接受。
+                // run 域单行不变量：行键按 run 归一后，同 run 各窗 delta 命中本行原地追加；
+                // 仅退化形态（runScoped 帧缺信封 runId）回退旧行为、多占位行可能并列（终态清除兜底）。
                 seq = conv.lastSeq + 1L,
                 role = "assistant",
                 content = if (d.replace == true) d.deltaText else "",
@@ -375,17 +396,17 @@ class DefaultEventProjector(
                 commandId = null,
                 idempotencyKey = null,
                 ts = envelope.ts,
-                attachments = null, // 流式占位行无附件语义；权威 created 行落定时同键覆盖
+                attachments = null, // 流式占位行无附件语义；权威 created 行落定时由终态清除收敛为单条 final
             )
             if (d.replace != true) {
-                db.hubQueries.appendMessageContent(d.deltaText, d.messageId)
+                db.hubQueries.appendMessageContent(d.deltaText, rowKey)
             }
             return
         }
         if (d.replace == true) {
-            db.hubQueries.replaceMessageContent(d.deltaText, d.messageId)
+            db.hubQueries.replaceMessageContent(d.deltaText, rowKey)
         } else {
-            db.hubQueries.appendMessageContent(d.deltaText, d.messageId)
+            db.hubQueries.appendMessageContent(d.deltaText, rowKey)
         }
     }
 

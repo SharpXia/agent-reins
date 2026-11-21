@@ -385,6 +385,107 @@ class HubSyncFixtureTest {
         assertNull(conv.activeRunId)
     }
 
+    // ── ⑤b 2026-11-21 流式单行归一轮：Hermes 异锚三窗收口单行 + 退化形态回退锁 ──
+    //
+    // Hermes 路径实况（adapter/hermes/normalize.ts + relay/delta-coalesce.ts）：合并器每 2s 窗
+    // 产出异锚 messageId（hash(sessionKey,'dstream:<admissionId>:<seq>') 26hex），data 恒带
+    // runScoped:true、信封恒带 runId——归一前每窗新建一条 streaming 行（多行并存、created 才
+    // 合成一条），归一后各窗收口为 dstream:<envelope.runId> 单行原地追加。
+
+    @Test
+    fun hermesAnchoredDeltasConvergeToSingleStreamingRow() = runTest {
+        val db = newDb()
+        val p = DefaultEventProjector(db)
+        p.applySnapshot(fixtureSnapshot())
+        db.hubQueries.upsertConvKey(GW, SK, CONV)
+        var n = 400
+        fun nextId(): String = "01JAAA00000000000000000${(++n).toString().padStart(4, '0')}"
+
+        val runId = "run-hermes"
+        val windowAnchors = listOf(
+            "01JHERMES000000000000000001",
+            "01JHERMES000000000000000002",
+            "01JHERMES000000000000000003",
+        )
+        fun hermesDelta(text: String, anchor: String) = buildJsonObject {
+            put("messageId", anchor); put("deltaText", text); put("seq", 1L); put("runScoped", true)
+        }
+
+        p.applyEvent(ev(nextId(), EventEnvelope.RUN_STARTED, data = buildJsonObject {
+            put("runId", runId); put("agentId", "main")
+        }, runId = runId))
+
+        // 三窗异锚 delta：归一后全部命中 dstream:<runId> 单行原地追加
+        p.applyEvent(ev(nextId(), EventEnvelope.MESSAGE_DELTA, data = hermesDelta("Hel", windowAnchors[0]), runId = runId))
+        p.applyEvent(ev(nextId(), EventEnvelope.MESSAGE_DELTA, data = hermesDelta("lo ", windowAnchors[1]), runId = runId))
+        p.applyEvent(ev(nextId(), EventEnvelope.MESSAGE_DELTA, data = hermesDelta("world", windowAnchors[2]), runId = runId))
+
+        // 全程仅一条 streaming 行：键 = dstream:<envelope.runId>，三窗异锚均不落行，内容顺序拼接
+        val streaming = db.hubQueries.selectMessage("dstream:$runId").executeAsOneOrNull()
+        assertNotNull(streaming)
+        assertEquals(CONV, streaming.conversationId)
+        assertEquals("assistant", streaming.role)
+        assertEquals("streaming", streaming.state)
+        assertEquals("Hello world", streaming.content)
+        assertEquals(3L, streaming.seq) // 快照 lastSeq=2 → 占位行 seq=3 压尾显示
+        assertEquals(1, db.hubQueries.selectMessages(CONV).executeAsList().count { it.state == "streaming" })
+        windowAnchors.forEach { anchor ->
+            assertNull(db.hubQueries.selectMessage(anchor).executeAsOneOrNull(), anchor)
+        }
+
+        // created 落定 → 异锚占位行清除、单行 final（无拆行无重复气泡）
+        p.applyEvent(ev(nextId(), EventEnvelope.MESSAGE_CREATED, data = buildJsonObject {
+            put("messageId", "01JMSG00000000000000000077")
+            put("role", "assistant"); put("content", "Hello world"); put("sourceMessageSeq", 3L)
+        }, runId = runId))
+        assertNull(db.hubQueries.selectMessage("dstream:$runId").executeAsOneOrNull())
+        assertEquals("final", db.hubQueries.selectMessage("01JMSG00000000000000000077").executeAsOne().state)
+        assertEquals(
+            1,
+            db.hubQueries.selectMessages(CONV).executeAsList().count { it.role == "assistant" && it.seq == 3L },
+        )
+
+        // run.completed 终态：无残留 streaming 行（占位行已由 created 清除，此处为兜底断言）
+        p.applyEvent(ev(nextId(), EventEnvelope.RUN_COMPLETED, data = buildJsonObject {
+            put("runId", runId); put("stopReason", "end_turn")
+        }, runId = runId))
+        assertEquals(0, db.hubQueries.selectMessages(CONV).executeAsList().count { it.state == "streaming" })
+    }
+
+    // 退化形态回归锁（评审 requiredChanges②）：runScoped=true 但信封缺 runId
+    //（hermes dstream:unknown:<seq> 形态）→ 回退按 d.messageId 建行 = 旧行为，
+    // 防后续重构静默破坏回退路径。
+
+    @Test
+    fun runScopedDeltaWithoutEnvelopeRunIdFallsBackToMessageId() = runTest {
+        val db = newDb()
+        val p = DefaultEventProjector(db)
+        p.applySnapshot(fixtureSnapshot())
+        db.hubQueries.upsertConvKey(GW, SK, CONV)
+        var n = 500
+        fun nextId(): String = "01JAAA00000000000000000${(++n).toString().padStart(4, '0')}"
+
+        p.applyEvent(ev(nextId(), EventEnvelope.RUN_STARTED, data = buildJsonObject {
+            put("runId", "run-deg"); put("agentId", "main")
+        }, runId = "run-deg"))
+
+        // 信封无 runId：归一条件不满足 → 按 d.messageId 建行（旧行为）
+        val degradedAnchor = "dstream:unknown:17"
+        p.applyEvent(ev(nextId(), EventEnvelope.MESSAGE_DELTA, data = buildJsonObject {
+            put("messageId", degradedAnchor); put("deltaText", "de"); put("seq", 1L); put("runScoped", true)
+        }))
+        val row = db.hubQueries.selectMessage(degradedAnchor).executeAsOneOrNull()
+        assertNotNull(row)
+        assertEquals("de", row.content)
+        assertNull(db.hubQueries.selectMessage("dstream:run-deg").executeAsOneOrNull())
+
+        // 同锚第二帧：回退路径下追加语义不变
+        p.applyEvent(ev(nextId(), EventEnvelope.MESSAGE_DELTA, data = buildJsonObject {
+            put("messageId", degradedAnchor); put("deltaText", "graded"); put("seq", 2L); put("runScoped", true)
+        }))
+        assertEquals("degraded", db.hubQueries.selectMessage(degradedAnchor).executeAsOne().content)
+    }
+
     // ── ⑥ v4 wp-5②：事件路径 message.failed 的 reason 落库（此前只翻 state 丢 reason） ──
 
     @Test

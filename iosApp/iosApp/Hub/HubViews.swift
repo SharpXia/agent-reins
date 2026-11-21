@@ -1391,6 +1391,17 @@ struct HubChatView: View {
                 //（「雾面圆钮」真身之一）；iOS 无显式 style→plain 零面变化（走查核）。
                 .buttonStyle(.plain)
                 .accessibilityLabel("添加图片（最多 \(HubStore.maxDraftAttachments) 张）")
+                // 2026-11-21 会话形象轮 CI 实证（beta-0.5.24 Release 归档 :1394 超时）：三闭包
+                // 构造提为局部 let 拆散 TextField 长链的 Release 类型检查负担（行为等价）。
+                let keyHandlers = ComposerKeyHandlers(
+                    isFocused: composerFocused,
+                    panelVisible: !slashSuggestions.isEmpty,
+                    draftTextIsBlank: draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                    draftIsMultiline: draftText.contains("\n"),
+                    onSend: { sendDraft() },
+                    onMoveHighlight: { slashMoveSelection($0) },
+                    onTabComplete: { slashHandleTab() },
+                )
                 TextField("发消息…", text: draftBinding, axis: .vertical)
                     .focused($composerFocused) // 批次4：输入聚焦下视（角色 gaze 后三路之一）
                     // 2026-11-21 回车语义轮：Enter 生效门=聚焦+IME（面板可见性下沉为 Enter
@@ -1398,15 +1409,7 @@ struct HubChatView: View {
                     // ↑↓/Tab 另挂三重门（聚焦+IME+面板可见）。分流序全表见 ComposerKeyHandlers
                     // 头注释；shift/⌘/Ctrl 读 press.modifiers 键值实时值，面板/空白/多行是
                     // 渲染期快照 flag（HubStore @Observable 草稿变化即重渲染）。
-                    .modifier(ComposerKeyHandlers(
-                        isFocused: composerFocused,
-                        panelVisible: !slashSuggestions.isEmpty,
-                        draftTextIsBlank: draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                        draftIsMultiline: draftText.contains("\n"),
-                        onSend: { sendDraft() },
-                        onMoveHighlight: { slashMoveSelection($0) },
-                        onTabComplete: { slashHandleTab() },
-                    ))
+                    .modifier(keyHandlers)
                     .lineLimit(1...4)
                     .padding(8)
                     .background(RoundedRectangle(cornerRadius: 18).fill(ink.surfaceTertiary))

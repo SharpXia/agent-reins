@@ -19,6 +19,11 @@ import composeApp // UiConversation（KMP 桥数据类；HubViews.swift 同 impo
 
 struct ConversationAvatarSheet: View {
     let conversation: UiConversation
+    /// 显式 init：private @State/@Environment 存储属性会把隐式 memberwise init 压成 private
+    ///（beta-0.5.24 CI Release 归档实证 :330 inaccessible），调用方在 HubViews/MacSplitRoot。
+    init(conversation: UiConversation) {
+        self.conversation = conversation
+    }
     @State private var hub = HubStore.shared
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.inkColors) private var ink

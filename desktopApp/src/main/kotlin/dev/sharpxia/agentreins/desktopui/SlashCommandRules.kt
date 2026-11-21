@@ -11,17 +11,20 @@ import dev.sharpxia.agentreins.hub.projection.CommandListItem
  *   共用一张无歧义优先级表，首个命中生效）：
  *   0. IME 组合中（composition != null）→ 全键让行默认（调用侧门，纯函数层不涉）；
  *   1. Shift+Enter（含 Shift+Cmd/Ctrl）→ Newline 强制换行（Shift 是显式换行意图）；
- *   2. 空白草稿 → Ignored（消费 no-op 不发不换行；先于 ⌘ 判定——空白+⌘Enter 不落默认换行）。
- *      空白判据=纯文本 isNotBlank 不含附件：附件独发（文本空白+附件在场）同样 Ignored——
- *      附件独发走发送键（2026-11-08 拍板）。知情边界差异：Catalyst 发送按钮的 ⌘Return
- *      键盘快捷键语义跟按钮（draftHasContent 含附件），纯附件草稿下快捷键通道仍可触发发送、
- *      桌面同键恒 no-op——双端已标注的边界分叉（HubViews.ComposerKeyHandlers 分流②同注）；
- *   3. Cmd/Ctrl+Enter 非空 → Send（强制发送，天然满足多行 ⌘/Ctrl+Enter；2026-11-21 走查
- *      修复②：Catalyst 分流③补 .control 对齐，此前 Catalyst 只认 ⌘=Ctrl+Enter 多行换行
- *      的分叉已消）；
+ *   2. 真空白草稿（文本空白且无附件）→ Ignored（消费 no-op 不发不换行；先于 ⌘ 判定——
+ *      真空白+⌘Enter 不落默认换行，此序不变）。2026-11-21 债清轮：空白兜底收窄为真空白——
+ *      附件独发（文本空白+附件在场）不再按空白消费；
+ *   3. Cmd/Ctrl+Enter + draftHasContent（文本非空白 或 附件在场）→ Send（强制发送，天然
+ *      满足多行 ⌘/Ctrl+Enter；2026-11-21 走查修复②：Catalyst 分流③补 .control 对齐，此前
+ *      Catalyst 只认 ⌘=Ctrl+Enter 多行换行的分叉已消；同日债清轮：附件独发 ⌘Enter 对齐
+ *      Catalyst——其 ⌘Return 快捷键通道跟发送按钮 draftHasContent 含附件本就可发，桌面
+ *      键盘通道同步跟附件语义，原「桌面键盘恒 no-op」知情差异消除；2026-11-08 拍板的
+ *      空白判据=draftHasContent 含附件本身不动）；
  *   4. 非空 + 面板可见 → Send（原样发送当前输入不走补全；面板可见⇔草稿无换行故必单行）；
- *   5. 非空白单行 → Send；非空白多行 → Newline（裸 Enter 不消费，让 TextField 默认插换行）。
- *   相对旧口径的唯一行为变更 = 多行裸 Enter 从 Send 改 Newline（「单行(尚无换行)才发送」）。
+ *   5. 非空白单行 → Send；非空白多行 → Newline（裸 Enter 不消费，让 TextField 默认插换行）；
+ *      附件独发裸 Enter → Newline（同多行矩阵让 TextField 默认插换行，不误发）。
+ *   相对旧口径的行为变更 = 多行裸 Enter 从 Send 改 Newline（回车语义轮）+ 附件独发 ⌘Enter
+ *   从 Ignored 改 Send、裸 Enter 从 Ignored 改 Newline（债清轮，双端对齐）。
  * - 面板键盘导航（同轮桌面补齐，镜像 iOS HubViews.slashActiveIndex/slashMoveSelection）：
  *   ↑↓ 环绕移动高亮、Tab 补全高亮（无键盘动作即首行）命令+空格；重置口径 = Tab/发送/预填
  *   后显式清空（iOS 只 clamp 不重置——两端口径差异在案）。
@@ -126,24 +129,29 @@ internal enum class EnterKeyBehavior {
 }
 
 /**
- * wp-6 + 2026-11-21 回车语义轮：Enter 键裁决——分流序与头注释优先级表逐支对应（与 Catalyst
- * ComposerKeyHandlers 一张表）。注释序号指向头表分支号；代码求值序与表序等价（②空白兜底
- * 写在末支，因 ③④⑤ 各自带 isNotBlank 前置，空白草稿只能落入末支）。空白判据 = isNotBlank
- *（纯文本，不含附件——附件独发走发送键，ConversationScreen 发送键 enabled 同口径）。
- * [slashPanelVisible] 缺省 false：既有调用点与旧单测（不含面板用例）零破坏。
+ * wp-6 + 2026-11-21 回车语义轮（同日债清轮附件语义对齐）：Enter 键裁决——分流序与头注释
+ * 优先级表逐支对应（与 Catalyst ComposerKeyHandlers 一张表）。注释序号指向头表分支号；
+ * 代码求值序与表序等价（②真空白兜底写在末支，因 ③ 走 draftHasContent、④⑤ 各带 isNotBlank
+ * 前置、附件独发支自带 hasAttachments，真空白草稿只能落入末支）。③ 强发判据 = draftHasContent
+ *（文本 isNotBlank 或有附件，ConversationScreen 发送键 enabled 同口径）；② 兜底判据 = 真空白
+ *（文本空白且无附件）。[slashPanelVisible]/[hasAttachments] 缺省 false：既有调用点与旧单测
+ *（不含面板/附件用例）零破坏。
  */
 internal fun resolveEnterKey(
     isShiftPressed: Boolean,
     isMetaOrCtrlPressed: Boolean,
     draft: String,
     slashPanelVisible: Boolean = false,
+    hasAttachments: Boolean = false,
 ): EnterKeyBehavior = when {
     isShiftPressed -> EnterKeyBehavior.Newline // ① Shift（含 Shift+Cmd/Ctrl）= 显式换行意图
-    isMetaOrCtrlPressed && draft.isNotBlank() -> EnterKeyBehavior.Send // ③ Cmd/Ctrl+Enter 强制发送
+    isMetaOrCtrlPressed && (draft.isNotBlank() || hasAttachments) ->
+        EnterKeyBehavior.Send // ③ Cmd/Ctrl+Enter 强制发送（draftHasContent 含附件——附件独发同发）
     slashPanelVisible && draft.isNotBlank() -> EnterKeyBehavior.Send // ④ 面板可见=原样发送（不走补全）
     !draft.contains('\n') && draft.isNotBlank() -> EnterKeyBehavior.Send // ⑤ 单行裸 Enter=发送
     draft.isNotBlank() -> EnterKeyBehavior.Newline // ⑤ 多行裸 Enter=换行（不消费，TextField 默认插换行）
-    else -> EnterKeyBehavior.Ignored // ② 空白草稿（除 Shift 外的修饰组合——Shift+空白已由①支换行让行）消费不发不换行（先于 ⌘ 判定）
+    hasAttachments -> EnterKeyBehavior.Newline // 附件独发裸 Enter=按多行矩阵换行（不消费不误发）
+    else -> EnterKeyBehavior.Ignored // ② 真空白草稿（除 Shift 外的修饰组合——Shift+空白已由①支换行让行）消费不发不换行（兜底先于 ⌘ 判定）
 }
 
 /**

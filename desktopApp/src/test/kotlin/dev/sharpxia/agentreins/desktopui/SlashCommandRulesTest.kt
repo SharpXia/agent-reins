@@ -140,6 +140,35 @@ class SlashCommandRulesTest {
         assertEquals(EnterKeyBehavior.Ignored, resolveEnterKey(false, true, ""))
     }
 
+    // ── 2026-11-21 债清轮：附件独发语义对齐（⌘Enter 跟 draftHasContent，与 Catalyst 发送
+    //    按钮 ⌘Return 快捷键通道同判据；2026-11-08 拍板的空白判据本身不动）──
+
+    @Test
+    fun cmdEnterSendsAttachmentOnlyDraft() {
+        // 附件独发（文本空白+附件在场）+Cmd = 发送——原「桌面键盘恒 no-op」知情差异消除；
+        // 空白换行串（isNotBlank 为假）同判，draftHasContent 兜住
+        assertEquals(EnterKeyBehavior.Send, resolveEnterKey(false, true, "", hasAttachments = true))
+        assertEquals(EnterKeyBehavior.Send, resolveEnterKey(false, true, "  \n", hasAttachments = true))
+        // 文本+附件并存 Cmd 本就发送（③ 判据扩后的明示回归锚）
+        assertEquals(EnterKeyBehavior.Send, resolveEnterKey(false, true, "你好", hasAttachments = true))
+    }
+
+    @Test
+    fun attachmentOnlyPlainEnterFollowsNewlineMatrix() {
+        // 附件独发裸 Enter = 按多行矩阵换行（不消费让 TextField 默认插换行，不误发——
+        // 附件独发只认 ⌘/Ctrl 强发）；Shift ①支优先照旧
+        assertEquals(EnterKeyBehavior.Newline, resolveEnterKey(false, false, "", hasAttachments = true))
+        assertEquals(EnterKeyBehavior.Newline, resolveEnterKey(false, false, "  \n", hasAttachments = true))
+        assertEquals(EnterKeyBehavior.Newline, resolveEnterKey(true, false, "", hasAttachments = true))
+    }
+
+    @Test
+    fun trulyBlankDraftWithoutAttachmentsNeverSends() {
+        // 真空白（文本空白且无附件）判据不变：裸 Enter/⌘Enter 均兜底消费不发送（先于 ⌘ 判定）
+        assertEquals(EnterKeyBehavior.Ignored, resolveEnterKey(false, false, "", hasAttachments = false))
+        assertEquals(EnterKeyBehavior.Ignored, resolveEnterKey(false, true, "", hasAttachments = false))
+    }
+
     // ── 2026-11-21 面板键位轮：高亮 clamp / 环绕（镜像 iOS slashActiveIndex/slashMoveSelection）──
 
     @Test

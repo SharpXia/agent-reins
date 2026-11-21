@@ -93,6 +93,7 @@ import dev.sharpxia.agentreins.hub.UiMessage
 import dev.sharpxia.agentreins.hub.UiWorkActivity
 import dev.sharpxia.agentreins.hub.projection.CommandsList
 import java.io.File
+import java.text.BreakIterator
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
@@ -254,10 +255,11 @@ internal fun thinkCommand(modelsList: ModelsList?): SlashCommand? {
  *   "/" 草稿触发拉取、5 分钟 TTL 内存缓存、失败回落静态六（见 SlashCommandsCache）；
  * - Enter 键位矩阵（2026-11-21 回车语义轮，裁决纯函数 resolveEnterKey 全表，与 Catalyst
  *   ComposerKeyHandlers 一张表）：IME 组合中全键让行（组合期 Enter 属提交候选词）；
- *   Shift+Enter 任何情况强制换行；空白草稿消费不发送；Cmd/Ctrl+Enter 强制发送（多行含）；
- *   面板可见 Enter=原样发送当前输入（不走补全）；单行裸 Enter 发送、多行裸 Enter 换行
- *  （不再发送）。↑↓ 移面板高亮（环绕）、Tab 补全高亮（无键盘动作即首行）命令+空格
- *  （面板可见时消费，不可见透传）；
+ *   Shift+Enter 任何情况强制换行；真空白草稿消费不发送；Cmd/Ctrl+Enter 跟 draftHasContent
+ *   强制发送（多行含；附件独发含——同日债清轮对齐 Catalyst ⌘Return 快捷键通道，原「桌面
+ *   键盘恒 no-op」知情差异消除）；面板可见 Enter=原样发送当前输入（不走补全）；单行裸
+ *   Enter 发送、多行裸 Enter 与附件独发裸 Enter 换行（不再发送）。↑↓ 移面板高亮（环绕）、
+ *   Tab 补全高亮（无键盘动作即首行）命令+空格（面板可见时消费，不可见透传）；
  * - 活跃 run 期间「运行中发送将排队」提示（iOS wp-14 同文案同语义：chat.send 不透传
  *   queueMode，发送照常、按 Gateway 默认队列语义排队；发送键位仍是 wp-8② Stop）。
  * 判定纯函数在 TimelineScroll.kt（:desktopApp:test 回归锚），composer 规则纯函数在
@@ -1015,8 +1017,9 @@ internal fun ConversationScreen(
                                 //（与 Catalyst ComposerKeyHandlers 一张表）：
                                 //   IME 组合中（composition != null）→ 全键让行默认（组合期
                                 //   Enter 属提交候选词、↑↓ 属候选词导航、Tab 属候选选定）；
-                                //   Enter → resolveEnterKey（Shift 换行 / 空白消费 / Cmd 强发 /
-                                //   面板可见原样发送 / 单行发送、多行换行）；
+                                //   Enter → resolveEnterKey（Shift 换行 / 真空白消费 / Cmd 跟
+                                //   draftHasContent 强发含附件 / 面板可见原样发送 / 单行发送、
+                                //   多行与附件独发换行）；
                                 //   ↑↓/Tab → 仅面板可见时消费（移高亮 / 补全高亮+空格），
                                 //   面板不可见透传（Tab 照常走焦点遍历等系统默认）。
                                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
@@ -1035,6 +1038,7 @@ internal fun ConversationScreen(
                                                 event.isCtrlPressed || event.isMetaPressed,
                                             draft = input.text,
                                             slashPanelVisible = slashSuggestions.isNotEmpty(),
+                                            hasAttachments = draftAttachments.isNotEmpty(),
                                         )
                                     ) {
                                         EnterKeyBehavior.Newline -> false
@@ -1105,10 +1109,10 @@ internal fun ConversationScreen(
                         }
                         // 空正文防线（发送侧）：空白草稿禁发（isNotBlank = 去空白后非空），点击再兜一层。
                         // v1.2.0 多模态：纯附件草稿（文本空、附件非空）放行——契约允许空文本消息，
-                        // sendDraft 内再兜「两者皆空禁发」。（Enter 空白判据 = 纯文本 isNotBlank
-                        // 不含附件——附件独发走发送键；知情边界：Catalyst ⌘Return 快捷键通道挂
-                        // 发送按钮（draftHasContent 含附件）对纯附件草稿仍可发送，桌面键盘恒
-                        // no-op——双端优先级表已标注的边界分叉，非桌面缺陷。）
+                        // sendDraft 内再兜「两者皆空禁发」。（Enter 判据 2026-11-21 债清对齐：⌘/Ctrl
+                        // 强发与发送键同判据 draftHasContent 含附件——附件独发 ⌘Enter 直接发送，
+                        // 原「桌面键盘恒 no-op」知情差异消除；裸 Enter 附件独发按多行矩阵换行、
+                        // 真空白兜底消费先于 ⌘ 判定均不变。）
                         Button(
                             onClick = { sendDraft() },
                             enabled = input.text.isNotBlank() || draftAttachments.isNotEmpty(),
@@ -1268,44 +1272,53 @@ internal fun streamingRowPresentation(
 internal fun assistantPlaceholderText(thinkingNow: Boolean, agentLabel: String): String =
     (if (thinkingNow) "正在思考…" else "$agentLabel 正在处理中…") + "▌"
 
-/** 洪泛档阈值（字符：桌面按 UTF-16 码元/iOS 按字素计量，> 阈值转洪泛档）：2s 合并窗典型几百字，
+/** 洪泛档阈值（单位=字素 Cluster：积压 >8192 簇转洪泛档）：2s 合并窗典型几百字，
  *  8192 已是洪泛输出（桥合并缓冲硬帽 256KiB 量级）——此量级逐字档追平成本失衡，快速追平无
- *  体感损失（与 iOS StreamingTypewriter floodBacklogChars 双端对锁，单位口径见 typewriterRevealStep 注）。 */
+ *  体感损失。与 iOS StreamingTypewriter floodBacklogChars 同值同单位对锁（Swift String.count
+ *  即簇计数，名称沿 iOS 惯称 chars 不改；2026-11-21 簇计量统一轮起两端「8192」同义，
+ *  旧「桌面按 UTF-16 码元」知情差异废止，边界值表按簇见 StreamingTypewriterPacingTest）。 */
 internal const val TYPEWRITER_FLOOD_BACKLOG_CHARS = 8192
 
 /**
- * 打字机步进（2026-11-21 流式单行归一轮；同日走查②扩洪泛档，:desktopApp:test 回归锚）：
- * - 常规档 max(8, 积压/12)：慢流恒 8 字/16ms（≈500 字/秒打字感下限），大块积压 ~12 步（≈200ms）
+ * 打字机步进（2026-11-21 流式单行归一轮；同日走查②扩洪泛档；同日簇计量统一轮——积压单位
+ * 改按字素 Cluster，与 iOS String.count 同义，常量 8192//12//3 两端从此同义）：
+ * - 常规档 max(8, 积压/12)：慢流恒 8 簇/16ms（≈500 簇/秒打字感下限），大块积压 ~12 步（≈200ms）
  *   内追平、积压不跨下一块；
- * - 洪泛档 积压/3（积压>8192 字）：特大块若走几何档需 ~90 tick、且揭示循环每 tick 对已揭示前缀
- *   整体重嗅探+重解析（MarkdownText remember(content)），累计解析 ~45×积压字符，主线程掉帧；
- *   洪泛档 256KiB 量级 ~9 tick 追平、累计 ~2×积压（阈值邻域 1 tick）。>8k 字积压下逐字观感
+ * - 洪泛档 积压/3（积压>8192 簇）：特大块若走几何档需 ~90 tick、且揭示循环每 tick 对已揭示前缀
+ *   整体重嗅探+重解析（MarkdownText remember(content)），累计解析 ~45×积压，主线程掉帧；
+ *   洪泛档 256KiB 量级 ~9 tick 追平、累计 ~2×积压（阈值邻域 1 tick）。>8k 簇积压下逐字观感
  *   本已不可信（恒 8 档需 16s+），快速追平无体感损失。
  * 与 iOS HubViews.swift StreamingTypewriter（revealStep 双档 + 16ms tick）双端注释对锁——单端
  * 改值必须双端同步，桌面回归锚兼作两端行为契约不漂移（StreamingRowPresentationTest 同纪律）。
- * 计量单位知情差异（2026-11-21 终审钉口径）：同参数（8192 阈值、/12、/3）按各自单位计量——
- * 桌面 = UTF-16 码元（String.length/substring），iOS = 字素 Cluster（String.count/prefix）；
- * 非 BMP（emoji 等）内容揭示速度/洪泛档触发点轻微漂移属知情差异，常规中文流两端逐字等价。
+ * 本函数与单位无关（入参=积压簇数、返回值=步进簇数），簇口径由推进方
+ * StreamingTypewriterText/typewriterClusterEnds 落地并锁回归（旧「桌面 UTF-16 码元/iOS 字素
+ * Cluster」计量知情差异废止：非 BMP（emoji 等）两端揭示速度/洪泛触发点从此同语义）。
  */
 internal fun typewriterRevealStep(backlog: Int): Int =
     if (backlog > TYPEWRITER_FLOOD_BACKLOG_CHARS) backlog / 3 else maxOf(8, backlog / 12)
 
 /**
- * 2026-11-21 终审修复：揭示索引贴齐 UTF-16 代码点边界——[revealed] 恰落在代理对中间（前一位
- * 高位代理、当位低位代理）则 +1 收全对，防 substring(0, revealed) 劈对出单 tick 替换字形
- * （iOS 字素索引天然无此问题，桌面侧对齐补齐）；其余情形（对前后边界、串尾、孤立代理）
- * 原样返回。揭示循环与显示前缀两处调用（打字机步进值表的代码点边界版回归锚在
- * StreamingTypewriterPacingTest）。
+ * 簇边界表（2026-11-21 簇计量统一轮，退役 typewriterSnapToCodePointBoundary）：ends[k] = 前
+ * k+1 个字素 Cluster 的 UTF-16 长度。java.text.BreakIterator.getCharacterInstance() = UAX #29
+ * extended grapheme cluster，与 iOS Swift Character 同语义——"a😀b"=3 簇、"\r\n" 同簇、
+ * ZWJ 序列/旗帜/组合符同簇；孤立代理自成 1 簇不并邻（残缺内容不崩、不误并）。仅在内容变化时
+ * 调用一次（delta 块到达频率，与 MarkdownText remember(content) 重解析同触发同量级），tick
+ * 推进只做簇数算术、零逐 tick 重扫；显示前缀 substring(0, ends[shown-1]) 恒落在簇边界——
+ * 劈半索引（代理对中位、ZWJ 中位）从此不可构造，终审的 UTF-16 贴齐被簇口径天然覆盖而退役
+ * （为何无行为回归见 StreamingTypewriterText 注；值表回归锚在 StreamingTypewriterPacingTest）。
  */
-internal fun typewriterSnapToCodePointBoundary(content: String, revealed: Int): Int =
-    if (revealed in 1 until content.length &&
-        content[revealed - 1].isHighSurrogate() &&
-        content[revealed].isLowSurrogate()
-    ) {
-        revealed + 1
-    } else {
-        revealed
+internal fun typewriterClusterEnds(content: String): IntArray {
+    val iterator = BreakIterator.getCharacterInstance()
+    iterator.setText(content) // setText 重置到文首（JDK 契约），空串 next() 即 DONE
+    val ends = IntArray(content.length) // 簇数 ≤ 码元数，容量恒够
+    var count = 0
+    var end = iterator.next()
+    while (end != BreakIterator.DONE) {
+        ends[count++] = end
+        end = iterator.next()
     }
+    return ends.copyOf(count)
+}
 
 /** 打字机 tick 周期（毫秒，iOS StreamingTypewriter.tickNanos = 16_000_000 对应值）。 */
 private const val TYPEWRITER_TICK_MS = 16L
@@ -1422,21 +1435,30 @@ private fun AssistantMessageRow(
  *   本组合项 @State 跨重组存活，仅挂载/重挂载时贴齐），仅存活期间的 append 逐字；
  * - 改写跳变（replace=true 语义、内容收缩、非前缀续写）不逐字、直接贴齐；
  * - 行收敛 final 时外层分支切回整段 MarkdownText（本组合项离场），剩余积压一次性补齐；
- * - 揭示索引贴齐代码点边界（typewriterSnapToCodePointBoundary）：代理对不劈半、单 tick 替换
- *   字形不再出现（iOS 字素索引天然无此问题，2026-11-21 终审修复）。
+ * - 计量与推进以字素 Cluster 为最小单位（2026-11-21 簇计量统一轮，与 iOS String.count/
+ *   Character 同义）：内部状态=已揭示簇数，步进=typewriterRevealStep(积压簇数) 簇/tick，
+ *   显示切点=typewriterClusterEnds 簇表查 UTF-16 偏移——切点恒簇边界，代理对/ZWJ/CRLF
+ *   多码元簇恒整簇揭示。终审的 typewriterSnapToCodePointBoundary（UTF-16 贴齐）被簇口径
+ *   天然覆盖而退役、无行为回归：贴齐函数只修复「码元算术产生劈半索引」这一种病，簇计数
+ *   语义下该索引不可构造（簇数→切点恒查表命中边界）；旧贴齐覆盖的代理对劈半在新口径下
+ *   切点逐字节同旧（如 "a😀b" 旧贴齐后切 3=新表 ends[1]，"中文" 同值），且簇口径额外
+ *   免疫旧贴齐不防的 ZWJ/组合符中位劈切（iOS 字素索引行为就此全量对齐）。
  *
- * 步长 = typewriterRevealStep(积压) @ TYPEWRITER_TICK_MS——与 iOS 同参数对锁（见纯函数注；
- * 计量单位桌面 UTF-16 码元/iOS 字素 Cluster，知情差异同注）。
+ * 步长 = typewriterRevealStep(积压簇数) @ TYPEWRITER_TICK_MS——与 iOS 同参数同单位对锁
+ * （见纯函数注；旧「桌面 UTF-16 码元/iOS 字素」计量知情差异废止）。
  * 揭示前缀喂 MarkdownText（showCursor=true，▌ 光标随前缀移动）；MarkdownText 本体零改动。
  */
 @Composable
 private fun StreamingTypewriterText(content: String, modifier: Modifier = Modifier) {
-    // 已揭示字符数；null = 未初始化（挂载即贴齐现内容，不重打）。
+    // 已揭示字素 Cluster 数（单位与 iOS String.count 同义）；null = 未初始化（挂载即贴齐现内容，不重打）。
     var revealedCount by remember { mutableStateOf<Int?>(null) }
     // 上一帧内容（区分 append 前缀增长与改写跳变）。
     var lastSeen by remember { mutableStateOf("") }
+    // 簇边界表：内容每变一次重建一次（=delta 块到达频率，与 MarkdownText remember(content)
+    // 重解析同触发同量级）；揭示循环只做簇数算术，显示前缀查表取 UTF-16 切点——零逐 tick 重扫。
+    val clusterEnds = remember(content) { typewriterClusterEnds(content) }
     LaunchedEffect(content) {
-        val target = content.length
+        val target = clusterEnds.size
         val progress = revealedCount
         if (progress == null) {
             // 挂载首帧贴齐（iOS onAppear 同语义：首跑即初始化，竞态兜底并入）
@@ -1454,22 +1476,17 @@ private fun StreamingTypewriterText(content: String, modifier: Modifier = Modifi
         var shown = progress.coerceAtMost(target)
         revealedCount = shown
         while (shown < target) {
-            // 推进后贴齐代码点边界（代理对劈半则 +1 收全对，步进不受影响——步长下限 8 ≫ 1）
-            shown = typewriterSnapToCodePointBoundary(
-                content,
-                (shown + typewriterRevealStep(target - shown)).coerceAtMost(target),
-            )
+            // 纯簇数推进（与 iOS shown + revealStep(...) 同式）：簇数为整，切点查表恒簇边界，
+            // 代理对/ZWJ 劈半无从产生（typewriterSnapToCodePointBoundary 职责被天然覆盖，见头注）
+            shown = (shown + typewriterRevealStep(target - shown)).coerceAtMost(target)
             revealedCount = shown
             delay(TYPEWRITER_TICK_MS) // 新内容到达经 LaunchedEffect(content) 重启，取消本循环（iOS task(id:) 同语义）
         }
     }
-    // 显示面前再贴齐一次（防御性：挂载/跳变直贴的全长索引本就是安全边界，此处恒 no-op）
-    val revealed = typewriterSnapToCodePointBoundary(
-        content,
-        (revealedCount ?: content.length).coerceIn(0, content.length),
-    )
+    // 显示前缀：簇数 → UTF-16 切点（防御性 coerce 同旧版；表与 content 同源同 key remember，恒一致）
+    val revealed = (revealedCount ?: clusterEnds.size).coerceIn(0, clusterEnds.size)
     MarkdownText(
-        content = content.substring(0, revealed),
+        content = content.substring(0, if (revealed == 0) 0 else clusterEnds[revealed - 1]),
         showCursor = true,
         modifier = modifier,
     )

@@ -11,8 +11,14 @@ import dev.sharpxia.agentreins.hub.projection.CommandListItem
  *   共用一张无歧义优先级表，首个命中生效）：
  *   0. IME 组合中（composition != null）→ 全键让行默认（调用侧门，纯函数层不涉）；
  *   1. Shift+Enter（含 Shift+Cmd/Ctrl）→ Newline 强制换行（Shift 是显式换行意图）；
- *   2. 空白草稿 → Ignored（消费 no-op 不发不换行；先于 ⌘ 判定——空白+⌘Enter 不落默认换行）；
- *   3. Cmd/Ctrl+Enter 非空 → Send（强制发送，天然满足多行 ⌘Enter）；
+ *   2. 空白草稿 → Ignored（消费 no-op 不发不换行；先于 ⌘ 判定——空白+⌘Enter 不落默认换行）。
+ *      空白判据=纯文本 isNotBlank 不含附件：附件独发（文本空白+附件在场）同样 Ignored——
+ *      附件独发走发送键（2026-11-08 拍板）。知情边界差异：Catalyst 发送按钮的 ⌘Return
+ *      键盘快捷键语义跟按钮（draftHasContent 含附件），纯附件草稿下快捷键通道仍可触发发送、
+ *      桌面同键恒 no-op——双端已标注的边界分叉（HubViews.ComposerKeyHandlers 分流②同注）；
+ *   3. Cmd/Ctrl+Enter 非空 → Send（强制发送，天然满足多行 ⌘/Ctrl+Enter；2026-11-21 走查
+ *      修复②：Catalyst 分流③补 .control 对齐，此前 Catalyst 只认 ⌘=Ctrl+Enter 多行换行
+ *      的分叉已消）；
  *   4. 非空 + 面板可见 → Send（原样发送当前输入不走补全；面板可见⇔草稿无换行故必单行）；
  *   5. 非空白单行 → Send；非空白多行 → Newline（裸 Enter 不消费，让 TextField 默认插换行）。
  *   相对旧口径的唯一行为变更 = 多行裸 Enter 从 Send 改 Newline（「单行(尚无换行)才发送」）。

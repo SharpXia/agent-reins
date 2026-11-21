@@ -56,6 +56,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isMetaPressed
@@ -92,6 +94,7 @@ import dev.sharpxia.agentreins.hub.UiWorkActivity
 import dev.sharpxia.agentreins.hub.projection.CommandsList
 import java.io.File
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -1103,7 +1106,9 @@ internal fun ConversationScreen(
                         // 空正文防线（发送侧）：空白草稿禁发（isNotBlank = 去空白后非空），点击再兜一层。
                         // v1.2.0 多模态：纯附件草稿（文本空、附件非空）放行——契约允许空文本消息，
                         // sendDraft 内再兜「两者皆空禁发」。（Enter 空白判据 = 纯文本 isNotBlank
-                        // 不含附件——附件独发走发送键；2026-11-21 回车语义轮该口径双端保持不变。）
+                        // 不含附件——附件独发走发送键；知情边界：Catalyst ⌘Return 快捷键通道挂
+                        // 发送按钮（draftHasContent 含附件）对纯附件草稿仍可发送，桌面键盘恒
+                        // no-op——双端优先级表已标注的边界分叉，非桌面缺陷。）
                         Button(
                             onClick = { sendDraft() },
                             enabled = input.text.isNotBlank() || draftAttachments.isNotEmpty(),
@@ -1372,7 +1377,10 @@ private fun FailedReasonLine(m: UiMessage) {
  * SlashCommandPanel 同构）。纵向滚动承载溢出（目录超出可视行数时内滚，上限 ≈4 行对齐 iOS
  * panelMaxHeight=148）；纯本地视图零网络，不劫持键盘焦点。
  * 2026-11-21 面板键位轮：行底键盘高亮（highlightIndex，↑↓ 移动 / Tab 补全的视觉面，iOS
- * 同轮 accent 薄底对位）。
+ * 同轮 accent 薄底对位）。走查修复：高亮行滚入视野——↑↓ 环绕后高亮可落视口外（静态六
+ * 目录在 "/" 草稿下已溢出 ≈4 行可视），Tab 却仍补全看不见的行=视觉反馈断裂；不用
+ * LazyColumn（视口贪婪占满 heightIn 上限，短目录会出大片空底），保留 Column 包裹内容
+ * 观感，行界经根坐标采样、与容器视口差值驱动最小滚动（对滚动平移实现细节免疫）。
  */
 private const val SLASH_PANEL_MAX_HEIGHT_DP = 148
 
@@ -1386,6 +1394,28 @@ private fun SlashCommandPanel(
     highlightIndex: Int? = null,
     modifier: Modifier = Modifier,
 ) {
+    val scrollState = rememberScrollState()
+    // 行界表（根坐标 top + 行高，px）：onGloballyPositioned 逐帧回填（滚动平移也会触发重报），
+    // 与容器根坐标同帧可比；目录变化即重建防陈旧条目。
+    val rowBounds = remember(suggestions) { mutableMapOf<Int, Pair<Float, Int>>() }
+    var containerTopRootY by remember { mutableStateOf(0f) }
+    var viewportHeightPx by remember { mutableStateOf(0) }
+    LaunchedEffect(highlightIndex, suggestions, viewportHeightPx, containerTopRootY) {
+        val target = highlightIndex ?: return@LaunchedEffect
+        val (rowTopRootY, rowHeight) = rowBounds[target] ?: return@LaunchedEffect
+        if (viewportHeightPx <= 0) return@LaunchedEffect
+        // 行相对视口的现位（含滚动平移）：视口上沿=containerTopRootY
+        val relTop = rowTopRootY - containerTopRootY
+        val relBottom = relTop + rowHeight
+        val delta = when {
+            relTop < 0f -> relTop // 高亮在视口上方（环绕到末行等）→ 上滚贴顶
+            relBottom > viewportHeightPx -> (relBottom - viewportHeightPx) // 在下方 → 下滚贴底
+            else -> return@LaunchedEffect // 完全可见不滚
+        }
+        scrollState.animateScrollTo(
+            (scrollState.value + delta.roundToInt()).coerceIn(0, scrollState.maxValue),
+        )
+    }
     Surface(
         color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(12.dp),
@@ -1395,7 +1425,11 @@ private fun SlashCommandPanel(
         Column(
             modifier = Modifier
                 .heightIn(max = SLASH_PANEL_MAX_HEIGHT_DP.dp)
-                .verticalScroll(rememberScrollState()),
+                .onGloballyPositioned { coords ->
+                    containerTopRootY = coords.positionInRoot().y
+                    viewportHeightPx = coords.size.height
+                }
+                .verticalScroll(scrollState),
         ) {
             suggestions.forEachIndexed { index, cmd ->
                 // 键盘高亮行底（对位 iOS accent 0.16 薄底，桌面取 primary≈0.12 alpha 同「轻
@@ -1403,6 +1437,10 @@ private fun SlashCommandPanel(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .onGloballyPositioned { coords ->
+                            rowBounds[index] =
+                                coords.positionInRoot().y to coords.size.height
+                        }
                         .background(
                             if (index == highlightIndex) {
                                 MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)

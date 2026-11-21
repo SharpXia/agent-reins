@@ -1305,8 +1305,8 @@ struct HubChatView: View {
                     // 2026-11-21 回车语义轮：Enter 生效门=聚焦+IME（面板可见性下沉为 Enter
                     // 分流内的行为分支——「非斜杠单行草稿 Enter=发送」在本挂载下真正可达）；
                     // ↑↓/Tab 另挂三重门（聚焦+IME+面板可见）。分流序全表见 ComposerKeyHandlers
-                    // 头注释；shift/⌘ 读 press.modifiers 键值实时值，面板/空白/多行是渲染期
-                    // 快照 flag（HubStore @Observable 草稿变化即重渲染）。
+                    // 头注释；shift/⌘/Ctrl 读 press.modifiers 键值实时值，面板/空白/多行是
+                    // 渲染期快照 flag（HubStore @Observable 草稿变化即重渲染）。
                     .modifier(ComposerKeyHandlers(
                         isFocused: composerFocused,
                         panelVisible: !slashSuggestions.isEmpty,
@@ -1864,59 +1864,68 @@ private struct SlashCommandPanel: View {
     private static let panelMaxHeight: CGFloat = 148
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(suggestions.enumerated()), id: \.element.id) { index, cmd in
-                    HStack(spacing: 0) {
-                        Button {
-                            onSelect(cmd)
-                        } label: {
-                            HStack(spacing: 10) {
-                                Text(cmd.name)
-                                    .font(.callout.monospaced().weight(.semibold))
-                                    .foregroundStyle(Color.accentColor)
-                                Text(cmd.summary)
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(suggestions.enumerated()), id: \.element.id) { index, cmd in
+                        HStack(spacing: 0) {
+                            Button {
+                                onSelect(cmd)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Text(cmd.name)
+                                        .font(.callout.monospaced().weight(.semibold))
+                                        .foregroundStyle(Color.accentColor)
+                                    Text(cmd.summary)
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(.horizontal, 12).padding(.vertical, 8)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .hoverHighlight(cornerRadius: 9)
+                            .accessibilityLabel("\(cmd.name)：\(cmd.summary)（点按直接发送）")
+                            // 2026-11-08 修复轮：行尾 ✎ = 预填续写参数（原「带参命令点行预填」
+                            // 行为移到此处，点行语义让位给直接发送）。
+                            Button {
+                                onPrefill(cmd)
+                            } label: {
+                                Image(systemName: "square.and.pencil")
                                     .font(.footnote)
                                     .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                Spacer(minLength: 0)
+                                    .padding(.horizontal, 10).padding(.vertical, 8)
+                                    .contentShape(Rectangle())
                             }
-                            .padding(.horizontal, 12).padding(.vertical, 8)
-                            .contentShape(Rectangle())
+                            .buttonStyle(.plain)
+                            .hoverHighlight(cornerRadius: 9)
+                            .accessibilityLabel("把 \(cmd.name) 填入输入框续写参数")
                         }
-                        .buttonStyle(.plain)
-                        .hoverHighlight(cornerRadius: 9)
-                        .accessibilityLabel("\(cmd.name)：\(cmd.summary)（点按直接发送）")
-                        // 2026-11-08 修复轮：行尾 ✎ = 预填续写参数（原「带参命令点行预填」
-                        // 行为移到此处，点行语义让位给直接发送）。
-                        Button {
-                            onPrefill(cmd)
-                        } label: {
-                            Image(systemName: "square.and.pencil")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 10).padding(.vertical, 8)
-                                .contentShape(Rectangle())
+                        // 键盘高亮行底（2026-11-20 Mac 键盘交互轮：系统 accent 薄底，双模式可读；
+                        // 与行内 hover 共存不冲突）
+                        .background(index == keyboardIndex
+                            ? AnyShapeStyle(Color.accentColor.opacity(0.16))
+                            : AnyShapeStyle(.clear))
+                        .clipShape(RoundedRectangle(cornerRadius: 9))
+                        if index < suggestions.count - 1 {
+                            Divider().padding(.leading, 12)
                         }
-                        .buttonStyle(.plain)
-                        .hoverHighlight(cornerRadius: 9)
-                        .accessibilityLabel("把 \(cmd.name) 填入输入框续写参数")
-                    }
-                    // 键盘高亮行底（2026-11-20 Mac 键盘交互轮：系统 accent 薄底，双模式可读；
-                    // 与行内 hover 共存不冲突）
-                    .background(index == keyboardIndex
-                        ? AnyShapeStyle(Color.accentColor.opacity(0.16))
-                        : AnyShapeStyle(.clear))
-                    .clipShape(RoundedRectangle(cornerRadius: 9))
-                    if index < suggestions.count - 1 {
-                        Divider().padding(.leading, 12)
                     }
                 }
             }
+            .frame(maxHeight: Self.panelMaxHeight)
+            .background(RoundedRectangle(cornerRadius: 12).fill(ink.elevated))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(ink.borderTertiary, lineWidth: 1))
+            .onChange(of: keyboardIndex) { _, target in
+                // 走查修复（2026-11-21）：键盘高亮滚入视野——↑↓ 环绕后高亮可落视口外（静态
+                // 六目录在 "/" 草稿下已溢出 ≈4 行可视），Tab 却仍补全看不见的行=视觉反馈断裂。
+                // iOS 触控端 keyboardIndex 恒 nil（键盘拦截 Catalyst 门控），onChange 不触发零变化。
+                guard let target, suggestions.indices.contains(target) else { return }
+                proxy.scrollTo(suggestions[target].id, anchor: .center)
+            }
         }
-        .frame(maxHeight: Self.panelMaxHeight)
-        .background(RoundedRectangle(cornerRadius: 12).fill(ink.elevated))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(ink.borderTertiary, lineWidth: 1))
     }
 }
 
@@ -1927,9 +1936,15 @@ private struct SlashCommandPanel: View {
 ///   resolveEnterKey 一张表（前缀序号 = 优先级）：
 ///   ① Shift → .ignored（任何情况强制换行）；
 ///   ② 空白草稿 → .handled（消费 no-op 不发不换行；先于 ⌘ 判定——空白+⌘Enter 与发送中
-///     +⌘Enter 不落默认换行）；
-///   ③ ⌘ → 强制发送（onSend + .handled；发送在途由 HubStore.sendingDraftFor 防重保证
-///     单次——发送按钮在场时与 ⌘Return 键盘快捷键构成双通道，任一路只发一次）；
+///     +⌘Enter 不落默认换行）。空白判据=纯文本不含附件（附件独发走发送键，与桌面一致）；
+///     知情边界：发送按钮的 ⌘Return 键盘快捷键通道语义跟按钮（draftHasContent 含附件），
+///     纯附件草稿（文本空白+附件在场）在②按空白消费 no-op，但快捷键通道仍可能先触发按钮
+///     发送——同键同草稿态可能「发附件/不动」分叉，两通道先后无官方次序，实机 ⌘Enter 四态
+///     走查覆盖（桌面同键恒 no-op，为双端已知边界差异）；
+///   ③ ⌘/Ctrl → 强制发送（onSend + .handled；含 .control——桌面 isMetaOrCtrlPressed 同
+///     口径，Ctrl+Enter 多行同发，2026-11-21 走查修复②对齐；发送在途由 HubStore
+///     .sendingDraftFor 防重保证单次——发送按钮在场时与 ⌘Return 键盘快捷键构成双通道，
+///     任一路只发一次）；
 ///   ④ 面板可见 → 原样发送当前输入（不走补全；与分支⑤单行同果，保留分支只为表意——
 ///     「面板可见 Enter 直接发送」的用户口径）；
 ///   ⑤ 多行 → .ignored（需求2：已多行 Enter=插换行，让 TextField 默认行为）；单行 → 发送。
@@ -1966,7 +1981,7 @@ private struct ComposerKeyHandlers: ViewModifier {
                     let m = press.modifiers
                     if m.contains(.shift) { return .ignored } // ① 任何情况强制换行
                     if draftTextIsBlank { return .handled } // ② 空白兜底 no-op（先于 ⌘ 判定）
-                    if m.contains(.command) { // ③ ⌘Enter 强制发送
+                    if m.contains(.command) || m.contains(.control) { // ③ ⌘/Ctrl+Enter 强制发送
                         onSend()
                         return .handled
                     }

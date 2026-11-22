@@ -38,8 +38,9 @@ import org.jetbrains.skia.SamplingMode
  *   容量帽 [DEFAULT_DISK_CAP_BYTES]=256MB 写后惰性触发，双门节流（32 次写或净增 16MB 才
  *   全目录扫一次——自检轮 R1-15 对锁 iOS MediaDiskCache 同参数）；
  * - 网络：HttpURLConnection connectTimeout 8s / readTimeout 15s + UA 头（修旧 openStream
- *   无超时无 UA）；同 key 在途 [MediaCacheStore.load] Deferred 合流（LazyColumn 重挂载
- *   风暴同 URL 只发一次请求）；
+ *   无超时无 UA）+ 响应体体量帽 32MB（自检轮 2 R2-11：逐块限界读 [readBounded]，超帽 null
+ *   降级链接 chip——下载阶段内存帽，解码帽只管已读字节）；同 key 在途 [MediaCacheStore.load]
+ *   Deferred 合流（LazyColumn 重挂载风暴同 URL 只发一次请求）；
  * - 键归一（复核 B6 对锁；2026-11-23 自检轮 R1-2/R1-10/R1-20 取并集对齐 iOS，见
  *   [STRIP_QUERY_PARAMS] 注）：[stableCacheKey] 与 iOS MediaDiskCache 同一时效/签名参数闭集
  *   白名单剥离 + query 重排序——同 URL 带刷新签名参数命中同一文件；白名单外参数全保留
@@ -217,6 +218,17 @@ internal const val DEFAULT_MAX_PIXEL: Int = 2048
 internal const val MEDIA_CONNECT_TIMEOUT_MS: Int = 8_000
 internal const val MEDIA_READ_TIMEOUT_MS: Int = 15_000
 
+/**
+ * 响应体体量帽（自检轮 2 R2-11；与 iOS MediaSupport 下载帽同值对锁——单端改值双端同步）：
+ * 2xx 响应体一律限界读，超帽截断返回 null 走链接 chip 降级——错误方向安全（不显示而非
+ * OOM），行内图加载协程内存不被超大/恶意外链拉爆；解码帽（decodeForDisplay 2048px）只
+ * 作用于已读入字节，下载阶段由本帽把门。
+ */
+internal const val MEDIA_DOWNLOAD_CAP_BYTES: Long = 32L * 1024 * 1024
+
+/** 限界读拷贝块长（64KB，逐块累计——不依赖 Content-Length，chunked/缺失头同防）。 */
+private const val COPY_BUF_BYTES: Int = 64 * 1024
+
 /** 取数 UA 头（不带版本号，随主题/协议无关的稳定标识）。 */
 internal const val MEDIA_USER_AGENT = "AgentReins-Desktop"
 
@@ -275,7 +287,7 @@ private val STRIP_QUERY_PARAMS = setOf(
     "oss-expires", "oss-signature", "oss-expires_at", "oss-access-key-id", "oss-security-token",
 )
 
-/** 真实网络取数（HttpURLConnection，8s/15s 超时 + UA；非 2xx 与异常一律 null 降级）。 */
+/** 真实网络取数（HttpURLConnection，8s/15s 超时 + UA + 响应体体量帽；非 2xx/超帽/异常一律 null 降级）。 */
 internal fun fetchFromNetwork(url: String): ByteArray? = runCatching {
     // URI→URL（旧 openStream 直拉同构：URL(String) 构造器 JDK 层已弃用）
     val conn = java.net.URI(url).toURL().openConnection() as HttpURLConnection
@@ -284,11 +296,31 @@ internal fun fetchFromNetwork(url: String): ByteArray? = runCatching {
     conn.setRequestProperty("User-Agent", MEDIA_USER_AGENT)
     try {
         if (conn.responseCode !in 200..299) return@runCatching null
-        conn.inputStream.use { it.readBytes() }
+        // 自检轮 2 R2-11：2xx 体量帽——逐块限界读（原 readBytes() 无上限，读到 EOF 为止，
+        // 超大响应把取数协程内存拉爆）；超帽 null → 调用方降级链接 chip，不显示不落盘
+        conn.inputStream.use { readBounded(it, MEDIA_DOWNLOAD_CAP_BYTES) }
     } finally {
         conn.disconnect()
     }
 }.getOrNull()
+
+/**
+ * 限界读流（自检轮 2 R2-11，纯函数可单测）：逐块拷贝累计超 [capBytes] 即返回 null（丢弃
+ * 已读——宁降级不 OOM）；与 iOS 同轮下载帽同值对锁（[MEDIA_DOWNLOAD_CAP_BYTES] 注）。
+ */
+internal fun readBounded(input: java.io.InputStream, capBytes: Long): ByteArray? {
+    val out = java.io.ByteArrayOutputStream(COPY_BUF_BYTES)
+    val buf = ByteArray(COPY_BUF_BYTES)
+    var total = 0L
+    while (true) {
+        val n = input.read(buf)
+        if (n < 0) break
+        total += n
+        if (total > capBytes) return null
+        out.write(buf, 0, n)
+    }
+    return out.toByteArray()
+}
 
 private fun bitmapCost(bitmap: ImageBitmap): Long =
     bitmap.width.toLong() * bitmap.height * 4L

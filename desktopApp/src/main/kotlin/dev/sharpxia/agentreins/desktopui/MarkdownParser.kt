@@ -35,9 +35,10 @@ internal sealed interface MdBlock {
      * 表格（2026-11-23 批次二轮，GFM 最小口径）：表头行含 `|` 且次行为分隔行形态、列数一致
      * 才成表——无分隔行 / 块级打断 / 半流中断一律落回段落字面量（wp-6「纯文本等价」契约不破）。
      * [header]/[rows] 单元格均为行内 span 平铺（短行按表头列数补空、长行截断，GFM 同口径）；
-     * 单元格 span 已在解析期做长 token U+200B 软断行（[softBreakSpans]：连续无空白且 >24 字符
-     * 的 token 每 16 字符插断点，与 iOS cell 渲染期注入 softBreakLongTokens 同法同参——
-     * 验收=长 URL/哈希完整显示无「…」），[aligns] 与列一一对应。
+     * 单元格 span 已在解析期做长 token U+200B 软断行（[softBreakSpans]：连续无空白且 >24
+     * 字符、且不含原生可断行 CJK 字符的 token 每 16 字符插断点，与 iOS cell 渲染期注入
+     * softBreakLongTokens 同法同参同表——CJK 单元格原生可断行不吃零宽字符（自检轮 2
+     * R2-2，复制面干净），URL/哈希完整显示无「…」验收不回退），[aligns] 与列一一对应。
      */
     data class Table(
         val header: List<List<MdSpan>>,
@@ -400,29 +401,30 @@ internal fun softBreakSpans(spans: List<MdSpan>): List<MdSpan> = spans.map { spa
 }
 
 /**
- * 单元格内不可断词 token 软断行（2026-11-23 批次二轮；自检轮 R1-3/R1-21 对齐 iOS 口径）：
- * 扫描 token（连续无空白、无 U+200B 的字符段——空白/ZWSP 视作断点重置），仅对长度超过
- * [MD_SOFT_BREAK_TOKEN_THRESHOLD] 的 token（URL/哈希/ULID——Compose Text 拆不出词内断点，
- * 帽内放不下即尾部「…」）自 token 头起每 [every] 个字符插一个 [MD_SOFT_BREAK] 供 Text 折行
- * ——普通散文（词间有空白）不再吃断点，选中复制出的是干净文本（iOS softBreakLongTokens
- * 同法同参：threshold 24 / stride 16 / 空白与 ZWSP 重置；零宽字符进选中复制面属两端共同的
- * 知情取舍，仅限超长无空白 token）。幂等：ZWSP 自身即 token 断点，已断行文本重应用时各
- * token 已 ≤ 阈值，零新增。保原字符、只插断点，token 尾不留断点。
+ * 单元格内不可断词 token 软断行（2026-11-23 批次二轮；自检轮 R1-3/R1-21 对齐 iOS 口径，
+ * 自检轮 2 R2-2 CJK 断点重置 / R2-17 插位不劈代理对）：扫描 token（连续无空白、无 U+200B、
+ * 无 [nativelyLineBreakable] 字符的段——空白/ZWSP/CJK 族视作断点重置），仅对长度超过
+ * [MD_SOFT_BREAK_TOKEN_THRESHOLD] 的 token（URL/哈希/ULID 等无 CJK 形态——Compose Text
+ * 拆不出词内断点，帽内放不下即尾部「…」）自 token 头起每 [every] 个字符插一个
+ * [MD_SOFT_BREAK] 供 Text 折行——普通散文与 CJK 长单元格（原生可断行）不再吃断点，选中
+ * 复制出干净文本（iOS softBreakLongTokens 同法同参同表：threshold 24 / stride 16 /
+ * 空白、ZWSP 与原生可断行字符重置；零宽字符进复制面收敛为「仅无 CJK 的超长 token」= 批次
+ * 一风险④知情存留面，两端注释互锚）。扫描计量：桌面按 UTF-16 code unit、iOS 按字素簇
+ * （Character 迭代），阈值/步距语义等值、含非 BMP 字符的 token 长度差知情。幂等：ZWSP
+ * 自身即 token 断点，已断行文本重应用时各 token 已 ≤ 阈值，零新增。保原字符、只插断点，
+ * token 尾不留断点。
  */
 internal fun softBreakText(text: String, every: Int = 16): String {
     if (text.length <= MD_SOFT_BREAK_TOKEN_THRESHOLD) return text
-    // 第一遍：字符级扫 token，记录超过阈值的 token 内每个断点位（全局下标）
+    // 第一遍：字符级扫 token，记录超过阈值的 token 内每个断点位（全局下标）。断点重置集 =
+    // 空白/ZWSP/CJK 族原生可断行字符（R2-2，与 iOS MarkdownView.nativelyBreakable 同表对锁）
     val insertAt = mutableListOf<Int>()
     var tokenStart = -1
     for (i in text.indices) {
         val c = text[i]
-        if (c.isWhitespace() || c == '\u200B') {
+        if (c.isWhitespace() || c == '\u200B' || nativelyLineBreakable(c)) {
             if (tokenStart >= 0 && i - tokenStart > MD_SOFT_BREAK_TOKEN_THRESHOLD) {
-                var p = tokenStart + every
-                while (p < i) {
-                    insertAt += p
-                    p += every
-                }
+                collectInsertPositions(text, tokenStart, i, every, insertAt)
             }
             tokenStart = -1
         } else if (tokenStart == -1) {
@@ -431,11 +433,7 @@ internal fun softBreakText(text: String, every: Int = 16): String {
     }
     // 尾 token（无尾随空白收束）：长度超阈值才按步插（末位不插，不在词尾留断点）
     if (tokenStart >= 0 && text.length - tokenStart > MD_SOFT_BREAK_TOKEN_THRESHOLD) {
-        var p = tokenStart + every
-        while (p < text.length) {
-            insertAt += p
-            p += every
-        }
+        collectInsertPositions(text, tokenStart, text.length, every, insertAt)
     }
     if (insertAt.isEmpty()) return text
     // 第二遍：按位插断点（保原字符）
@@ -447,6 +445,49 @@ internal fun softBreakText(text: String, every: Int = 16): String {
     }
     sb.append(text, prev, text.length)
     return sb.toString()
+}
+
+/**
+ * token 内断点位收集（自检轮 2 R2-17）：桌面扫描按 UTF-16 code unit（iOS 按字素簇，单位
+ * 差异知情落注），插位撞上代理对中位（前高代理+后低代理）顺移一位到对后，顺移至词尾则
+ * 放弃该位（不在词尾留断点）——桌面永不产出「孤立高代理 + ZWSP」碎字形。token 头起每
+ * [every] 位一插，[tokenEndExclusive]（词尾）不插。
+ */
+private fun collectInsertPositions(
+    text: String,
+    tokenStart: Int,
+    tokenEndExclusive: Int,
+    every: Int,
+    insertAt: MutableList<Int>,
+) {
+    var p = tokenStart + every
+    while (p < tokenEndExclusive) {
+        if (text[p - 1].isHighSurrogate() && text[p].isLowSurrogate()) {
+            p += 1
+            if (p >= tokenEndExclusive) return
+        }
+        insertAt += p
+        p += every
+    }
+}
+
+/**
+ * 原生可断行字符（自检轮 2 R2-2，与 iOS MarkdownView.nativelyBreakable 同表对锁，单端增删
+ * 区间必须双端同步）：CJK 标点/假名/扩展 A/统一表意/谚文音节/兼容表意/全角形——UAX #14
+ * 在这些字符处原生给换行机会，Text 无需注入断点；计入 token 只会把中英混排长单元格误判成
+ * 不可断词、污染复制面。BMP 外（扩展 B+）不覆盖：两端同退回「插零宽断点」旧行为（iOS 冷僻
+ * 生僻字同口径知情注），桌面插位由 [collectInsertPositions] 顺移兜住不劈代理对。
+ */
+internal fun nativelyLineBreakable(c: Char): Boolean = when (c.code) {
+    in 0x3000..0x303F, // CJK 标点（、。「」《》等）
+    in 0x3041..0x30FF, // 平假名/片假名
+    in 0x3400..0x4DBF, // CJK 扩展 A
+    in 0x4E00..0x9FFF, // CJK 统一表意文字
+    in 0xAC00..0xD7AF, // 谚文音节
+    in 0xF900..0xFAFF, // CJK 兼容表意
+    in 0xFF00..0xFFEF, // 全角/半角形（，．％等）
+    -> true
+    else -> false
 }
 
 /** 行内解析：反引号代码段优先（段内不再解析强调），其余按 `*`/`_` 定界符扫描。 */

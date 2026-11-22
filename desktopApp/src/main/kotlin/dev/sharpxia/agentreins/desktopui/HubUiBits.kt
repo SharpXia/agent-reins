@@ -15,10 +15,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -96,7 +93,10 @@ internal fun AttachmentChipsRow(attachments: List<UiAttachment>, modifier: Modif
                     // 跨模块属性无智能转换：url 先落本地再判空（Kotlin 编译纪律）
                     val url = a.url
                     if (url != null) {
-                        var bubbleOpen by remember(url) { mutableStateOf(false) }
+                        // R2-4：气泡态即会话级坑位归属（同正文 Link/chip 口径——同屏至多一个，
+                        // 被夺坑自动随行收；被其他气泡夺坑后本气泡不渲染，无陈旧残留面）
+                        val linkBubble = LocalLinkBubbleOwner.current
+                        val bubbleToken = remember(url) { Any() }
                         Text(
                             text = url,
                             fontSize = 10.sp,
@@ -104,13 +104,13 @@ internal fun AttachmentChipsRow(attachments: List<UiAttachment>, modifier: Modif
                             color = ink.textTertiary, // 原 0xFF777777
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.clickable { bubbleOpen = true },
+                            modifier = Modifier.clickable { linkBubble.active = bubbleToken },
                         )
-                        if (bubbleOpen) {
+                        if (linkBubble.active === bubbleToken) {
                             LinkActionPopup(
                                 displayUrl = url,
                                 normalizedUrl = normalizeUrl(url),
-                                onDismiss = { bubbleOpen = false },
+                                onDismiss = { if (linkBubble.active === bubbleToken) linkBubble.active = null },
                             )
                         }
                     }

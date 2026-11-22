@@ -232,6 +232,39 @@ class MarkdownParserTableTest {
         assertEquals("详见 ", linked.first().let { it as MdSpan.Text }.text)
     }
 
+    @Test
+    fun softBreakTreatsCjkAsNativeBreakReset() {
+        // 自检轮 2 R2-2（与 iOS nativelyBreakable 同表对锁）：CJK 原生可断行——纯中文长单元格
+        // 不再被当不可断词，零宽字符不进复制面
+        val cjk30 = "一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十" // 30 字
+        assertEquals(cjk30, softBreakText(cjk30))
+        assertFalse(softBreakText(cjk30).contains('\u200B'))
+        // CJK 断点重置：两侧 ASCII 长段各自独立计长（各 >24 各自插 1 个）
+        val mixed = "a".repeat(25) + "中" + "b".repeat(25)
+        assertEquals(2, softBreakText(mixed).count { it == '\u200B' })
+        // 全 ASCII 长 token（URL/哈希形态）照旧插——「无省略号」验收不回退
+        assertTrue(softBreakText("a".repeat(30)).contains('\u200B'))
+        // 假名/谚文/全角形同表
+        assertFalse(softBreakText("あ".repeat(30)).contains('\u200B'))
+        assertFalse(softBreakText("가".repeat(30)).contains('\u200B'))
+        assertFalse(softBreakText("，".repeat(30)).contains('\u200B'))
+    }
+
+    @Test
+    fun softBreakInsertionsNeverSplitSurrogatePairs() {
+        // 自检轮 2 R2-17：桌面按 UTF-16 code unit 扫描，插位撞上代理对中位顺移一位——
+        // 永不产出「孤立高代理 + ZWSP」碎字形（iOS 字素簇迭代天然无此病，单位差异知情）
+        val broken = "a".repeat(15) + "😀" + "b".repeat(30) // 首插位 = 16，恰落在 😀 对中位
+        val out = softBreakText(broken)
+        assertTrue(out.contains("😀")) // 表情字符完整（对内无断点）
+        assertFalse(out.contains("\uD83D" + MD_SOFT_BREAK)) // 高代理后不紧跟断点（旧病签名）
+        assertEquals(2, out.count { it == '\u200B' }) // 顺移不改变断点数
+        // 词尾顺移放弃：对恰在 token 末位——该位不再插（不在词尾留断点），表情完整
+        val tail = "a".repeat(31) + "😀"
+        assertEquals(1, softBreakText(tail).count { it == '\u200B' })
+        assertTrue(softBreakText(tail).contains("😀"))
+    }
+
     // ── wp-6 纯文本等价回归（非表序列逐字原样，含 \| 未解释口径） ──
 
     @Test

@@ -205,6 +205,20 @@ class MediaCacheTest {
         assertEquals(1, dir.listFiles()!!.size)
     }
 
+    // ── readBounded：响应体体量帽（自检轮 2 R2-11） ──
+
+    @Test
+    fun readBoundedCapsOversizedBodyToNull() {
+        // 帽内直通；恰好等于帽 → 收；超帽 → null（逐块累计，不依赖 Content-Length）
+        assertEquals("ok", readBounded("ok".byteInputStream(), capBytes = 32)!!.decodeToString())
+        assertEquals(8, readBounded(ByteArray(8) { 1 }.inputStream(), 8)!!.size)
+        assertNull(readBounded(ByteArray(9) { 1 }.inputStream(), 8))
+        // 一次读尽也照判：累计 12 > 帽 8 → null（宁降级 chip 不 OOM）
+        assertNull(readBounded(ByteArray(12) { 2 }.inputStream(), 8))
+        // 空流 → 空字节数组
+        assertEquals(0, readBounded(ByteArray(0).inputStream(), 8)!!.size)
+    }
+
     // ── trim：mtime LRU ──
 
     @Test

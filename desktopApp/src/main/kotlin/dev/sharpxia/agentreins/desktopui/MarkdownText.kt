@@ -2,17 +2,20 @@ package dev.sharpxia.agentreins.desktopui
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -23,10 +26,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -110,8 +115,16 @@ internal fun MarkdownText(
     }
     // 链接气泡态（2026-11-23 批次二轮）：任意块内 Link 点击记录 (展示文本, 归一 url)，
     // Popup 呈现「打开/复制」二选一（锚定=消息体底部居中退化行内锚，细节实机走查项）。
+    // 自检轮 2 R2-4：气泡呈现经会话级坑位归属门控（LocalLinkBubbleOwner）——被其他气泡
+    // （他行链接/他 chip）夺坑后本气泡随行收，同屏至多一个；onDismiss 仅在仍持坑时清坑
+    // （不误清他方）。pendingLink 与坑位同生命周期：夺坑后既不渲染也不再清除他行。
     var pendingLink by remember(content) { mutableStateOf<Pair<String, String>?>(null) }
-    val onLinkTap: (String, String) -> Unit = { display, url -> pendingLink = display to url }
+    val linkBubble = LocalLinkBubbleOwner.current
+    val bubbleToken = remember { Any() }
+    val onLinkTap: (String, String) -> Unit = { display, url ->
+        pendingLink = display to url
+        linkBubble.active = bubbleToken
+    }
     Box(modifier = modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.fillMaxWidth(),
@@ -119,8 +132,15 @@ internal fun MarkdownText(
         ) {
             blocks.forEach { MarkdownBlockView(it, onLinkTap) }
         }
-        pendingLink?.let { (display, url) ->
-            LinkActionPopup(displayUrl = display, normalizedUrl = url, onDismiss = { pendingLink = null })
+        pendingLink?.takeIf { linkBubble.active === bubbleToken }?.let { (display, url) ->
+            LinkActionPopup(
+                displayUrl = display,
+                normalizedUrl = url,
+                onDismiss = {
+                    if (linkBubble.active === bubbleToken) linkBubble.active = null
+                    pendingLink = null
+                },
+            )
         }
     }
 }
@@ -193,12 +213,19 @@ private val MD_TABLE_CELL_MIN_WIDTH = 64.dp
 private val MD_TABLE_CELL_MAX_WIDTH = 480.dp
 
 /**
- * 表格：表头行 + 分隔线 + 体行，单元格无 maxLines 无 Ellipsis（段落 Text 同款），列对齐
- * 随 aligns；超宽表由表级横向滚动兜底（Column 全量布局在滚动容器内，纵向仍交给时间线）。
- * 单元格 span 已于解析期软断行（softBreakSpans）——连续无空白的长 token 每 16 字符可换行。
+ * 表格：描边圆角盒 + 表头底色 + 体行分隔线三件视觉锚（自检轮 2 R2-6 对齐 iOS LiteTableView
+ * ——外层描边+clipShape MarkdownView.swift:392-393、表头行 surfaceTertiary 底 :381、体行前
+ * borderPrimary 1pt 分隔 :383-384；桌面此前无框无边，暗色/宽表边界感弱）。单元格无 maxLines
+ * 无 Ellipsis（段落 Text 同款），列对齐随 aligns；超宽表由表级横向滚动兜底（Column 全量
+ * 布局在滚动容器内，纵向仍交给时间线）。单元格 span 已于解析期软断行（softBreakSpans）——
+ * 连续无空白且不含 CJK 的长 token 每 16 字符可换行（自检轮 2 R2-2 口径，见解析器注）。
+ * 列宽测度：Surface/Column 用 IntrinsicSize.Max 取「最宽行」为表宽（窄表贴内容、宽表滚出，
+ * 对齐 iOS Grid 内容宽描边），表头底色/分隔线 fillMaxWidth 随表宽满幅——普通 fillMaxWidth
+ * 在 wrap 容器内会撑到气泡帽，IntrinsicSize 收口为表内容宽。
  * 成本知情（自检轮 R1-16）：表级 Column/Row 全量组合（非 lazy，iOS LiteTableView 同为非懒
- * 布局既有结构），数百行大表一次性组合全部单元格进 LazyColumn 单行，首现物化可能掉帧——
- * 行内显示与横滑兜底正确性优先，行数帽/懒加载留待后续轮。
+ * 布局既有结构），数百行大表一次性组合全部单元格进 LazyColumn 单行，首现物化可能掉帧
+ * （IntrinsicSize 预量测一过性代价同量级）——行内显示与横滑兜底正确性优先，行数帽/懒加载
+ * 留待后续轮。
  */
 @Composable
 private fun MarkdownTable(
@@ -207,34 +234,43 @@ private fun MarkdownTable(
     accent: Color,
     onLinkTap: (String, String) -> Unit,
 ) {
-    // 横向滚动容器内的 Column/Row 不 fillMaxWidth（无限宽约束下 wrap 内容，窄表左对齐、
-    // 宽表横向滚出）
-    Box(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
-        Column {
-            Row {
-                table.header.forEachIndexed { idx, spans ->
-                    MarkdownTableCell(
-                        spans = spans,
-                        align = table.aligns.getOrNull(idx) ?: MdTableAlign.None,
-                        codeTint = codeTint,
-                        accent = accent,
-                        onLinkTap = onLinkTap,
-                        header = true,
-                    )
-                }
-            }
-            HorizontalDivider()
-            table.rows.forEach { row ->
-                Row {
-                    row.forEachIndexed { idx, spans ->
+    // 视觉锚取墨水令牌（R2-6；与 iOS c.borderPrimary / c.surfaceTertiary 同源语义，DSK-1 层）
+    val ink = LocalDesktopInk.current
+    // 外层 Surface 承担描边+圆角 clip（表头底色不溢出圆角）；横向滚动容器内的 Column/Row
+    // 不 fillMaxWidth（宽表横向滚出），窄表贴内容左对齐（iOS .leading 同口径）
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = Color.Transparent,
+        border = BorderStroke(1.dp, ink.borderPrimary),
+    ) {
+        Box(modifier = Modifier.horizontalScroll(rememberScrollState())) {
+            Column(modifier = Modifier.width(IntrinsicSize.Max)) {
+                Row(modifier = Modifier.fillMaxWidth().background(ink.surfaceTertiary)) {
+                    table.header.forEachIndexed { idx, spans ->
                         MarkdownTableCell(
                             spans = spans,
                             align = table.aligns.getOrNull(idx) ?: MdTableAlign.None,
                             codeTint = codeTint,
                             accent = accent,
                             onLinkTap = onLinkTap,
-                            header = false,
+                            header = true,
                         )
+                    }
+                }
+                table.rows.forEach { row ->
+                    // 体行前 1pt 分隔线（iOS :383-384 同锚；首条即表头/表体界线）
+                    HorizontalDivider(color = ink.borderPrimary)
+                    Row {
+                        row.forEachIndexed { idx, spans ->
+                            MarkdownTableCell(
+                                spans = spans,
+                                align = table.aligns.getOrNull(idx) ?: MdTableAlign.None,
+                                codeTint = codeTint,
+                                accent = accent,
+                                onLinkTap = onLinkTap,
+                                header = false,
+                            )
+                        }
                     }
                 }
             }
@@ -332,7 +368,9 @@ private fun MarkdownHttpsImage(url: String, alt: String) {
 @Composable
 private fun MarkdownImageLinkChip(url: String, alt: String, stale: Boolean) {
     val ink = LocalDesktopInk.current
-    var bubbleOpen by remember(url) { mutableStateOf(false) }
+    // R2-4：气泡态即坑位归属（URL 小字点按占坑；无独立行内 bool——被夺坑自动随行收）
+    val linkBubble = LocalLinkBubbleOwner.current
+    val bubbleToken = remember(url) { Any() }
     Surface(shape = RoundedCornerShape(8.dp), color = ink.surfaceTertiary, modifier = Modifier.fillMaxWidth()) { // 原 CodeTint
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp)) {
             Text(
@@ -350,12 +388,16 @@ private fun MarkdownImageLinkChip(url: String, alt: String, stale: Boolean) {
                 color = ink.textTertiary, // 原 ListMarkerInk 0xFF777777
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.clickable { bubbleOpen = true },
+                modifier = Modifier.clickable { linkBubble.active = bubbleToken },
             )
         }
     }
-    if (bubbleOpen) {
-        LinkActionPopup(displayUrl = url, normalizedUrl = normalizeUrl(url), onDismiss = { bubbleOpen = false })
+    if (linkBubble.active === bubbleToken) {
+        LinkActionPopup(
+            displayUrl = url,
+            normalizedUrl = normalizeUrl(url),
+            onDismiss = { if (linkBubble.active === bubbleToken) linkBubble.active = null },
+        )
     }
 }
 
@@ -385,9 +427,12 @@ private val MD_URL_TRAILING_PUNCT = charArrayOf(
 )
 
 /**
- * URL 归一（打开/复制共用；对齐 iOS NSDataDetector match.url 自带 scheme 口径）：http(s)://
- * 原样；www. 前缀补 https://（桌面 openUri=Desktop.browse 要求绝对 URI，裸 www 串必炸——
- * 不归一就无法打开）；其余 null 不入 Link span（调用方退回纯文本/禁用「打开」）。
+ * URL 归一（打开/复制共用）：http(s):// 原样；www. 前缀补 https://（桌面 openUri=
+ * Desktop.browse 要求绝对 URI，裸 www 串必炸——不归一就无法打开）；其余 null 不入 Link
+ * span（调用方退回纯文本/禁用「打开」）。自检轮 2 R2-5：www 裸链 scheme 两端钉死 https，
+ * 本函数即桌面权威口径——iOS autolink（MarkdownView.swift，同轮 R2-5）对 www 匹配显式重写
+ * link 目标为 https://（NSDataDetector 实测自带 http://，不采纳），两端复制/打开目标同串
+ * 互锚；单端改值必须双端同步。
  */
 internal fun normalizeUrl(raw: String): String? = when {
     raw.startsWith("http://") || raw.startsWith("https://") -> raw
@@ -436,6 +481,26 @@ private fun linkifyText(text: String): List<MdSpan> {
     if (lastEnd < text.length) out += MdSpan.Text(text.substring(lastEnd))
     return out
 }
+
+// ── 会话级链接气泡互斥（2026-11-23 自检轮 2 R2-4；同 iOS HubChatView @State
+// linkBubbleMessageId 语义——同一时刻全时间线至多一个「打开/复制」气泡） ────────────────
+
+/**
+ * 会话级气泡互斥坑位：[active] = 持坑方令牌（每次点按新建实例，以对象同一性判定归属），
+ * null = 无气泡。全窗口共享单实例（无提供点直读缺省——正文 Link 与附件/图片 chip 三处
+ * 气泡源同坑互斥）。作用域与 iOS 的知情差异：iOS linkBubbleMessageId 作用域=单会话页
+ * （HubChatView @State，随会话期重置）；桌面=全窗口单例、切换会话不重置——陈旧令牌所属
+ * 行已离组合、无呈现面，下次任意点按覆写坑位，用户可见语义等价（知情落注非对齐遗漏）。
+ * 失坑即失呈现——各挂载点按 `active === 自身令牌` 门控渲染（对齐 iOS 自检轮 2 R2-1/R2-10
+ * 同轮的失坑即清纪律：残坑行不留陈旧呈现面），夺坑方点按直接覆写坑位，无需显式让坑。
+ */
+@Stable
+internal class LinkBubbleOwner {
+    var active by mutableStateOf<Any?>(null)
+}
+
+/** 缺省实例（全窗口共享单例——staticCompositionLocalOf 缺省值仅构建一次）。 */
+internal val LocalLinkBubbleOwner = staticCompositionLocalOf { LinkBubbleOwner() }
 
 /**
  * 链接操作气泡（打开/复制二选一；正文 Link 与 chip URL 同款）：打开走 LocalUriHandler

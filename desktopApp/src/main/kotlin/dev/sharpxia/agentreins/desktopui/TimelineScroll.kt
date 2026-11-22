@@ -6,6 +6,17 @@ import dev.sharpxia.agentreins.hub.UiMessage
  * 桌面时间线滚动/翻页判定纯函数（wp-5 桌面时间线补齐；iOS wp-7① 滚动锚定 + wp-12 历史翻页
  * 同型）。全部无副作用、无 Compose 依赖，:desktopApp:test 逐例回归；口径与 iOS HubStore /
  * HubViews 对应实现一一锚定，回归锚 = 桌面↔iOS parity 不漂移。
+ *
+ * parity 知情差异两注（自检轮 2 R2-12/R2-13 落档，均非对齐遗漏）：
+ * - 翻页恢复锚：iOS HubStore 对自动/手动两路翻页都武装并消费恢复锚（HubStore.swift:1806/
+ *   :1833——SwiftUI LazyVStack 无 keyed 锚定需显式滚回）；桌面 LazyColumn 时间线 items 按
+ *   messageId keyed 天然保位，[restoreScrollTarget] 只服务手动路径（自动续拉零触碰锚位，
+ *   见 ConversationScreen.loadEarlier 注）。
+ * - 键盘命令接线前置条件：命令由 ConversationScreen 根容器 onPreviewKeyEvent（preview 相
+ *   沿焦点链下行）解析——composer 持焦点或焦点链内存在宿主才可达；composer 失焦后点非可
+ *   聚焦消息行/滚动条若致窗口无焦点宿主，键事件可能不入 Compose 焦点派发（两种桌面行为
+ *   未实机裁决）：实机走查硬项=「点消息列表（非 composer）后按 Ctrl+End/⌘↑ 是否滚动」，
+ *   失效预案=根容器 focusRequester+focusable 或列表点击请求根焦点。
  */
 
 // ── wp-12 历史翻页（earlierLoaderRow 三态 + 游标链） ─────────────────────────

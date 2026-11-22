@@ -432,6 +432,11 @@ internal fun ConversationScreen(
     var earlierCursor by remember { mutableStateOf<Long?>(null) }
     var loadingEarlier by remember { mutableStateOf(false) }
     var loadEarlierError by remember { mutableStateOf<String?>(null) }
+    // 近顶自动续拉失败锁存（自检轮 2 R2-9，iOS HubStore.autoEarlierBlocked 同型同义）：
+    // 自动链 REST 失败即停手——否则用户停在近顶窗内的每个滚动帧都会重发失败请求并反复
+    // 清/置错误横幅；手动按钮重试成功回执解锁。随会话切换 key(conversationId) 重挂复位
+    // （同页翻页状态机同纪律）。
+    var autoEarlierBlocked by remember { mutableStateOf(false) }
     var restoreArmed by remember { mutableStateOf(false) }
     var restoreAnchorId by remember { mutableStateOf<String?>(null) }
     // 会话实时 lastSeq 快照化：conversations 是参数引用，效果闭包捕获会过期——翻页行可见性
@@ -530,28 +535,48 @@ internal fun ConversationScreen(
     // wp-12 加载更早（iOS HubStore.loadEarlier 同型）：按 oldestSeq keyset 翻页，REST 走
     // loadEarlierMessages（nil = 通道不可用/REST 未成功，显式降级可重试不静默）；成功回执后
     // 服务端 hasMore 接管按钮可见性，翻到头锁存。限流纪律：一次一请求（loadingEarlier 互斥）。
-    // [armRestore] 区分入口（自检轮 R1-8）：手动点击（默认 true）武装阅读位置恢复锚；近顶
-    // 自动续拉传 false 不武装——触发时用户正拖向更早内容，prepend 后 LazyColumn 锚定
-    // firstVisibleIndex、视口自然落在新页（正是拖顶用户要的落点），武装恢复锚反而把视口从
-    // 新页拽回触发前最老行一整页，呈「拖顶→加载→被拽回」循环。
-    fun loadEarlier(armRestore: Boolean = true) {
+    // [auto] 区分入口（自检轮 R1-8 + 自检轮 2 R2-9/R2-13/R2-14/R2-18，两语义在现实现恒同向
+    // 收敛为单参，[armRestore] 派生值保留 R1-8 命名）：
+    // - 手动点击（默认 auto=false）武装阅读位置恢复锚（armRestore=true）：锚位=触发前最老
+    //   一行，新页合入其上方后滚回该行，视口不跳；
+    // - 近顶自动续拉传 auto=true：不武装恢复锚；REST 失败另置 autoEarlierBlocked 停自动链，
+    //   手动按钮重试成功回执解锁（iOS HubStore autoEarlierBlocked 同型同参，双端对锁）——
+    //   否则用户停在近顶窗内的每个滚动帧都会重发失败请求、横幅反复闪灭。
+    // 落点机制实况（自检轮 2 R2-14 纠注，原「锚定 firstVisibleIndex」描述失实）：时间线
+    // items 按 messageId keyed（:998），prepend 后 LazyColumn 按首可见行 key 保持视口——
+    // 翻页行首可见时新页自其下展开（视口落新页，正是拖顶用户要的落点），消息行首可见时
+    // 视口停在原行、新页在上方不可见。
+    // 与 iOS 的 parity 差异（自检轮 2 R2-13 知情落档，非对齐遗漏）：iOS 对自动/手动两路都
+    // 武装并消费恢复锚（HubStore.swift:1806/:1833——SwiftUI LazyVStack 无 keyed 锚定需显式
+    // 滚回）；桌面 LazyColumn keyed 锚定天然保位，恢复锚只服务手动路径——口径差异同步写进
+    // TimelineScroll.kt 头注与 CODE-INDEX §2.5，两端各自有意。
+    // 自检轮 2 R2-18：自动路径对已武装的手动锚零触碰——触发段/失败段仅在 armRestore 时
+    // 清旗标锚位，成功分支 restoreArmed = armRestore || restoreArmed 保已武装位；手动回执
+    // 已到、恢复锚待消费的一两帧窗口内被自动续拉插队，不再静默作废手动阅读位置恢复。
+    fun loadEarlier(auto: Boolean = false) {
+        val armRestore = !auto
+        if (auto && autoEarlierBlocked) return
         if (loadingEarlier || earlierExhausted || !canLoadEarlierNow) return
         val oldestLoaded = messages.firstOrNull()
         val before = nextBeforeCursor(earlierCursor, oldestLoaded?.seq) ?: return
         if (before < 1) return // 契约 Before minimum: 1（08 §4.3）
-        // 阅读位置恢复锚 = 触发前最老一行（新页将合入其上方，落地后滚回该行，视口不跳）——
-        // 仅手动路径武装（见 [armRestore] 注）
-        if (armRestore) restoreAnchorId = oldestLoaded?.messageId
-        restoreArmed = false
+        if (armRestore) {
+            // 阅读位置恢复锚 = 触发前最老一行（新页将合入其上方，落地后滚回该行，视口不跳）
+            restoreAnchorId = oldestLoaded?.messageId
+            restoreArmed = false
+        }
         loadingEarlier = true
         loadEarlierError = null
         scope.launch {
             val page = client.loadEarlierMessages(conversationId, before)
             loadingEarlier = false
             if (page == null) {
-                restoreAnchorId = null
-                restoreArmed = false
+                if (armRestore) {
+                    restoreAnchorId = null
+                    restoreArmed = false
+                }
                 loadEarlierError = "加载更早失败（网络或服务不可达），可重试"
+                if (auto) autoEarlierBlocked = true
                 return@launch
             }
             earlierCursor = page.oldestSeq
@@ -561,9 +586,10 @@ internal fun ConversationScreen(
                 restoreAnchorId = null
                 restoreArmed = false
             } else {
-                restoreArmed = armRestore
+                restoreArmed = armRestore || restoreArmed
             }
             loadEarlierError = null
+            autoEarlierBlocked = false
         }
     }
 
@@ -574,8 +600,10 @@ internal fun ConversationScreen(
     // loadEarlier，而 Kotlin 局部声明禁止前向引用（编译错误）；rememberUpdatedState 每次重组
     // 更新到最新闭包（:loadEarlier 捕获的 canLoadEarlierNow 等随实例新鲜）。三个
     // LaunchedEffect(listState) 各自独立 collect snapshotFlow、key 相同，顺序搬迁无语义影响。
-    // 显式 lambda 携带 armRestore（自检轮 R1-8 入口区分：自动续拉 false / 手动点击默认 true）。
-    val loadEarlierNow by rememberUpdatedState { armRestore: Boolean -> loadEarlier(armRestore) }
+    // 显式 lambda 携带入口参（自检轮 R1-8 armRestore 区分 + 自检轮 2 R2-9 auto 失败锁存区分，
+    // 两语义恒同向收敛为单参：自动续拉 true / 手动点击默认 false）；rememberUpdatedState 每次
+    // 重组更新到最新闭包（loadEarlier 捕获的 canLoadEarlierNow 等随实例新鲜）。
+    val loadEarlierNow by rememberUpdatedState { auto: Boolean -> loadEarlier(auto = auto) }
     LaunchedEffect(listState) {
         var prevScrolling = false
         snapshotFlow {
@@ -604,7 +632,8 @@ internal fun ConversationScreen(
             // 入口 Loadable 才触发；loadEarlier 内 loadingEarlier/earlierExhausted/
             // canLoadEarlierNow 守卫照旧幂等双保险。iOS earlierAutoProximity 为像素、桌面为
             // 行数近似——parity 口径差异知情（见 TimelineScroll.kt 常量注）。
-            // armRestore=false（自检轮 R1-8）：不武装恢复锚——prepend 后视口自然落在新页。
+            // armRestore=false（自检轮 R1-8）：不武装恢复锚——prepend 后视口自然落在新页；
+            // auto=true（自检轮 2 R2-9）：REST 失败锁存停自动链，手动按钮重试成功解锁。
             if (shouldAutoLoadEarlier(
                     firstVisibleItemIndex = s.firstVisibleItemIndex,
                     loaderState = earlierRowState(
@@ -615,7 +644,7 @@ internal fun ConversationScreen(
                     isUserDrivenScroll = userDriven,
                 )
             ) {
-                loadEarlierNow(false)
+                loadEarlierNow(true)
             }
         }
     }
@@ -850,6 +879,11 @@ internal fun ConversationScreen(
                     isCtrlOrMeta = event.isCtrlPressed || event.isMetaPressed,
                 ) ?: return@onPreviewKeyEvent false
                 if (messages.isEmpty()) return@onPreviewKeyEvent false // 空会话无可滚（animateScrollToItem 越界）
+                // 自检轮 2 R2-8：键盘跳顶显式解锚——用户意图离开底部（与 iOS 人意愿优先纪律
+                // 同向）。跳顶后各帧非用户驱动且尾行不可见（本文件滚动锚定块 :600 守卫），
+                // 锚定态永不重算：残真值会让下一次尾签变化（流式推进/新消息）把用户从历史区
+                // 硬拽回底部。回底分支无需置值——落地后经 justSettled+lastItemVisible 重算回 true。
+                if (command == TimelineScrollCommand.ScrollToTop) atBottom = false
                 scope.launch {
                     programmaticJumpInFlight += 1
                     try {

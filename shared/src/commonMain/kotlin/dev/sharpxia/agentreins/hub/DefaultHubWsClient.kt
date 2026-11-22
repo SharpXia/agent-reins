@@ -67,8 +67,12 @@ private data class ErrorFrameDto(
 
 /**
  * [HubWsClient] 的 Ktor 实现。WS 走独立 HttpClient（装 WebSockets 插件；库级 ping 25s——
- * Darwin 引擎支持性未证实（R6），不生效时由上层 90s 无帧看门狗兜底，协议正确性不依赖心跳）。
- * 接收循环把 Text 帧按 type 判别为四帧之三；Binary/Ping/Pong 帧不承载同步语义，忽略不失败。
+ * Darwin 引擎支持性未证实（R6），不生效时由上层 90s 无传输活性看门狗兜底，协议正确性不依赖
+ * 心跳）。接收循环把 Text 帧按 type 判别为四帧之三；Binary/Ping/Pong 帧不承载同步语义、不进
+ * [frames]。PING/PONG 栈面事实（2026-11-22 FLOW-5 取证，完整版见 pingIntervalMillis 注）：
+ * Ktor DefaultWebSocketSession 包装在到达本循环前即拦截 Ping（自动 pong）/Pong（路由内部
+ * pinger），循环实际只见数据帧——[transportActivity] 计数就位但当前栈下与数据帧活性同源，
+ * 静默期误重连的根治（启用 pinger）defer 待活 Hub 复验。
  */
 class DefaultHubWsClient(
     private val config: HubConfig,
@@ -83,7 +87,18 @@ class DefaultHubWsClient(
         install(WebSockets) {
             // 08 §5.4：WS 协议层 ping/pong；25s 落在 25–30s 建议带内。引擎不支持时静默忽略。
             // R6 实测（desktop CIO）：pingIntervalMillis>0 时 ready 帧永不到达（pinger 与
-            // webSocketSession() 用法冲突），先禁用——活性由上层 90s 无帧看门狗兜底。
+            // webSocketSession() 用法冲突），先禁用——活性由上层 90s 无传输活性看门狗兜底。
+            //
+            // 2026-11-22 FLOW-5 层级取证（避免未来轮次重新推导）：
+            // - 服务端 30s 协议层 ping 存在（clientaccess/wss.go 心跳泵 WriteControl(PingMessage)），
+            //   但到不了本接收循环：webSocketSession() 经客户端插件 convertSessionToDefault 把
+            //   引擎 raw 会话包装成 DefaultWebSocketSession，其 incoming 处理器拦截控制帧——
+            //   Ping 自动 pong（ponger 通道）、Pong 路由给内部 pinger（未启用即丢弃），仅
+            //   Text/Binary 进用户 incoming（ktor 3.6.0 字节码 + 上游同版源码双证）。
+            // - raw 属性 private、客户端插件无公开 API 旁路 Default 包装——「接收循环对 Ping/Pong
+            //   刷活性戳」在当前栈是空操作（transportActivity 机制仍就位，见 HubWsClient.transportActivity）。
+            // - 真死判据（静默期误重连根因的根治）= 启用本 pinger 由 Ktor pong 超时关会话，
+            //   defer 待活 Hub 复验 R6 的 CIO 复现（当前轮禁碰活 Hub，不许盲开）。
             pingIntervalMillis = 0
         }
     }
@@ -92,10 +107,15 @@ class DefaultHubWsClient(
     // 无 replay 的 SharedFlow 会在无订阅者时丢帧——重放旧帧无害（事件应用按 id 幂等去重）
     private val _frames = MutableSharedFlow<HubServerFrame>(replay = 64, extraBufferCapacity = 512)
     private val _closed = MutableStateFlow<HubWsClosed?>(null)
+    // 传输层活性计数（任意到达帧 +1，跨连接单调不归零——消费方按快照比对判变化，连接切换
+    // 由上层在 connect 后重取基线）
+    private val _transportActivity = MutableStateFlow(0L)
     private var session: DefaultClientWebSocketSession? = null
     private var receiver: Job? = null
 
     override val closed: StateFlow<HubWsClosed?> = _closed
+
+    override val transportActivity: StateFlow<Long> = _transportActivity
 
     override fun frames(): Flow<HubServerFrame> = _frames
 
@@ -116,9 +136,12 @@ class DefaultHubWsClient(
             var lastClose: HubWsClosed? = null
             try {
                 loop@ for (frame in s.incoming) {
+                    // 任意到达帧先刷传输活性（FLOW-5；当前 Ktor 栈下实际只有 Text/Binary 到达
+                    // 此处——Ping/Pong 被 DefaultWebSocketSession 拦截，见 pingIntervalMillis 注）
+                    _transportActivity.value += 1
                     when (frame) {
                         is Frame.Text -> decodeFrame(frame.data.decodeToString())?.let { _frames.emit(it) }
-                        else -> Unit // Binary/Ping/Pong/Close：close 原因统一在 closeReason 兜底读取
+                        else -> Unit // Binary/Ping/Pong/Close：不承载同步语义；close 原因统一在 closeReason 兜底读取
                     }
                 }
             } catch (e: CancellationException) {

@@ -7,10 +7,11 @@ import dev.sharpxia.agentreins.hub.avatar.parseAvatarProfileJson
 import java.util.prefs.Preferences
 
 /**
- * wp-14：桌面窗口/显示偏好存储——本文件挂三班偏好（同 DesktopMutePreferences 挂协调器
+ * wp-14：桌面窗口/显示偏好存储——本文件挂四班偏好（同 DesktopMutePreferences 挂协调器
  * 文件的先例）：[DesktopWindowPreferences]（设置页「关闭行为」开关 = 关窗最小化到托盘 /
  * 关窗退出进程）、[DesktopDisplayPreferences]（2026-11-19 纯显示偏好轮：设置页「流式输出」
- * /「思考中指示」两开关）与 [DesktopAvatarPreferences]（v1.5.0 个性化形象轮：形象档缓存）。
+ * /「思考中指示」两开关）、[DesktopAvatarPreferences]（v1.5.0 个性化形象轮：形象档缓存）
+ * 与 [DesktopWindowFrameStore]（2026-11-22 大屏形态对齐轮：窗口帧存档 + sizing 下限）。
  *
  * 关窗行为：生产消费位 = main.kt 窗口 onCloseRequest（决策时实时读 [minimizeToTrayOnClose]，
  * 改开关即时生效，无重建）+ SettingsScreen「关闭行为」开关（UI 镜像由 HubShell 持有，权威在此，
@@ -210,5 +211,112 @@ internal class DesktopAvatarPreferences(node: Preferences? = null) {
 
         /** 默认档常量（shared DEFAULT_AVATAR_PROFILE 直引，双端同源）。 */
         private val DEFAULT = dev.sharpxia.agentreins.hub.avatar.DEFAULT_AVATAR_PROFILE
+    }
+}
+
+/**
+ * 2026-11-22 大屏形态对齐轮：桌面窗口帧存档（第四班偏好，Catalyst MacWindowFrame 同位面）——
+ * rememberWindowState 只有初值语义：Compose Desktop 默认可无限缩小（无 sizing 下限）、重启
+ * 尺寸/位置复位。本类补齐 Catalyst 已落的两面：x/y/w/h 帧存档（键 `hub.windowFrame.v1`，
+ * v 后缀 = Catalyst mac.windowFrame.v2「形状变更一次性作废旧档」同手法）与最小 720×480
+ * sizing 下限常量（消费位 = main.kt：AWT minimumSize / 恢复帧夹紧 [clampToScreens]）。
+ *
+ * 单位口径：**dp = AWT 窗口坐标 1:1**——Compose WindowState 与 AWT 窗口互转都按原值直映
+ *（componentMoved 把 window.x/y 原值落 WindowPosition、setSizeSafely 把 DpSize 原值落
+ * window.size，全链无密度换算），存档/夹紧/下限全程同一单位，AWT screen bounds 可直接比。
+ *
+ * 门（Catalyst 同口径）：存档有效性下限宽/高 ≥ 480（minValidSize 480——退化/异常几何帧
+ * 不存不恢复，防污染存档）。存储纪律同文件三班偏好：内存镜像权威 + best-effort persist
+ * + node = null 全程内存态，不抛不崩。
+ */
+internal class DesktopWindowFrameStore(node: Preferences? = null) {
+
+    /** 窗口帧（dp = AWT 坐标同单位；x/y = 左上角）。 */
+    internal data class Frame(val x: Float, val y: Float, val w: Float, val h: Float)
+
+    /** 可视屏矩形（与 [Frame] 同单位；调用方取 AWT screen bounds）。 */
+    internal data class ScreenRect(val x: Float, val y: Float, val w: Float, val h: Float)
+
+    private val node: Preferences? = node ?: runCatching { Preferences.userRoot().node(NODE_NAME) }.getOrNull()
+
+    private val lock = Any()
+    private var frameInMemory: Frame?
+
+    init {
+        var loaded: Frame? = null
+        node?.let { n ->
+            loaded = runCatching {
+                Frame(n.getFloat(KEY_X, Float.NaN), n.getFloat(KEY_Y, Float.NaN),
+                    n.getFloat(KEY_W, Float.NaN), n.getFloat(KEY_H, Float.NaN))
+            }.getOrNull()?.takeIf { it.isValid() }
+        }
+        frameInMemory = loaded
+    }
+
+    /** 有效存档帧（无档/退化帧 = null，调用方走首启默认帧）。 */
+    fun load(): Frame? = synchronized(lock) { frameInMemory }
+
+    /** 存档（退化/异常帧整笔丢弃不进内存——与 Catalyst saveFrame 守门同口径）。 */
+    fun save(frame: Frame) {
+        if (!frame.isValid()) return
+        synchronized(lock) { frameInMemory = frame }
+        node?.let { n ->
+            runCatching {
+                n.putFloat(KEY_X, frame.x)
+                n.putFloat(KEY_Y, frame.y)
+                n.putFloat(KEY_W, frame.w)
+                n.putFloat(KEY_H, frame.h)
+            }
+        } // 持久化失败 = 内存态降级（进程内生效，重启后回落上次持久化值）
+    }
+
+    /** 有效性门：四值有限且宽/高不低于存档下限（NaN/退化/<480 = 异常几何）。 */
+    private fun Frame.isValid(): Boolean =
+        x.isFinite() && y.isFinite() && w >= MIN_VALID_DIMENSION_DP && h >= MIN_VALID_DIMENSION_DP
+
+    internal companion object {
+        /** 用户级偏好节点（java.util.prefs；与同文件三班偏好同节点，键族不重叠）。 */
+        private const val NODE_NAME = "dev/sharpxia/agentreins/hub"
+
+        /** 帧存档键族（x/y/w/h 四键；键带 v1 版尾，形状变更整体作废用升版表达）。 */
+        private const val KEY_X = "hub.windowFrame.v1.x"
+        private const val KEY_Y = "hub.windowFrame.v1.y"
+        private const val KEY_W = "hub.windowFrame.v1.w"
+        private const val KEY_H = "hub.windowFrame.v1.h"
+
+        /** 窗口 sizing 下限（Catalyst applySizeRestrictions 720×480 同测度，max 不设帽）。 */
+        internal const val MIN_WINDOW_WIDTH_DP = 720f
+        internal const val MIN_WINDOW_HEIGHT_DP = 480f
+
+        /** 存档有效性下限（宽/高任一低于此 = 异常几何；Catalyst minValidSize 480 同值）。 */
+        internal const val MIN_VALID_DIMENSION_DP = 480f
+
+        /**
+         * 恢复帧夹紧可视屏区（纯几何，单测锚）：帧尺寸收到屏区并集内、位置夹到至少留
+         * [VISIBLE_STRIP_DP] 可见条——拔屏/降分辨率后存档帧不再离屏把窗口藏没。无屏信息
+         * 原样放行（保守恢复，Catalyst onScreen 空表同口径）。
+         */
+        internal fun clampToScreens(frame: Frame, screens: List<ScreenRect>): Frame {
+            if (screens.isEmpty()) return frame
+            val minX = screens.minOf { it.x }
+            val minY = screens.minOf { it.y }
+            val maxX = screens.maxOf { it.x + it.w }
+            val maxY = screens.maxOf { it.y + it.h }
+            val w = frame.w.coerceAtMost(maxX - minX).coerceAtLeast(1f)
+            val h = frame.h.coerceAtMost(maxY - minY).coerceAtLeast(1f)
+            return Frame(
+                x = coerceInto(frame.x, minX + VISIBLE_STRIP_DP - w, maxX - VISIBLE_STRIP_DP),
+                y = coerceInto(frame.y, minY + VISIBLE_STRIP_DP - h, maxY - VISIBLE_STRIP_DP),
+                w = w,
+                h = h,
+            )
+        }
+
+        /** 夹紧辅助：区间倒置（屏小于可见条）时取中点，不抛（coerceIn 对倒置区间抛 IllegalArgumentException）。 */
+        private fun coerceInto(v: Float, low: Float, high: Float): Float =
+            if (low > high) (low + high) / 2f else v.coerceIn(low, high)
+
+        /** 恢复帧离屏夹紧的可见条保底（dp；夹后窗体至少此宽/高的条带落在屏区并集内）。 */
+        private const val VISIBLE_STRIP_DP = 64f
     }
 }

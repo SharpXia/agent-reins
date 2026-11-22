@@ -70,6 +70,17 @@ class DefaultSyncEngine(
     private val seenMutex = Mutex()
     private val seen = LinkedHashSet<String>() // 插入序：命中即移除重插（LRU）；超容量裁最旧
 
+    /**
+     * 事件应用串行锁（2026-11-22 FLOW-3）：onEventArrived 的游标读改写（读 c → 应用 → 判大
+     * 回写）与 catchUp 的分页游标推进是两条协程（WSS 帧收集 vs R4 周期校准/断线补拉；桌面
+     * scope = Dispatchers.Default 真并行），交错可把持久游标拉回到已应用事件 id 之下——resume/
+     * catchUp 即重投旧事件，流式 delta 追加非幂等（重复防护责任在引擎，INV-1/INV-2）→ 重复
+     * 追加正文。锁只围游标敏感段（事件 RMW、页界判大回写），网络请求在锁外（长时间分页不
+     * 阻塞帧消费）；bootstrap/rebuild 的快照落定写不并发于事件应用（runLoop 引导先于帧收集、
+     * rebuild 与帧消费同协程），不入锁。
+     */
+    private val applyMutex = Mutex()
+
     private suspend fun markSeen(id: String): Boolean = seenMutex.withLock {
         val fresh = seen.add(id)
         if (fresh && seen.size > 4096) seen.remove(seen.first())
@@ -91,8 +102,14 @@ class DefaultSyncEngine(
             val page = auth.withBearer { api.events(cursor) }
             page.events.forEach { onEventArrived(it) }
             val next = page.nextCursor ?: break
+            // 应用后推进（INV-2；串行分页不并发拉取）。页界回写经 applyMutex 与并发
+            // onEventArrived 串行，且重读判大再写：本轮分页期间 WSS 事件把游标推得比 next
+            // 更远时，本页不得把持久游标拉回（回退窗→旧事件重投，delta 重追加）
+            applyMutex.withLock {
+                val latest = cursors.eventCursor()
+                if (latest == null || next > latest) cursors.updateEventCursor(next)
+            }
             cursor = next
-            cursors.updateEventCursor(next) // 应用后推进（INV-2；串行分页不并发拉取）
             caughtUp = !page.hasMore && next == page.currentWatermark
             if (!page.hasMore) break
         }
@@ -110,10 +127,12 @@ class DefaultSyncEngine(
         if (page.conversations.isNotEmpty()) projector.applyConversations(page.conversations)
     }
 
-    suspend fun onEventArrived(e: EventEnvelope) {
+    suspend fun onEventArrived(e: EventEnvelope) = applyMutex.withLock {
+        // 游标读改写整段串行（applyMutex）：入口读 c → 落库 → 判大回写，期间无让位点也不可
+        // 被并发入口插入——真并行线程下「陈旧 c 条件回写」正是游标回退根因（FLOW-3）
         val c = cursors.eventCursor()
-        if (c != null && e.id <= c) return // 幂等 + 水位裁决（ULID 字典序=时间序）
-        if (markSeen(e.id)) return
+        if (c != null && e.id <= c) return@withLock // 幂等 + 水位裁决（ULID 字典序=时间序）
+        if (markSeen(e.id)) return@withLock
         projector.applyEvent(e)
         if (c == null || e.id > c) cursors.updateEventCursor(e.id)
     }
@@ -132,7 +151,8 @@ class DefaultSyncEngine(
  * - R4 周期校准：在线期间每 [calibrationIntervalMs] 触发 catchUp（先到为准的 500 条计数从简取时间维）
  * - R5 轮询退化：WSS 建连失败/反复断开时按 max(pollIntervalMs, 30s) 节拍 catchUp 兜底
  * - R6 服务端断开不是错误：一律重连恢复；仅 1000+superseded 停轮询等 [triggerRecovery]
- * - 活性看门狗：90s 无任何帧判死主动重连（库级 ping 在 Darwin 不可用时兜底，R6）
+ * - 活性看门狗：90s 无传输层活性（transportActivity tick）判死主动重连（2026-11-22 FLOW-5；
+ *   当前 Ktor 栈下 tick 只随数据帧走、与旧等价，机制就位待栈面变化——见 lastTransportTick 注）
  *
  * wp-10（纯观察面）：相位 [phase] 只在上述既有分支落点翻转（循环头 catching / Ready+追平
  * linked / 断开窗口 reconnecting / HUB-SYNC-001/002 rebuilding / superseded 等待），
@@ -179,7 +199,19 @@ class DefaultSyncScheduler(
     private val recovery = Channel<Unit>(Channel.CONFLATED)
     private val bootMark = TimeSource.Monotonic.markNow()
 
+    /** 应用帧时刻（数据面）：R4 周期校准的静默判据（传输层 ping 不刷此戳——无数据静默期正是校准目标）。 */
     @Volatile private var lastFrameAt = 0L
+
+    /**
+     * 传输层活性快照（2026-11-22 FLOW-5）：tick = [HubWsClient.transportActivity] 现值，at =
+     * tick 变化时刻。判据设计 =「90s 无任意到达帧（含协议层 ping/pong）才判死」；**当前 Ktor
+     * 3.6.0 栈下 Ping/Pong 被 DefaultWebSocketSession 包装拦截、不达用户 incoming（见
+     * DefaultHubWsClient pingIntervalMillis 注），tick 实际只随数据帧走——行为与旧（按应用帧
+     * 判死）等价**，机制就位待栈面变化（raw 会话/启用 pinger，后者 R6 记录 desktop CIO
+     * ready 帧卡死，列 defer 待联调轮）即生效。
+     */
+    @Volatile private var lastTransportTick = 0L
+    @Volatile private var lastTransportAt = 0L
 
     @Volatile private var running = false
     @Volatile private var pollIntervalMs: Long = 30_000
@@ -219,6 +251,9 @@ class DefaultSyncScheduler(
                 try {
                     ws.connect(cursors.eventCursor() ?: DbEventCursorStore.ZERO_ULID)
                     backoffMs = 1_000L
+                    // 新连接活性基线（FLOW-5）：传输戳从建连时刻起算，上一连接的静默账不继承
+                    lastTransportTick = ws.transportActivity.value
+                    lastTransportAt = nowMs()
                     consumeUntilClosed()
                 } finally {
                     collector.cancel()
@@ -257,14 +292,24 @@ class DefaultSyncScheduler(
             delay(5_000)
             if (ws.closed.value != null) break
             val now = nowMs()
-            val last = lastFrameAt
+            // 看门狗（FLOW-5）：判据 = 传输层活性 tick 90s 无变化才判死（中间件静默丢弃/对端
+            // 假活）。当前 Ktor 栈下 tick 只随数据帧走（Ping/Pong 被 DefaultWebSocketSession
+            // 拦截，见 DefaultHubWsClient pingIntervalMillis 注）——行为与旧等价；机制就位待
+            // 栈面变化即回归「真死」判据（defer：启用 pinger 需活 Hub 复验）
+            val tick = ws.transportActivity.value
+            if (tick != lastTransportTick) {
+                lastTransportTick = tick
+                lastTransportAt = now
+            }
+            val last = lastTransportAt
             if (last != 0L && now - last > watchdogTimeoutMs) {
-                // 90s 无帧：连接判死（中间件静默丢弃/对端假活），主动关闭走重连
+                // 90s 无活性变化：连接判死，主动关闭走重连
                 ws.close()
                 break
             }
-            if (last != 0L && now - last >= calibrationIntervalMs) {
-                // R4 周期校准（不阻塞帧消费循环节奏）；追平成功即收敛 linked（wp-10 提示条消失相位兜底）
+            if (lastFrameAt != 0L && now - lastFrameAt >= calibrationIntervalMs) {
+                // R4 周期校准（应用帧静默即对账；不阻塞帧消费循环节奏）；追平成功即收敛 linked
+                //（wp-10 提示条消失相位兜底）
                 if (runCatching { engine.catchUp() }.getOrDefault(false)) setPhase(SyncPhase.Linked)
             }
         }

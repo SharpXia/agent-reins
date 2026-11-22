@@ -12,11 +12,14 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 
 /**
  * wp-18 macOS 本地通知规则单测（desktopApp jvmTest）：触发面清单（审批/回复/run 终态）、
  * 归属降级、回复差异面（基线/非当前打开；2026-11-07 起 run 完成不再推送、抑制窗已移除）、
- * reset、osascript 脚本构造与静默降级。
+ * reset、osascript 脚本构造与静默降级。2026-11-22 降噪轮：失败回声锚/回复回声窗与重建门
+ * （iOS HubStore + 服务端 push/apns.go 桌面镜像）同面入锚。
  * 口径与 iOS wp-13（HubStore.noteConversationsPush / noteApprovalRequested / noteRunTerminal
  * + NotificationCoordinator）逐一对应，回归锚 = 桌面↔iOS 通知触发面 parity 不漂移。
  */
@@ -69,11 +72,23 @@ class DesktopNotificationCoordinatorTest {
         sessionKey: String? = "sk-1",
         gatewayId: String = "gw1",
         runId: String? = null,
+        data: kotlinx.serialization.json.JsonElement = kotlinx.serialization.json.buildJsonObject {},
     ) = EventEnvelope(
         id = "01TEST00000000000000000000", seq = 1L, type = type, gatewayId = gatewayId,
         sessionKey = sessionKey, runId = runId, ts = "2026-11-06T00:00:00Z",
-        data = kotlinx.serialization.json.buildJsonObject {},
+        data = data,
     )
+
+    /** message.created 载荷（role/content/runId；桌面回声判定面的信封形状）。 */
+    private fun messageCreatedData(
+        content: String,
+        role: String = "assistant",
+        runId: String? = null,
+    ) = buildJsonObject {
+        put("role", JsonPrimitive(role))
+        put("content", JsonPrimitive(content))
+        if (runId != null) put("runId", JsonPrimitive(runId))
+    }
 
     // ── 信封分类 ──
 
@@ -102,6 +117,33 @@ class DesktopNotificationCoordinatorTest {
         assertNull(c.classify(envelope(EventEnvelope.MESSAGE_CREATED)))
         // run/approval 域必带 sessionKey；缺失 = 非通知触发面
         assertNull(c.classify(envelope(EventEnvelope.RUN_COMPLETED, sessionKey = null)))
+    }
+
+    @Test
+    fun classifyMessageCreatedAssistantOnlyAndRunFailedCarriesReason() {
+        val c = coordinator(FakeNotifier(), resolver = { _, _ -> "conv-1" })
+        // assistant final 行进分类（2026-11-22 降噪轮：回声判定面）
+        assertEquals(
+            DesktopNotificationCoordinator.Classified.MessageCreated("conv-1", "r1", "boom"),
+            c.classify(
+                envelope(EventEnvelope.MESSAGE_CREATED, runId = "r1", data = messageCreatedData(content = "boom")),
+            ),
+        )
+        // role fail-closed：user 行不进通知面（AgentBridge/服务端 pushAlert 同口径）
+        assertNull(
+            c.classify(
+                envelope(EventEnvelope.MESSAGE_CREATED, data = messageCreatedData(content = "hi", role = "user")),
+            ),
+        )
+        // run.failed 载荷 data.error 随分类透出（回声锚记忆面）
+        assertEquals(
+            DesktopNotificationCoordinator.Classified.RunTerminal(
+                "gw1", "conv-1", completed = false, runId = "r1", reason = "boom",
+            ),
+            c.classify(
+                envelope(EventEnvelope.RUN_FAILED, runId = "r1", data = buildJsonObject { put("error", JsonPrimitive("boom")) }),
+            ),
+        )
     }
 
     // ── 审批触发 ──
@@ -297,6 +339,109 @@ class DesktopNotificationCoordinatorTest {
         clock.advanceMillis(100)
         c.handleConversationsPush(listOf(conv("conv-1", 1)))
         assertEquals(2, notifier.received.size) // 失败通知 + 回复通知都到
+    }
+
+    // ── 2026-11-22 降噪轮：失败回声锚 + 回复回声窗（iOS HubStore.recentRunFailures / 服务端
+    //    push/apns.go suppressFailureEcho 桌面镜像，TTL 2min/容量 256 同参） ──
+
+    @Test
+    fun failureEchoRowUnreadIncrementSuppressed() {
+        // run.failed（带原因）→ 失败通知；「正文=失败原因」的 assistant 行（message.created）
+        // → 不提醒但装备回声窗；紧随的 unread 增量 = 回声行差异面 → 吞（失败信息由失败通知
+        // 单条承载，不再以「有新回复」二推）
+        val notifier = FakeNotifier()
+        val c = coordinator(notifier)
+        c.handleConversationsPush(listOf(conv("conv-1", 0)))
+        c.handleEvent(
+            DesktopNotificationCoordinator.Classified.RunTerminal(
+                "gw1", "conv-1", completed = false, runId = "r1", reason = "boom",
+            ),
+        )
+        assertEquals(1, notifier.received.size, "失败通知照发")
+        c.handleEvent(DesktopNotificationCoordinator.Classified.MessageCreated("conv-1", "r1", "boom"))
+        assertEquals(1, notifier.received.size, "回声行本身不提醒")
+        c.handleConversationsPush(listOf(conv("conv-1", 1)))
+        assertEquals(1, notifier.received.size, "回声行的未读增量吞掉，不二推「有新回复」")
+    }
+
+    @Test
+    fun genuineReplyAfterFailureEchoNotifies() {
+        // 正文与失败原因不等值 = 非回声行（绝不误伤真实回复）：窗被清、增量照常提醒
+        val notifier = FakeNotifier()
+        val c = coordinator(notifier)
+        c.handleConversationsPush(listOf(conv("conv-1", 0)))
+        c.handleEvent(
+            DesktopNotificationCoordinator.Classified.RunTerminal(
+                "gw1", "conv-1", completed = false, runId = "r1", reason = "boom",
+            ),
+        )
+        c.handleEvent(DesktopNotificationCoordinator.Classified.MessageCreated("conv-1", "r1", "真实回复正文"))
+        c.handleConversationsPush(listOf(conv("conv-1", 1)))
+        assertEquals(2, notifier.received.size)
+        assertEquals(DesktopNotificationCoordinator.Kind.REPLY, notifier.received.last().kind)
+    }
+
+    @Test
+    fun echoWindowExpiresAndFailsOpen() {
+        // 窗装备后超时未消费（推送延迟超 10s）：过期窗一次性消费后落后续守门——宁可双响，
+        // 不吞真实回复（iOS「锚过期一律放行」同方向）
+        val notifier = FakeNotifier()
+        val clock = FakeClock()
+        val c = coordinator(notifier, clock = clock)
+        c.handleConversationsPush(listOf(conv("conv-1", 0)))
+        c.handleEvent(
+            DesktopNotificationCoordinator.Classified.RunTerminal(
+                "gw1", "conv-1", completed = false, runId = "r1", reason = "boom",
+            ),
+        )
+        c.handleEvent(DesktopNotificationCoordinator.Classified.MessageCreated("conv-1", "r1", "boom"))
+        clock.advanceMillis(10_001)
+        c.handleConversationsPush(listOf(conv("conv-1", 1)))
+        assertEquals(2, notifier.received.size, "过期回声窗放行未读增量")
+    }
+
+    @Test
+    fun failureEchoAnchorMissingRunIdOrReasonNeverSuppresses() {
+        // 锚守门：runId/reason 空 = 不记锚（旧信封形态）——回复照常提醒（宁滥勿缺方向）
+        val notifier = FakeNotifier()
+        val c = coordinator(notifier)
+        c.handleConversationsPush(listOf(conv("conv-1", 0)))
+        c.handleEvent(DesktopNotificationCoordinator.Classified.RunTerminal("gw1", "conv-1", completed = false, runId = null))
+        c.handleEvent(DesktopNotificationCoordinator.Classified.MessageCreated("conv-1", "", "boom"))
+        c.handleConversationsPush(listOf(conv("conv-1", 1)))
+        assertEquals(2, notifier.received.size)
+        assertEquals(DesktopNotificationCoordinator.Kind.REPLY, notifier.received.last().kind)
+    }
+
+    // ── 2026-11-22 降噪轮：重建门（iOS shouldNotifyLocally 的 rebuilding 排除，桌面镜像） ──
+
+    @Test
+    fun rebuildingGateSuppressesReplyAndBaselineAbsorbsIncrement() {
+        // rebuilding 期：未读增量不提醒但基线照常推进；相位回 Linked 后同值不复发、真增量照常
+        val notifier = FakeNotifier()
+        var rebuilding = true
+        val c = coordinator(notifier)
+        c.rebuildingGate = { rebuilding }
+        c.handleConversationsPush(listOf(conv("conv-1", 0)))
+        c.handleConversationsPush(listOf(conv("conv-1", 3)))
+        assertTrue(notifier.received.isEmpty(), "重建期快照回灌不算「有新回复」")
+        rebuilding = false
+        c.handleConversationsPush(listOf(conv("conv-1", 3)))
+        assertTrue(notifier.received.isEmpty(), "基线已吸收重建期增量，相位恢复后同值不复发")
+        c.handleConversationsPush(listOf(conv("conv-1", 5)))
+        assertEquals(1, notifier.received.size)
+        assertEquals(DesktopNotificationCoordinator.Kind.REPLY, notifier.received.single().kind)
+    }
+
+    @Test
+    fun rebuildingGateNullKeepsLegacyBehavior() {
+        // 门未装配（旧装配/单测兼容）：放行，wp-18 原行为不漂移
+        val notifier = FakeNotifier()
+        val c = coordinator(notifier)
+        c.handleConversationsPush(listOf(conv("conv-1", 0)))
+        c.handleConversationsPush(listOf(conv("conv-1", 2)))
+        assertEquals(1, notifier.received.size)
+        assertEquals(DesktopNotificationCoordinator.Kind.REPLY, notifier.received.single().kind)
     }
 
     // ── reset（登录态离场） ──

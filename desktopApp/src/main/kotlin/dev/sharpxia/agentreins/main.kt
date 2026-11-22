@@ -1,5 +1,6 @@
 package dev.sharpxia.agentreins
 
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -11,12 +12,15 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Tray
 import androidx.compose.ui.window.Window
+import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import dev.sharpxia.agentreins.desktopui.DesktopHubApp
+import dev.sharpxia.agentreins.desktopui.DesktopWindowFrameStore
 import dev.sharpxia.agentreins.desktopui.DesktopWindowPreferences
 import dev.sharpxia.agentreins.hub.HubConfig
 import dev.sharpxia.agentreins.hub.HubException
@@ -27,7 +31,11 @@ import io.ktor.client.request.header
 import io.ktor.http.HttpHeaders
 import io.ktor.http.takeFrom
 import io.ktor.websocket.Frame
+import java.awt.Dimension
+import java.awt.GraphicsEnvironment
 import java.awt.Window
+import java.awt.event.ComponentAdapter
+import java.awt.event.ComponentEvent
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlinx.coroutines.launch
@@ -44,6 +52,10 @@ import kotlinx.coroutines.runBlocking
  * + 关窗行为开关（DesktopWindowPreferences，默认关窗最小化到托盘：仅隐藏 AWT 窗不退出进程，
  * 同步/通知面随进程存活——wp-9 通知面在关窗后仍有意义的前提）；关窗退出开关关闭行为回到
  * 旧语义（exitApplication），托盘「退出」菜单始终真正退出进程。
+ * 2026-11-22 大屏形态对齐轮（DSK-3，Catalyst MacWindowFrame 同位面）：窗口最小 720×480
+ * sizing 下限（AWT minimumSize）+ 窗口帧存档（DesktopWindowFrameStore，x/y/w/h 经
+ * java.util.prefs，几何变动 600ms 防抖 + 关窗补存；恢复帧先夹紧可视屏区，无档/退化帧
+ * 保持原首启默认帧 1280×800）。
  *
  * 三条 Hub 验收通道不开窗口、跑完即退出（HUB_BASE / HUB_USER / HUB_PASS 来自环境变量，不落代码）：
  * - `hub-login`：认证两步流 + AUTH-006 + 设备绑定 + 静默恢复轮换 + 撤销，见 [hubLoginProbe]
@@ -64,13 +76,33 @@ fun main(args: Array<String>) {
         return
     }
     application {
-        val windowState = rememberWindowState(width = 1280.dp, height = 800.dp)
+        // DSK-3 窗口形态面（Catalyst MacWindowFrame 同位面）：帧存档恢复（无档/退化帧 =
+        // 原首启默认帧 1280×800 不变），恢复前夹紧可视屏区（拔屏/降分辨率后存档帧不离屏）。
+        // 单位口径 dp = AWT 窗口坐标 1:1（DesktopWindowFrameStore 头注），全链零密度换算。
+        val frameStore = remember { DesktopWindowFrameStore() }
+        val restoredFrame = remember {
+            frameStore.load()?.let { DesktopWindowFrameStore.clampToScreens(it, desktopScreenRects()) }
+        }
+        val windowState = rememberWindowState(
+            position = restoredFrame?.let { WindowPosition(it.x.dp, it.y.dp) }
+                ?: WindowPosition.PlatformDefault,
+            size = restoredFrame?.let { DpSize(it.w.dp, it.h.dp) } ?: DpSize(1280.dp, 800.dp),
+        )
         // wp-14：关窗行为偏好（内存镜像权威 + java.util.prefs best-effort 持久化，缺省 =
         // 关窗最小化）。同一实例喂 onCloseRequest 决策与 DesktopHubApp（设置页开关）。
         val windowPrefs = remember { DesktopWindowPreferences() }
         // 主窗 AWT 引用：托盘「显示主窗」与关窗最小化共用（SideEffect 在窗口内容里捕获；
         // 未捕获 null 时关窗走退出兜底——不应发生，防御）。
         var awtWindow by remember { mutableStateOf<Window?>(null) }
+        // 帧存档即时面（AWT 事件防抖 600ms 消费 + 关窗路径直调）：读 AWT 窗口 bounds 原值
+        //（= dp 同单位），位置未落 AWT 窗（不应发生，防御）静默跳过。
+        fun saveWindowFrame() {
+            val w = awtWindow ?: return
+            val b = w.bounds
+            frameStore.save(
+                DesktopWindowFrameStore.Frame(b.x.toFloat(), b.y.toFloat(), b.width.toFloat(), b.height.toFloat()),
+            )
+        }
         fun showMainWindow() {
             awtWindow?.let { w ->
                 // 最小化态关窗后唤回：只清 ICONIFIED 位（不动 MAXIMIZED，保住最大化状态）
@@ -96,6 +128,9 @@ fun main(args: Array<String>) {
             title = "AgentReins Hub",
             state = windowState,
             onCloseRequest = {
+                // DSK-3：关窗即存档（覆盖防抖窗内关窗丢末次几何的边角；托盘退出菜单不经
+                // 此路径，靠会话期防抖存档兜底——Catalyst「强退不作依赖」同口径）。
+                saveWindowFrame()
                 if (windowPrefs.minimizeToTrayOnClose) {
                     // wp-14 验收：关窗 = 隐藏到托盘（进程与同步/通知面存活，托盘可唤回）；
                     // 仅置 AWT 不可见，不 dispose 窗口——Compose 组合与 DesktopHubApp 数据面
@@ -108,10 +143,39 @@ fun main(args: Array<String>) {
             },
         ) {
             SideEffect { awtWindow = window }
+            // DSK-3：sizing 下限 + 几何变动防抖存档（一次性装配，DisposableEffect 按 window
+            // 键防重装）。下限走 AWT minimumSize——Compose Desktop 默认可无限缩小，用户拖拽
+            // 缩窗被 720×480 拦下（Catalyst applySizeRestrictions 同测度，max 不设帽）。
+            DisposableEffect(window) {
+                window.minimumSize = Dimension(
+                    DesktopWindowFrameStore.MIN_WINDOW_WIDTH_DP.toInt(),
+                    DesktopWindowFrameStore.MIN_WINDOW_HEIGHT_DP.toInt(),
+                )
+                val saveTimer = javax.swing.Timer(600) { saveWindowFrame() }
+                saveTimer.isRepeats = false // 防抖单发（restart 重置计时，Catalyst 600ms 同参数）
+                val frameWatcher = object : ComponentAdapter() {
+                    override fun componentMoved(e: ComponentEvent?) { saveTimer.restart() }
+                    override fun componentResized(e: ComponentEvent?) { saveTimer.restart() }
+                }
+                window.addComponentListener(frameWatcher)
+                onDispose {
+                    saveTimer.stop()
+                    window.removeComponentListener(frameWatcher)
+                }
+            }
             DesktopHubApp(windowPrefs)
         }
     }
 }
+
+/** 可视屏矩形清单（AWT screen bounds，dp = AWT 坐标同单位；体系不可用 = 空表走保守放行）。 */
+private fun desktopScreenRects(): List<DesktopWindowFrameStore.ScreenRect> =
+    runCatching {
+        GraphicsEnvironment.getLocalGraphicsEnvironment().screenDevices.map { screen ->
+            val b = screen.defaultConfiguration.bounds
+            DesktopWindowFrameStore.ScreenRect(b.x.toFloat(), b.y.toFloat(), b.width.toFloat(), b.height.toFloat())
+        }
+    }.getOrDefault(emptyList())
 
 /**
  * wp-14 托盘图标（资源无关几何绘制，零 PNG 依赖）：蓝底圆角方 + 白色「中枢」三点连线

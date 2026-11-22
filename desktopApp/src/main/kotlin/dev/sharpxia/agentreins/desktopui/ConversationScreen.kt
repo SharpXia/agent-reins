@@ -25,6 +25,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -104,6 +106,17 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val OPTIMISTIC_SEQ_SENTINEL: Long = Long.MAX_VALUE
+
+/**
+ * 宽窗宽度帽（2026-11-22 大屏观感对锁轮，iOS Catalyst 同测度参数）：气泡 640dp 帽 + 时间线
+ * 水平 padding 14×2 = 668dp 内容列帽（iOS HubViews.swift HubMessageRow `.frame(maxWidth: 640)`
+ * 与 MacSplitRoot.swift MacContentColumnModifier 同值同义）——大窗/全屏下正文行宽不随窗口
+ * 全幅拉伸（观感层不因协议缩水的复刻基线）。桌面时间线 padding 16×2，行测度 636dp 在 668
+ * 列帽内 4dp：气泡帽保留 = 双保险（防列宽调整后失效，iOS 同口径）。只收宽度——纵向锚定链
+ *（weight/滚动/回到底部 overlay）零触碰。
+ */
+private const val BUBBLE_MAX_WIDTH_DP = 640
+private const val CONTENT_COLUMN_MAX_WIDTH_DP = 668
 
 /** 末条消息失败判定（角色系统批次4 聊天页 ERROR 态信号；state/uiState 口径与消息行失败徽标同源）。 */
 private fun UiMessage?.isFailedMessage(): Boolean {
@@ -794,7 +807,12 @@ internal fun ConversationScreen(
             exit = fadeOut() + shrinkVertically(),
         ) {
             Column(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    // 内容列居中帽：宽窗审批卡不随窗口全幅拉伸，与时间线同测度
+                    .wrapContentWidth(Alignment.CenterHorizontally)
+                    .widthIn(max = CONTENT_COLUMN_MAX_WIDTH_DP.dp)
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 approvals.forEach { a ->
@@ -824,8 +842,17 @@ internal fun ConversationScreen(
                 }
             }
         } else {
-            // 2026-11-07 二轮：回到底部悬浮按钮容器（最后一条 item 不在视口时浮现，见 overlay）
-            Box(Modifier.fillMaxWidth().weight(1f)) {
+            // 2026-11-07 二轮：回到底部悬浮按钮容器（最后一条 item 不在视口时浮现，见 overlay）。
+            // 宽窗内容列居中帽（2026-11-22，iOS Catalyst 同测度）：fillMaxWidth 撑满后
+            // wrapContentWidth 把 668 收口列居中——iOS MacContentColumnModifier 双 frame
+            // 同式（先帽后撑满居中）；只收宽度，weight/滚动锚定零触碰。
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .wrapContentWidth(Alignment.CenterHorizontally)
+                    .widthIn(max = CONTENT_COLUMN_MAX_WIDTH_DP.dp)
+            ) {
             LazyColumn(
                 modifier = Modifier.fillMaxWidth(),
                 state = listState,
@@ -931,13 +958,25 @@ internal fun ConversationScreen(
                 highlightIndex = slashHighlightIndex,
                 onSelect = { selectSlashCommand(it) },
                 onPrefill = { prefillSlashCommand(it) },
-                modifier = Modifier.padding(horizontal = 14.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    // 内容列居中帽：宽窗面板不随窗口全幅拉伸，与时间线/composer 同测度
+                    .wrapContentWidth(Alignment.CenterHorizontally)
+                    .widthIn(max = CONTENT_COLUMN_MAX_WIDTH_DP.dp)
+                    .padding(horizontal = 14.dp),
             )
         }
 
-        // 发送区
+        // 发送区（底色带保持全幅 = composer 独立分区语义；输入测度收内容列帽，与气泡列
+        // 对齐同一测度——iOS macContentColumn 把 composer 收进列帽的桌面对应面）
         Surface(color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)) {
-            Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .wrapContentWidth(Alignment.CenterHorizontally)
+                    .widthIn(max = CONTENT_COLUMN_MAX_WIDTH_DP.dp)
+                    .padding(12.dp),
+            ) {
                 // #3（2026-11-08）：composer「运行中发送将排队」提示撤显示（iOS 2026-11-07
                 // 二轮同款）——排队语义上移为消息自身的「排队中」状态徽标（消息级落库状态，
                 // 见 UserMessageRow queued 分支），composer 行不再占位。
@@ -1252,6 +1291,9 @@ private fun UserMessageRow(m: UiMessage) {
             AttachmentChipsRow(m.attachments, modifier = Modifier.padding(bottom = 4.dp))
         }
         Surface(
+            // 气泡宽度帽（iOS Catalyst HubMessageRow 640pt 同测度）：列 horizontalAlignment=End
+            // 保住右贴落位（iOS .trailing 同口径），长正文帽内换行
+            modifier = Modifier.widthIn(max = BUBBLE_MAX_WIDTH_DP.dp),
             color = MaterialTheme.colorScheme.primaryContainer,
             shape = RoundedCornerShape(12.dp),
         ) {
@@ -1412,6 +1454,9 @@ private fun AssistantMessageRow(
             }
         } else
         Surface(
+            // 气泡宽度帽（iOS Catalyst HubMessageRow 640pt 同测度）：列 horizontalAlignment=Start
+            // 保住左贴落位（iOS .leading 同口径），长正文帽内换行
+            modifier = Modifier.widthIn(max = BUBBLE_MAX_WIDTH_DP.dp),
             color = MaterialTheme.colorScheme.surfaceVariant,
             shape = RoundedCornerShape(12.dp),
         ) {

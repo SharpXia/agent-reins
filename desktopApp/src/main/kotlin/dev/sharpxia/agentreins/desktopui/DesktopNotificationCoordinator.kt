@@ -9,6 +9,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
 
 /**
  * wp-18：macOS 本地通知面（iOS wp-13 NotificationCoordinator + HubStore 触发面的桌面同位）。
@@ -26,9 +29,15 @@ import kotlinx.coroutines.launch
  * - 审批：有归属 → 「会话名」有新的审批请求；未映射 → 无归属提醒（审批仍具行动性）。
  *   当前打开不抑制（审批是 run 前置门，出现即需注意，与 iOS 同口径）。wp-4：归属面放开两跳
  *   连结行（shared 投影分域）——他端/channel 会话的审批也带会话名。
- * - 回复：已知卡片 unread 增量 + 非当前打开；run.completed 后 3s 窗内的回复吞掉（防双响）。
+ * - 回复：已知卡片 unread 增量 + 非当前打开（「completed 后 3s 窗内回复吞掉」随 2026-11-07
+ *   「完成不再推送」移除，旧文档随本轮订正）。2026-11-22 降噪轮桌面镜像（iOS HubStore +
+ *   服务端 push/apns.go 同参）补两道抑制门：失败回声窗（失败 run 的原因回声行未读增量吞掉，
+ *   防失败通知+回复双响）与重建门（rebuilding 期快照回灌不算新回复），见回声锚节与
+ *   [rebuildingGate]。
  * - run 终态：仅 completed/failed（run.aborted 是用户主动 Stop 的自致结果，不提醒）；
- *   未映射会话不提醒。completed 同时置 3s 回复抑制窗。
+ *   未映射会话不提醒。completed 整体静默（2026-11-07 用户拍板，3s 抑制窗随之移除）；
+ *   failed 先记回声去重锚（全量，heartbeat/他端失败 run 的错误回声行同样要抑制）再走提醒
+ *   守门。
  *   wp-4 修法二：[runOriginGate]（两端协调器同口径 = RunOriginRegistry.isRunLocal 消费）——
  *   仅「本端发起」（message.send 登记；compact 触发静默、他端无记录抑制）的 run 终态提醒。
  *
@@ -60,7 +69,7 @@ internal class DesktopNotificationCoordinator(
     private val mutedConversationIds: () -> Set<String> = { emptySet() },
     /** wp-9：通知总开关（false = [notify] 单点门放空全部 kind 含审批；生产 = DesktopMutePreferences）。 */
     private val notificationsEnabled: () -> Boolean = { true },
-    /** 单调时钟注入点（测试控制 3s 抑制窗推进；生产 = System.nanoTime）。 */
+    /** 单调时钟注入点（测试控制回声锚 TTL/回复回声窗推进；生产 = System.nanoTime）。 */
     private val nowNanos: () -> Long = System::nanoTime,
 ) {
     /** 单条已定形的本地通知（发送面 = [DesktopNotifier]）。 */
@@ -96,6 +105,23 @@ internal class DesktopNotificationCoordinator(
             val conversationId: String,
             val completed: Boolean,
             val runId: String?,
+            /**
+             * 2026-11-22 降噪轮：失败原因（run.failed data.error 透传、trim；completed 恒空串）
+             * ——回声去重锚记忆面（iOS noteRunTerminal reason / AgentBridge data.error 同源）。
+             */
+            val reason: String = "",
+        ) : Classified
+
+        /**
+         * 2026-11-22 降噪轮：assistant final 权威行（message.created，role=assistant fail-closed
+         * 同 AgentBridge/服务端 pushAlert 口径）。桌面回复触发面仍是会话列表 unread 增量（该面
+         * 无 runId/正文可得），本类只服务失败回声判定：content 与失败锚 reason 等值 → 给该会话
+         * 装备回声窗，吞掉紧随的未读增量（防失败通知+回复双响）。
+         */
+        data class MessageCreated(
+            val conversationId: String,
+            val runId: String,
+            val content: String,
         ) : Classified
     }
 
@@ -114,6 +140,18 @@ internal class DesktopNotificationCoordinator(
      */
     @Volatile
     var runOriginGate: ((gatewayId: String, runId: String?) -> Boolean)? = null
+
+    /**
+     * 2026-11-22 降噪轮·重建门（iOS shouldNotifyLocally 的 syncPhase != "rebuilding" 桌面镜像）：
+     * 生产 = client.syncPhase（壳层 client 组装后注入 lambda，runOriginGate 同式——start/stop
+     * 重建 scheduler 不换 client 级 phaseState 流，引用恒活）。true（Rebuilding）= 抑制回复提醒：
+     * HUB-SYNC-001/002 重建期快照回灌的旧消息 unread 差异不算「有新回复」；unread 基线照常
+     * 推进（重建差异被静默吸收，相位回 Linked 后不复发）。只门回复触发面——审批/run 终态走
+     * 事件旁路（已应用事件），天然不含重建快照回灌，无需门。null = 未装配（旧装配/单测兼容，
+     * 放行）。
+     */
+    @Volatile
+    var rebuildingGate: (() -> Boolean)? = null
 
     /** eventTap 入口（DefaultHubClient 组装时注入；投影应用后回调）。 */
     fun onEventEnvelope(envelope: EventEnvelope) {
@@ -136,11 +174,33 @@ internal class DesktopNotificationCoordinator(
                 gatewayId = envelope.gatewayId, conversationId = conversationId, completed = true, runId = envelope.runId,
             )
             EventEnvelope.RUN_FAILED -> Classified.RunTerminal(
-                gatewayId = envelope.gatewayId, conversationId = conversationId, completed = false, runId = envelope.runId,
+                gatewayId = envelope.gatewayId, conversationId = conversationId, completed = false,
+                runId = envelope.runId,
+                reason = dataString(envelope, "error").trim(), // 失败原因（服务端 runFailureError 同字段）
             )
+            // 2026-11-22 降噪轮：assistant final 行进分类（role fail-closed——缺 role/其他 role
+            // 一律不进，服务端 pushAlert 同口径，防非 assistant 形态绕过闭值过滤）；载荷形状漂移
+            // = 空值降级不抛（宽松解析纪律）
+            EventEnvelope.MESSAGE_CREATED -> {
+                val obj = runCatching { envelope.data.jsonObject }.getOrNull() ?: return null
+                if ((obj["role"] as? JsonPrimitive)?.contentOrNull != "assistant") return null
+                Classified.MessageCreated(
+                    conversationId = conversationId,
+                    runId = envelope.runId
+                        ?: (obj["runId"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotEmpty() }
+                        ?: "",
+                    content = (obj["content"] as? JsonPrimitive)?.contentOrNull ?: "",
+                )
+            }
             else -> null // run.aborted 与其余事件不走通知面（回复走会话列表 Flow 差异）
         }
     }
+
+    /** data 载荷字符串字段（宽松：非对象/缺键/非字符串 = 空串；run.failed data.error 用）。 */
+    private fun dataString(envelope: EventEnvelope, field: String): String =
+        runCatching { envelope.data.jsonObject }.getOrNull()
+            ?.let { (it[field] as? JsonPrimitive)?.contentOrNull }
+            .orEmpty()
 
     /** 会话列表投影 Flow 推送入口（壳层 LaunchedEffect 喂入）。 */
     fun pushConversations(list: List<UiConversation>) {
@@ -178,12 +238,19 @@ internal class DesktopNotificationCoordinator(
     internal fun handleEvent(classified: Classified) {
         when (classified) {
             is Classified.ApprovalRequested -> notifyApproval(classified.conversationId)
-            is Classified.RunTerminal -> notifyRunTerminal(
-                gatewayId = classified.gatewayId,
-                conversationId = classified.conversationId,
-                completed = classified.completed,
-                runId = classified.runId,
-            )
+            is Classified.RunTerminal -> {
+                // 2026-11-22 降噪轮（iOS noteRunTerminal 同序）：失败锚先于一切提醒守门记忆
+                //（全量——heartbeat/他端失败 run 的错误回声行同样要抑制；runId/reason 空由锚
+                // 守门拒收），失败提醒自身的归属/静音/发起方守门在 notifyRunTerminal。
+                if (!classified.completed) rememberRunFailure(classified.runId.orEmpty(), classified.reason)
+                notifyRunTerminal(
+                    gatewayId = classified.gatewayId,
+                    conversationId = classified.conversationId,
+                    completed = classified.completed,
+                    runId = classified.runId,
+                )
+            }
+            is Classified.MessageCreated -> handleReplyEcho(classified)
         }
     }
 
@@ -192,9 +259,12 @@ internal class DesktopNotificationCoordinator(
         // wp-9：单次推送读一次静音集（避免每卡片重复读注入 lambda）
         val mutedIds = mutedConversationIds()
         if (list.isEmpty()) {
-            // 全空推送 = 登出清库后的空窗：基线清零（重登快照从零重记，不误报「到达」）
+            // 全空推送 = 登出清库后的空窗：基线清零（重登快照从零重记，不误报「到达」）；
+            // 回声锚/回声窗同清（不跨登录态复用，handleReset 同口径）
             primed = false
             lastUnread.clear()
+            recentRunFailures.clear()
+            replyEchoWindows.clear()
             return
         }
         if (!primed) {
@@ -208,10 +278,19 @@ internal class DesktopNotificationCoordinator(
             val now = c.unread
             // 只对已知卡片判增量（登录/快照重建后新入列的卡片带 unread 只记录不算「到达」）
             if (prev == null || now <= prev) return@forEach
+            // 2026-11-22 降噪轮·失败回声窗（iOS noteReplyMessage 失败回声去重的桌面变体）：
+            // 窗内首个未读增量 = 失败原因回声行的差异面，吞掉（失败信息已由 RUN_FAILED 通知
+            // 单条承载）。窗一次性消费且先于打开/静音判定——打开/静音会话也要消费掉，防窗
+            // 残留误吞后续真实回复；过期窗消费后照常落守门（宁可双响不吞真实回复）。
+            val echoArmedAt = replyEchoWindows.remove(c.conversationId)
+            if (echoArmedAt != null && nowNanos() - echoArmedAt < replyEchoWindowNanos) return@forEach
             if (c.conversationId == openConversationId) return@forEach // 当前打开不提醒
             // wp-9：按会话静音（iOS HubStore.noteConversationsPush 同位 guard）——位置在「当前
             // 打开」之后，与 iOS 同序
             if (c.conversationId in mutedIds) return@forEach
+            // 2026-11-22 降噪轮·重建门（iOS shouldNotifyLocally 最后一位同序）：rebuilding 期
+            // 快照回灌不算「到达」；基线已照常推进，相位回 Linked 后同值不复发
+            if (rebuildingGate?.invoke() == true) return@forEach
             notify(
                 Request(
                     kind = Kind.REPLY,
@@ -227,6 +306,62 @@ internal class DesktopNotificationCoordinator(
         primed = false
         lastUnread.clear()
         latestConversations = emptyList()
+        recentRunFailures.clear() // 回声锚与回声窗随登录态离场清空，不跨会话复用
+        replyEchoWindows.clear()
+    }
+
+    // ── 失败 run 回声去重锚 + 回复回声窗（2026-11-22 降噪轮桌面镜像） ──
+    // 镜像面：iOS HubStore.recentRunFailures / 服务端 push/apns.go suppressFailureEcho 同参
+    //（TTL 2min、容量 256）同语义——run.failed 全量记锚（无论是否提醒），失败 run 终局会写
+    // 一条「正文 = 失败原因」的 assistant 行（服务端降噪轮实证形态），该行的未读增量不再以
+    // 「有新回复」二推。桌面差异：回复触发面是会话列表 unread 增量（无 runId/正文可比），
+    // 判定移到 message.created 事件面（runId+reason 精确等值同 iOS），装备 per-会话回声窗、
+    // 由紧随的未读增量消费——依赖 eventTap Msg 与列表推送 Msg 同经单消费 Channel 的 FIFO 序
+    //（eventTap 在投影事务提交后同步入队，列表 Flow 异步重放，事件先至为常态）。
+
+    /** 回声锚 TTL：2min 覆盖「run.failed → 原因行落库」间隙（iOS/服务端同参）。 */
+    private val runFailureTtlNanos: Long = TimeUnit.MINUTES.toNanos(2)
+
+    /** 回声锚容量帽；触顶剪过期后仍超 = 放弃记忆（降级为可能双响，绝不误伤正常回复）。 */
+    private val runFailureMaxKeys = 256
+
+    /** 回声窗时效：只桥「message.created 入队 → 携其未读增量的列表推送入队」间隙（常态毫秒级）。 */
+    private val replyEchoWindowNanos: Long = TimeUnit.SECONDS.toNanos(10)
+
+    /** 失败 runId → (失败原因, 记忆时刻)。仅消费协程读写（线程模型见类头注）。 */
+    private val recentRunFailures = HashMap<String, FailureAnchor>()
+
+    private class FailureAnchor(val reason: String, val atNanos: Long)
+
+    /** 已装备回声窗（conversationId → 装备时刻）；一次性消费（首个未读增量）。 */
+    private val replyEchoWindows = HashMap<String, Long>()
+
+    /** 记忆失败锚（runId/reason 空拒收；先剪过期再查容量，iOS rememberRunFailure 同序）。 */
+    private fun rememberRunFailure(runId: String, reason: String) {
+        if (runId.isEmpty() || reason.isEmpty()) return
+        val now = nowNanos()
+        recentRunFailures.entries.removeAll { now - it.value.atNanos >= runFailureTtlNanos }
+        if (recentRunFailures.size >= runFailureMaxKeys) return
+        recentRunFailures[runId] = FailureAnchor(reason, now)
+    }
+
+    /** 失败回声判定（iOS noteReplyMessage 同判据链）：锚在、未过期、原因非空且与正文等值。 */
+    private fun isEchoOfFailure(runId: String, content: String): Boolean {
+        if (runId.isEmpty() || content.isEmpty()) return false
+        val anchor = recentRunFailures[runId] ?: return false
+        if (anchor.reason.isEmpty()) return false
+        if (nowNanos() - anchor.atNanos >= runFailureTtlNanos) return false
+        return content == anchor.reason
+    }
+
+    /** assistant final 行处理：回声行装备回声窗；非回声行清窗（合流推送/打开中无增量场景防残留）。 */
+    private fun handleReplyEcho(m: Classified.MessageCreated) {
+        if (m.conversationId.isEmpty()) return // 未映射会话无卡片，unread 差异面不存在，无窗可装备
+        if (isEchoOfFailure(m.runId, m.content.trim())) {
+            replyEchoWindows[m.conversationId] = nowNanos()
+        } else {
+            replyEchoWindows.remove(m.conversationId)
+        }
     }
 
     private fun notifyApproval(conversationId: String) {

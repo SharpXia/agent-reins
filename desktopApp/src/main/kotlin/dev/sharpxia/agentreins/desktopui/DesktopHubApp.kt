@@ -110,6 +110,10 @@ internal fun DesktopHubApp(windowPrefs: DesktopWindowPreferences? = null) {
     coordinator.runOriginGate = { gatewayId, runId ->
         client.runOriginRegistry?.isRunLocal(gatewayId, runId) ?: true
     }
+    // 2026-11-22 降噪轮·重建门（iOS shouldNotifyLocally 的 syncPhase != "rebuilding" 桌面镜像）：
+    // lambda 在通知时刻读 client.syncPhase 现值（client 级 phaseState 流不随 start/stop 换源，
+    // runOriginGate 同式注入）——rebuilding 期快照回灌的旧消息 unread 差异不推「有新回复」。
+    coordinator.rebuildingGate = { client.syncPhase.value == SyncPhase.Rebuilding }
     val authState by client.runtime.state.collectAsState()
 
     // 启动静默恢复：入口地址 = HUB_BASE 环境变量 > 上次登录记忆；无地址/无凭据 → 登录页

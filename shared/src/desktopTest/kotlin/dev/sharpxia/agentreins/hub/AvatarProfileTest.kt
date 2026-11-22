@@ -442,12 +442,15 @@ class AvatarProfileTest {
     private class FakeWs : HubWsClient {
         private val outgoing = MutableSharedFlow<HubServerFrame>(extraBufferCapacity = 16)
         override val closed = MutableStateFlow<HubWsClosed?>(null)
+        // 传输层活性计数（FLOW-5）：emit 即计活，与真件「任意到达帧刷活性」同语义
+        override val transportActivity = MutableStateFlow(0L)
         override suspend fun connect(cursor: String) {}
         override suspend fun close() {}
         override fun frames(): Flow<HubServerFrame> = outgoing
 
         fun emit(frame: HubServerFrame) {
             check(outgoing.tryEmit(frame)) { "fake ws emit buffer overflow" }
+            transportActivity.value += 1
         }
     }
 }

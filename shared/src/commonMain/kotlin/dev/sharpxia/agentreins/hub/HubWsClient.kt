@@ -68,6 +68,16 @@ interface HubWsClient {
 
     fun frames(): Flow<HubServerFrame>
 
+    /**
+     * 传输层活性观测（2026-11-22 FLOW-5）：实现方接收循环内**任意到达帧**（Text/Binary/
+     * Ping/Pong/Close）单调递增计数，跨连接不归零。活性看门狗判死语义 =「90s 无传输层活性」
+     * （中间件静默丢弃/对端假活时连协议 ping 也停）。栈面注意：Ktor webSocketSession() 的
+     * DefaultWebSocketSession 包装会拦截 Ping/Pong（自动 pong/内部 pinger），本实现方的循环
+     * 实际只见数据帧——机制就位、行为与旧等价，栈面变化即生效（DefaultHubWsClient
+     * pingIntervalMillis 注有完整取证）。
+     */
+    val transportActivity: StateFlow<Long>
+
     /** 连接关闭观测：正常连接中断开（含服务端断开、网络失败）后置位；connect 前清空。 */
     val closed: StateFlow<HubWsClosed?>
 

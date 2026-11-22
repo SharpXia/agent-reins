@@ -22,6 +22,11 @@ struct MacSplitRoot: View {
     /// 选中面/行内文字令牌（2026-11-21 观感整治轮：List 作用域 .tint 钉 selectionFill +
     /// 选中行翻色，见 sidebarList 注）。
     @Environment(\.inkColors) private var ink
+    /// 用户现值字号档（2026-11-22 反向钳制修复轮）：侧栏字号环境按下限 .large 取
+    /// max(用户现值, .large)——原绝对值 `.environment(\.dynamicTypeSize, .large)` 注释
+    /// 称「放大一级」实为钳制，系统设了更大字号（.xLarge 起/AX 档）的用户在侧栏被反向
+    /// 压回默认档；本值在 body 内与下限合成（环境自身值不受下游 .environment 覆写）。
+    @Environment(\.dynamicTypeSize) private var incomingTypeSize
     /// 侧栏行删除确认目标（本地瞬态；终动作全走 hub.deleteConversation 同 store 入口，
     /// 同 HubHomeView 的 deleteTarget 口径与文案——已知跨面复制，B3 既有先例）。
     @State private var deleteTarget: UiConversation?
@@ -127,8 +132,9 @@ struct MacSplitRoot: View {
 
     /// 侧栏列（分栏自动提供系统折叠钮 → 与工具栏/标题区融合；折叠态经 columnVisibility
     /// 落 hub.sidebarVisible，供备选菜单项共用）。行内全语义字体（HubConversationRow
-    /// .title3/.caption2/.footnote），List 级环境放大一级适配 Mac 观感（2026-11-19 窗口
-    /// 锁死修复轮用户反馈「侧栏字体偏小」；只挂本列，iOS/iPad 树无此视图零影响）。
+    /// .title3/.caption2/.footnote），List 级环境以 .large 为下限适配 Mac 观感（2026-11-19
+    /// 窗口锁死修复轮用户反馈「侧栏字体偏小」；2026-11-22 反向钳制修复轮改 max(用户现值,
+    /// .large)，不再把系统更大字号压回；只挂本列，非 Mac 树无此视图零影响）。
     private var sidebarList: some View {
         List(selection: sidebarSelection) {
             Section("会话") {
@@ -188,8 +194,10 @@ struct MacSplitRoot: View {
                     .tag(MacSidebarEntry.settings)
             }
         }
-        // 字号环境放大（见 sidebarList 注）：语义字体随环境放大一级，Section 头/系统行同效。
-        .environment(\.dynamicTypeSize, .large)
+        // 字号环境（见 sidebarList 注与 incomingTypeSize 注，2026-11-22 反向钳制修复轮）：
+        // 以 .large 为下限取 max——默认档用户观感不变（.large 即系统默认），更大字号随
+        // 用户不再被压回；语义字体随环境缩放，Section 头/系统行同效。
+        .environment(\.dynamicTypeSize, max(incomingTypeSize, .large))
         // 2026-11-21 观感整治轮（铁律②）：选中胶囊作用域钉住 selectionFill 令牌，脱离全局
         // tint 的隐式来源——今日两模式 selectionFill 与全局 tint 同值（light=ink:45 /
         // dark=ink:83），本行是 no-op，防的是未来全局 tint 漂移时选中面随行漂移。

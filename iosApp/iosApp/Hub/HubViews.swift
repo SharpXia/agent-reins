@@ -179,8 +179,13 @@ private func devScrollProbe() async {
 /// 显示，追平（linked）自动消失——验收③「断网出现提示条、恢复后自动消失；410 重建期间显示
 /// 重建态」。文案与桌面 SyncPhaseBanner 同族（两端体验 parity）：catching = 引导/追平在途
 /// （灰面弱提示）；reconnecting / rebuilding / superseded = 连接降级（琥珀警示面）。
+/// 2026-11-22 状态色收口轮：警示面对改 warningText 实底 + paper 字（footnote 13pt 需 4.5:1
+/// ——warningText 对 warningSubtle 薄底 light 实测仅 4.24:1 不达，warningText 实底对
+/// paper light 4.55 / dark 6.82 双端达标；警示语义由面色承载）。
 struct HubSyncPhaseBanner: View {
     let phase: String
+    // 令牌域（2026-11-22 状态色收口轮）：警示面走 warning 令牌对，不再散写 Color.orange。
+    @Environment(\.inkColors) private var ink
 
     /// #7（2026-11-06 UX 轮）：非 linked 相位的同步 icon 持续旋转——用户可感知「在动 =
     /// 加载中」；wifi.slash/superseded 静态（语义是状态不是进度）。repeatForever 驱动，
@@ -238,11 +243,11 @@ struct HubSyncPhaseBanner: View {
     }
 
     private var backgroundColor: Color {
-        phase == "catching" ? Color(.systemGray6) : Color.orange.opacity(0.18)
+        phase == "catching" ? Color(.systemGray6) : ink.warningText
     }
 
     private var foregroundColor: Color {
-        phase == "catching" ? Color.secondary : Color.orange
+        phase == "catching" ? Color.secondary : ink.paper
     }
 }
 
@@ -364,6 +369,8 @@ struct HubHomeView: View {
 struct NewConversationSheet: View {
     @State private var hub = HubStore.shared
     @Environment(\.dismiss) private var dismiss
+    // 令牌域（2026-11-22 状态色收口轮）：在线点走 successText 令牌，不散写 Color.green。
+    @Environment(\.inkColors) private var ink
 
     var body: some View {
         NavigationStack {
@@ -401,7 +408,8 @@ struct NewConversationSheet: View {
                             }
                         } header: {
                             HStack(spacing: 6) {
-                                Circle().fill(gw.online ? Color.green : Color.secondary)
+                                // 在线点 successText（非文本 3:1 达标）；离线保持 secondary 弱化
+                                Circle().fill(gw.online ? ink.successText : Color.secondary)
                                     .frame(width: 7, height: 7)
                                 Text(gw.name.isEmpty ? "网关" : gw.name)
                             }
@@ -416,7 +424,7 @@ struct NewConversationSheet: View {
                             Image(systemName: "exclamationmark.triangle.fill")
                         }
                         .font(.footnote)
-                        .foregroundStyle(.red.opacity(0.9))
+                        .foregroundStyle(ink.dangerText)
                     }
                 }
             }
@@ -440,6 +448,8 @@ struct NewConversationSheet: View {
 /// 新建——watchGateways 减法收敛；不再有「已有主线卡置灰」终态）。
 private struct NewConversationAgentRow: View {
     @State private var hub = HubStore.shared
+    // 令牌域（2026-11-22 状态色收口轮）：交互图形走 accent 令牌（铁律④），不散写 .blue。
+    @Environment(\.inkColors) private var ink
     let gateway: UiGateway
     let agent: UiAgentRef
     /// v1.4.0 追补（2026-11-16 用户反馈「新建 agent 会话太容易误触」）：点行先确认再建——
@@ -459,7 +469,7 @@ private struct NewConversationAgentRow: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: hasMainCard ? "plus.square.on.square" : "plus.circle.fill")
-                    .foregroundStyle(.blue)
+                    .foregroundStyle(ink.accent)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
                     if submitted {
@@ -595,8 +605,11 @@ struct HubConversationRow: View {
                 Text("\(c.unread)")
                     .font(.caption2.bold())
                     .padding(.horizontal, 7).padding(.vertical, 3)
-                    .background(Capsule().fill(.blue))
-                    .foregroundStyle(.white)
+                    // 2026-11-22 状态色收口轮：徽标对收口 infoText+paper（caption2.bold 需
+                    // 4.5:1——原 .blue+白字 light 4.0/dark 3.65 不达；paper 对 infoText
+                    // light 4.94 / dark 6.64 实测达标），徽标语言全仓统一实底胶囊。
+                    .background(Capsule().fill(ink.infoText))
+                    .foregroundStyle(ink.paper)
             }
         }
         .padding(.vertical, 2)
@@ -648,6 +661,12 @@ struct HubChatView: View {
     /// 标题区指针注视（onContinuousHover，Catalyst/Mac；触摸设备无 hover 自然只走后三路）、
     /// 新消息一次性下瞥 400ms。gaze 合成优先级：注视 > 聚焦下视 > 下瞥窗 > nil。
     @FocusState private var composerFocused: Bool
+    /// Catalyst composer IME 组合态（ComposerTextView coordinator 逐次 textViewDidChange
+    /// 上报 markedTextRange 非 nil，2026-11-22 占位叠加修复轮）：占位符显隐读文本视图实况
+    /// ——组合期草稿层刻意让行不同步（textViewDidChange 门），draftText 恒空、旧条件
+    /// `draftText.isEmpty` 会把占位与 marked text 同起点叠字。iOS 分支 TextField 的系统
+    /// 占位无此通道，本态零消费。
+    @State private var composerMarkedTextActive = false
     @State private var hoverGaze: BotGaze?
     @State private var glanceActive = false
     /// DONE 瞬时窗（聊天页）：hasActiveRun 真→假 且终态非 failed（本页有失败信号，较列表行
@@ -1035,7 +1054,7 @@ struct HubChatView: View {
                             Image(systemName: "exclamationmark.triangle")
                         }
                         .font(.caption)
-                        .foregroundStyle(.red.opacity(0.85))
+                        .foregroundStyle(ink.dangerText)
                         .frame(maxWidth: .infinity, alignment: .center)
                     }
                     ForEach(hub.messages, id: \.messageId) { m in
@@ -1299,7 +1318,7 @@ struct HubChatView: View {
                     } else if let err = hub.loadEarlierError {
                         Label { Text(err) } icon: { Image(systemName: "exclamationmark.triangle") }
                             .font(.caption)
-                            .foregroundStyle(.red.opacity(0.85))
+                            .foregroundStyle(ink.dangerText)
                     }
                 }
             } else {
@@ -1343,7 +1362,7 @@ struct HubChatView: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                 }
                 .font(.caption)
-                .foregroundStyle(.red.opacity(0.9))
+                .foregroundStyle(ink.dangerText)
                 .padding(.horizontal, 12).padding(.top, 4)
             }
             Divider()
@@ -1436,7 +1455,9 @@ struct HubChatView: View {
                 // 主通道 + insertText 兜底，IME 组合期 markedText 内建让行），分流走
                 // ComposerKeyRouter 纯表。占位/聚焦/限高镜像 TextField 既有观感（placeholder
                 // overlay + FocusState 桥 + 4 行 intrinsic 帽，观感 parity 以真机走查为准）；
-                // iOS 分支 TextField 原文零变化。.modifier(keyHandlers) 双保险挂载两分支共用
+                // 同日占位叠加修复轮补：占位显隐另读 coordinator 上报的组合态
+                //（markedTextActive），组合期隐藏防与 marked text 叠字。iOS 分支 TextField
+                // 原文零变化。.modifier(keyHandlers) 双保险挂载两分支共用
                 //（iOS 编译期剔除零操作；Catalyst 文本视图层已消费的事件不再以 SwiftUI
                 // press 形态可达，挂载待新层真机验证后撤）。
                 // 2026-11-21 回车语义轮注记保留：Enter 生效门=聚焦+IME（面板可见性下沉为
@@ -1448,6 +1469,7 @@ struct HubChatView: View {
                         ComposerTextView(
                             text: draftBinding,
                             focus: $composerFocused,
+                            markedTextActive: $composerMarkedTextActive,
                             maxHeightLines: 4,
                             panelVisible: panelVisibleNow,
                             draftTextIsBlank: draftTextIsBlankNow,
@@ -1456,7 +1478,10 @@ struct HubChatView: View {
                             onMoveHighlight: { slashMoveSelection($0) },
                             onTabComplete: { slashHandleTab() },
                         )
-                        if draftText.isEmpty {
+                        // 占位显隐读文本视图实况（2026-11-22 占位叠加修复轮）：组合期
+                        //（markedText 未上屏、草稿层让行恒空）隐藏，防与 marked text 同
+                        // 起点叠字；提交/取消组合后 coordinator 回报 false 自然恢复。
+                        if draftText.isEmpty && !composerMarkedTextActive {
                             Text("发消息…")
                                 .foregroundStyle(Color(uiColor: .placeholderText))
                                 .allowsHitTesting(false) // 占位不拦点按，点透文本视图获焦
@@ -1919,10 +1944,10 @@ private struct DraftAttachmentChipsRow: View {
                 }
                 if d.error != nil {
                     // 失败态：整 chip 可点重试（显式降级，不静默——wp-9 纪律同源）
-                    RoundedRectangle(cornerRadius: 10).fill(Color.red.opacity(0.18))
+                    RoundedRectangle(cornerRadius: 10).fill(ink.dangerSubtle)
                     Image(systemName: "arrow.clockwise")
                         .font(.caption.bold())
-                        .foregroundStyle(.red)
+                        .foregroundStyle(ink.dangerText)
                 }
             }
             .frame(width: 52, height: 52)
@@ -2292,6 +2317,10 @@ private enum ComposerIME {
 private struct ComposerTextView: UIViewRepresentable {
     let text: Binding<String>
     let focus: FocusState<Bool>.Binding
+    /// IME 组合态回传（coordinator 逐次 textViewDidChange 上报 markedTextRange 非 nil）：
+    /// 占位符显隐据此读文本视图实况——组合期草稿层让行不同步、draftText 恒空，占位需
+    /// 另行隐藏（2026-11-22 占位叠加修复轮）。
+    let markedTextActive: Binding<Bool>
     /// 最大可见行数帽（帽内自适应、超帽滚动）。
     let maxHeightLines: Int
     /// 渲染期快照：斜杠面板可见（= !slashSuggestions.isEmpty）。
@@ -2381,6 +2410,10 @@ private struct ComposerTextView: UIViewRepresentable {
         init(_ parent: ComposerTextView) { self.parent = parent }
 
         func textViewDidChange(_ textView: UITextView) {
+            // 占位显隐先于草稿让行门上报（2026-11-22 占位叠加修复轮）：组合态建立/提交/
+            // 取消本身也走 textDidChange，binding 翻转即驱动 overlay 重渲，提交/取消后
+            // marked 为空自然恢复占位。
+            parent.markedTextActive.wrappedValue = textView.markedTextRange != nil
             // IME 组合期（marked text 未上屏）不同步草稿：未确认拼音不进会话草稿层、不点亮
             // 发送键，与键位路由的 markedTextRange 门同一让行口径（2026-11-22 复核 low 清账）。
             // 高度照刷——组合文本同样占版面；提交/取消组合后会再回调一次（届时 marked 为
@@ -2559,7 +2592,7 @@ private struct ModelsInteractiveCard: View {
             HStack(spacing: 6) {
                 Image(systemName: executedCommand == nil ? "cpu" : "checkmark.circle.fill")
                     .font(.caption2)
-                    .foregroundStyle(executedCommand == nil ? Color.secondary : Color.green)
+                    .foregroundStyle(executedCommand == nil ? Color.secondary : ink.successText)
                 if let executed = executedCommand {
                     Text("已执行").font(.caption.weight(.semibold))
                     Text(executed)
@@ -2680,7 +2713,7 @@ private struct CommandOptionsCard: View {
             HStack(spacing: 6) {
                 Image(systemName: executedCommand == nil ? "slider.horizontal.3" : "checkmark.circle.fill")
                     .font(.caption2)
-                    .foregroundStyle(executedCommand == nil ? Color.secondary : Color.green)
+                    .foregroundStyle(executedCommand == nil ? Color.secondary : ink.successText)
                 if let executed = executedCommand {
                     Text("已执行").font(.caption.weight(.semibold))
                     Text(executed)
@@ -2934,7 +2967,7 @@ private final class ScrollProbeBox {
                         // 快照路径 MessageRow.errorKind）；未分类失败（reason=NULL）不虚构文案。
                         Label(reason, systemImage: "exclamationmark.triangle")
                             .font(.caption2)
-                            .foregroundStyle(.red.opacity(0.85))
+                            .foregroundStyle(ink.dangerText)
                     }
                 }
                 // 评审补充项（原清单遗漏）：宽窗气泡/正文 maxWidth 帽——Mac 全屏 ~1500pt+
@@ -3029,8 +3062,8 @@ private final class ScrollProbeBox {
                 Image(systemName: "clock").font(.caption2)
                 Text("发送中").font(.caption2)
             } else if ui == "failed" {
-                Image(systemName: "exclamationmark.triangle.fill").font(.caption2).foregroundStyle(.red)
-                Text("发送失败").font(.caption2).foregroundStyle(.red)
+                Image(systemName: "exclamationmark.triangle.fill").font(.caption2).foregroundStyle(ink.dangerText)
+                Text("发送失败").font(.caption2).foregroundStyle(ink.dangerText)
             } else if ui == "delivered" {
                 // 已送达 = 唯一的 ✓ 形态：出现即代表排队已释放/网关已确认，不再有
                 // 「打勾后又排队」的二义序列（#3）。
@@ -3074,7 +3107,7 @@ struct ApprovalCardView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Image(systemName: "wrench.and.screwdriver")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(ink.warningText)
                 Text(a.toolName)
                     .font(.callout.monospaced().weight(.semibold))
                     .lineLimit(1)
@@ -3083,8 +3116,12 @@ struct ApprovalCardView: View {
                 Text("工具审批")
                     .font(.caption2)
                     .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background(Capsule().fill(Color.orange.opacity(0.18)))
-                    .foregroundStyle(.orange)
+                    // 2026-11-22 状态色收口轮：warningText 实底对（caption2 需 4.5:1——原
+                    // .orange 字压 18% orange 底 ≈2:1；warningSubtle 薄底对 warningText
+                    // light 实测 4.24 亦不达，paper 对 warningText 实底 light 4.55 /
+                    // dark 6.82 达标），与徽标语言统一。
+                    .background(Capsule().fill(ink.warningText))
+                    .foregroundStyle(ink.paper)
             }
             if !a.payloadSummary.isEmpty {
                 Text(a.payloadSummary)
@@ -3115,7 +3152,7 @@ struct ApprovalCardView: View {
                 } icon: {
                     Image(systemName: "exclamationmark.triangle.fill")
                 }
-                .foregroundStyle(.red.opacity(0.9))
+                .foregroundStyle(ink.dangerText)
             } else if submitted {
                 Label("已提交 · 等待确认", systemImage: "clock")
                     .font(.caption)
@@ -3128,6 +3165,11 @@ struct ApprovalCardView: View {
                 } label: {
                     Label("批准", systemImage: "checkmark.circle.fill")
                         .frame(maxWidth: .infinity)
+                        // 铁律①：prominent 面 label 显式钉成对令牌——系统固定白字不随 tint
+                        // 亮度自适应，裸吃 ink 翻转面时暗端 0xF5F5F5 面配白字实测 1.09:1
+                        // 不可读（明端 17.04 属幸存）；paper 对 accent 面 light 5.93 /
+                        // dark 6.64（python3 WCAG 2.x 相对亮度公式实测，双端 ≥4.5）。
+                        .foregroundStyle(ink.paper)
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(inFlight || submitted)
@@ -3145,6 +3187,11 @@ struct ApprovalCardView: View {
 
                 if inFlight { ProgressView().controlSize(.small) }
             }
+            // 铁律②：系统控件面作用域钉交互强调令牌，不裸吃全局 .tint(colors.ink)——ink
+            // 明暗翻转（暗=0xF5F5F5 近白）是「系统固定白 label 压近白面」同族根因
+            //（beta-0.5.22 选中面同源，观感整治轮只收口了选中面/自绘钮面，系统 prominent
+            // 通道漏网）；accent 是双模式 AA 实测成对令牌（交互强调语义的合法来源，铁律④）。
+            .tint(ink.accent)
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 14).fill(ink.surfaceTertiary))
@@ -3240,6 +3287,8 @@ private struct OneTimeValueRow: View {
 /// 管理动作失败降级行（添加/轮换/撤销三 sheet 共用：显式呈现 + 可重试，不静默）。
 private struct MgmtErrorRow: View {
     let message: String
+    // 令牌域（2026-11-22 状态色收口轮）：错误行走 dangerText，不散写 .red.opacity。
+    @Environment(\.inkColors) private var ink
 
     var body: some View {
         Label {
@@ -3248,7 +3297,7 @@ private struct MgmtErrorRow: View {
             Image(systemName: "exclamationmark.triangle.fill")
         }
         .font(.footnote)
-        .foregroundStyle(.red.opacity(0.9))
+        .foregroundStyle(ink.dangerText)
     }
 }
 
@@ -3266,6 +3315,8 @@ private struct GatewayCreatedInfo {
 private struct AddGatewaySheet: View {
     @State private var hub = HubStore.shared
     @Environment(\.dismiss) private var dismiss
+    // 令牌域（2026-11-22 状态色收口轮）：警示提示行走 warningText，不散写 .orange。
+    @Environment(\.inkColors) private var ink
     @State private var name = ""
     @State private var submitting = false
     @State private var error: String?
@@ -3359,7 +3410,7 @@ private struct AddGatewaySheet: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                 }
                 .font(.footnote)
-                .foregroundStyle(.orange)
+                .foregroundStyle(ink.warningText)
             }
         }
         .navigationTitle("添加网关")
@@ -3380,6 +3431,8 @@ private struct AddGatewaySheet: View {
 private struct RotateBridgeTokenSheet: View {
     @State private var hub = HubStore.shared
     @Environment(\.dismiss) private var dismiss
+    // 令牌域（2026-11-22 状态色收口轮）：警示提示行走 warningText，不散写 .orange。
+    @Environment(\.inkColors) private var ink
     let gateway: UiGateway
     @State private var submitting = false
     @State private var error: String?
@@ -3470,7 +3523,7 @@ private struct RotateBridgeTokenSheet: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                 }
                 .font(.footnote)
-                .foregroundStyle(.orange)
+                .foregroundStyle(ink.warningText)
             }
         }
         .navigationTitle("轮换 Token")
@@ -3492,6 +3545,8 @@ private struct RotateBridgeTokenSheet: View {
 private struct RevokeGatewaySheet: View {
     @State private var hub = HubStore.shared
     @Environment(\.dismiss) private var dismiss
+    // 令牌域（2026-11-22 状态色收口轮）：警示提示行走 warningText，不散写 .orange。
+    @Environment(\.inkColors) private var ink
     let gateway: UiGateway
     @State private var submitting = false
     @State private var error: String?
@@ -3516,7 +3571,7 @@ private struct RevokeGatewaySheet: View {
                         Image(systemName: "exclamationmark.triangle.fill")
                     }
                     .font(.footnote)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(ink.warningText)
                 }
                 if let err = error {
                     Section { MgmtErrorRow(message: err) }
@@ -3572,6 +3627,8 @@ private struct RevokeGatewaySheet: View {
 private struct SessionManagerSheet: View {
     @State private var hub = HubStore.shared
     @Environment(\.dismiss) private var dismiss
+    // 令牌域（2026-11-22 状态色收口轮）：主线徽标走 infoText+paper 对。
+    @Environment(\.inkColors) private var ink
     let target: AgentRefKey
 
     /// 重命名目标（alert TextField 载体；nil = 关）。
@@ -3602,7 +3659,7 @@ private struct SessionManagerSheet: View {
                                     Image(systemName: "exclamationmark.triangle.fill")
                                 }
                                 .font(.footnote)
-                                .foregroundStyle(.red.opacity(0.9))
+                                .foregroundStyle(ink.dangerText)
                                 Button("重试") {
                                     hub.listAgentSessions(gatewayId: target.gatewayId, agentId: target.agentId)
                                 }
@@ -3681,8 +3738,11 @@ private struct SessionManagerSheet: View {
                     Text("主线")
                         .font(.caption2.bold())
                         .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(Capsule().fill(.blue.opacity(0.15)))
-                        .foregroundStyle(.blue)
+                        // 2026-11-22 状态色收口轮：infoText 实底对（原 .blue 薄底上 .blue 字
+                        // light ≈4.0 不达 4.5）；infoSubtle 薄底对 infoText 实测 4.44 亦不达，
+                        // 与未读/计数徽标统一实底胶囊对（light 4.94 / dark 6.64）。
+                        .background(Capsule().fill(ink.infoText))
+                        .foregroundStyle(ink.paper)
                 }
                 Spacer(minLength: 0)
                 if hub.deletingSessionIds.contains(s.conversationId)
@@ -3728,6 +3788,8 @@ private struct SessionManagerSheet: View {
 private struct GroupPickerSheet: View {
     @State private var hub = HubStore.shared
     @Environment(\.dismiss) private var dismiss
+    // 令牌域（2026-11-22 状态色收口轮）：选中勾走 accent 令牌（铁律④）。
+    @Environment(\.inkColors) private var ink
     let target: AgentRefKey
     @State private var newGroupName = ""
     @State private var currentGroupId: String?
@@ -3747,7 +3809,7 @@ private struct GroupPickerSheet: View {
                                 Text(group.name).foregroundStyle(.primary)
                                 Spacer()
                                 if currentGroupId == group.id {
-                                    Image(systemName: "checkmark").foregroundStyle(.blue)
+                                    Image(systemName: "checkmark").foregroundStyle(ink.accent)
                                 }
                             }
                         }
@@ -3799,6 +3861,8 @@ private struct GroupPickerSheet: View {
 /// 失败经 createConversationError 显式降级不静默）/管理会话…（v1.4.0 SessionManagerSheet）。
 struct GatewaysView: View {
     @State private var hub = HubStore.shared
+    // 令牌域（2026-11-22 状态色收口轮）：错误行 dangerText、在线点/字 successText。
+    @Environment(\.inkColors) private var ink
 
     @State private var showAddGateway = false
     /// 「加入分组…」目标 agent。
@@ -3843,7 +3907,7 @@ struct GatewaysView: View {
                                 Image(systemName: "exclamationmark.triangle.fill")
                             }
                             .font(.footnote)
-                            .foregroundStyle(.red.opacity(0.9))
+                            .foregroundStyle(ink.dangerText)
                         }
                     }
                 }
@@ -3997,7 +4061,7 @@ struct GatewaysView: View {
             ForEach(hub.gateways, id: \.gatewayId) { gw in
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 8) {
-                        Circle().fill(gw.online ? Color.green : Color.secondary)
+                        Circle().fill(gw.online ? ink.successText : Color.secondary)
                             .frame(width: 8, height: 8)
                         Text(gw.name.isEmpty ? "网关" : gw.name).fontWeight(.semibold)
                         // 复植轮：provider 徽标（桥自报供给方标识透传；空串 = 无徽标，未知不枚举假设）
@@ -4011,7 +4075,7 @@ struct GatewaysView: View {
                         Spacer()
                         Text(gw.online ? "在线" : "离线")
                             .font(.caption)
-                            .foregroundStyle(gw.online ? Color.green : Color.secondary)
+                            .foregroundStyle(gw.online ? ink.successText : Color.secondary)
                     }
                     Text(gw.gatewayId)
                         .font(.caption2.monospaced())
@@ -4226,6 +4290,9 @@ private struct StreamingTypewriter: View {
 struct HubSettingsView: View {
     @State private var hub = HubStore.shared
     @State private var confirmLogout = false
+    // 令牌域（2026-11-22 状态色收口轮）：徽标/在线点/Toggle 轨走功能色与 accent 令牌，
+    // 不再散写系统色（WCAG AA 实测口径见各消费点）。
+    @Environment(\.inkColors) private var ink
 
     var body: some View {
         List {
@@ -4266,8 +4333,11 @@ struct HubSettingsView: View {
                             Text("\(hub.approvals.count)")
                                 .font(.caption2.bold())
                                 .padding(.horizontal, 7).padding(.vertical, 3)
-                                .background(Capsule().fill(Color.orange))
-                                .foregroundStyle(.white)
+                                // 2026-11-22 状态色收口轮：warningText 实底对（原 Color.orange
+                                // +白字 ≈2.2:1 不达 4.5；paper 对 warningText light 4.55 /
+                                // dark 6.82 达标），徽标语言全仓统一实底胶囊。
+                                .background(Capsule().fill(ink.warningText))
+                                .foregroundStyle(ink.paper)
                         }
                     }
                 }
@@ -4283,13 +4353,13 @@ struct HubSettingsView: View {
                 ForEach(hub.gateways, id: \.gatewayId) { gw in
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 8) {
-                            Circle().fill(gw.online ? Color.green : Color.secondary)
+                            Circle().fill(gw.online ? ink.successText : Color.secondary)
                                 .frame(width: 8, height: 8)
                             Text(gw.name.isEmpty ? "网关" : gw.name).fontWeight(.semibold)
                             Spacer()
                             Text(gw.online ? "在线" : "离线")
                                 .font(.caption)
-                                .foregroundStyle(gw.online ? Color.green : Color.secondary)
+                                .foregroundStyle(gw.online ? ink.successText : Color.secondary)
                         }
                         if let seen = gw.lastSeenAt, !seen.isEmpty {
                             Text("最近活跃 \(seen)").font(.caption2).foregroundStyle(.secondary)
@@ -4333,8 +4403,10 @@ struct HubSettingsView: View {
                             Text("\(hub.gateways.count)")
                                 .font(.caption2.bold())
                                 .padding(.horizontal, 7).padding(.vertical, 3)
-                                .background(Capsule().fill(.blue))
-                                .foregroundStyle(.white)
+                                // 2026-11-22 状态色收口轮：infoText 实底对（paper 对 infoText
+                                // light 4.94 / dark 6.64 达标），与未读徽标同语言。
+                                .background(Capsule().fill(ink.infoText))
+                                .foregroundStyle(ink.paper)
                         }
                     }
                 }
@@ -4346,7 +4418,7 @@ struct HubSettingsView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("设备清单加载失败：\(error)")
                             .font(.caption)
-                            .foregroundStyle(.red)
+                            .foregroundStyle(ink.dangerText)
                         Button("重试") { hub.refreshDevices() }
                             .font(.caption)
                     }
@@ -4361,7 +4433,10 @@ struct HubSettingsView: View {
                             Spacer()
                             if d.current == true {
                                 Text("本机").font(.caption).padding(.horizontal, 6).padding(.vertical, 2)
-                                    .background(Capsule().fill(.blue.opacity(0.2)))
+                                    // 2026-11-22 状态色收口轮：infoSubtle 薄底 + ink 字显式成对
+                                    //（不散写 .blue 薄底；caption 对薄底 light 14.9 / dark 14.2）。
+                                    .background(Capsule().fill(ink.infoSubtle))
+                                    .foregroundStyle(ink.ink)
                             } else {
                                 Button("撤销", role: .destructive) { hub.revokeDevice(d.deviceId) }
                                     .font(.caption)
@@ -4375,7 +4450,7 @@ struct HubSettingsView: View {
                 if let failure = hub.revokeFailure {
                     Text("撤销失败：\(failure)")
                         .font(.caption)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(ink.dangerText)
                 }
             }
             Section("接入") {
@@ -4392,14 +4467,19 @@ struct HubSettingsView: View {
                 // 纯显示偏好（hub.streamingPlayback/thinkingIndicator，UserDefaults 持久化跨登出
                 // 保留）——**数据面不动**：流式 delta 照常入投影库、已读水位照常推进，开关只裁
                 // 渲染分支；@Observable 属性级追踪，翻转即会话页/标题栏即时重渲。
+                // 铁律②：Toggle on 态轨作用域钉交互强调令牌——裸吃全局 ink tint 时暗色端
+                // 轨=0xF5F5F5 近白、与白色滑钮同族难辨（白钮对近白轨实测 1.09:1）；accent
+                // 轨对行底 light 5.93 / dark 5.91（python3 WCAG 实测）状态可辨。
                 Toggle("流式输出", isOn: Binding(
                     get: { hub.streamingPlayback },
                     set: { hub.streamingPlayback = $0 }
                 ))
+                .tint(ink.accent)
                 Toggle("思考中指示", isOn: Binding(
                     get: { hub.thinkingIndicator },
                     set: { hub.thinkingIndicator = $0 }
                 ))
+                .tint(ink.accent)
                 Text("关闭后流式回复等生成完成一次呈现、思考提示不再显示；生成与数据不受影响，停止按钮照常可用。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -4446,11 +4526,13 @@ private struct AgentOnlineDot: View {
     let hub: HubStore
     let gatewayId: String
     let agentId: String
+    // 令牌域（2026-11-22 状态色收口轮）：在线点走 successText，不散写 Color.green。
+    @Environment(\.inkColors) private var ink
 
     var body: some View {
         Group {
             if let status = hub.agentStatus(gatewayId: gatewayId, agentId: agentId) {
-                Circle().fill(status.gatewayOnline ? Color.green : Color.secondary)
+                Circle().fill(status.gatewayOnline ? ink.successText : Color.secondary)
                     .frame(width: 7, height: 7)
             }
         }

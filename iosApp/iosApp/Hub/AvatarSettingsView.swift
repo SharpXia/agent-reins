@@ -52,7 +52,7 @@ struct AvatarSettingsView: View {
                             .font(.caption).foregroundStyle(.secondary)
                         if randomDraft != nil {
                             // 随机预览标（形象随机轮）：明示当前预览未落档，确认才生效
-                            Text("预览中 · 未保存").font(.caption).foregroundStyle(.orange)
+                            Text("预览中 · 未保存").font(.caption).foregroundStyle(ink.warningText)
                         }
                         if saving {
                             HStack(spacing: 6) {
@@ -72,7 +72,7 @@ struct AvatarSettingsView: View {
                     HStack {
                         Text("其他设备已更新形象")
                             .font(.callout)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(ink.warningText)
                         Spacer()
                         Button("拉取") {
                             randomDraft = nil
@@ -122,7 +122,7 @@ struct AvatarSettingsView: View {
                     HStack {
                         Text("预览中 · 未保存")
                             .font(.callout)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(ink.warningText)
                         Spacer()
                         Button("用这个形象") {
                             guard let target = randomDraft else { return }
@@ -151,6 +151,11 @@ struct AvatarSettingsView: View {
                     Text("标准").tag(true)
                 }
                 .pickerStyle(.segmented)
+                // 铁律②：系统选中段面作用域钉交互强调令牌，不裸吃全局 .tint(colors.ink)
+                //（暗色端 ink=0xF5F5F5 近白选中面，「系统固定亮字压近白面」同族隐患，
+                // beta-0.5.22 选中胶囊同源；段内 label 对比以系统对 selectedSegmentTintColor
+                // 的亮度自适应为准，真机明暗走查项）。
+                .tint(ink.accent)
                 .disabled(saving)
                 Text("关闭 = 静止（仅入场淡入与表情即时切换）；标准 = 待机呼吸与切换过渡动画。")
                     .font(.caption)
@@ -174,7 +179,7 @@ struct AvatarSettingsView: View {
                 Section {
                     Text("保存失败：\(saveError)（可重试）")
                         .font(.caption)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(ink.dangerText)
                 }
             }
 

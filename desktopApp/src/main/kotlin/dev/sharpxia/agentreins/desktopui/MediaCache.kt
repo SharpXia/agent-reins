@@ -171,6 +171,24 @@ internal class MediaCacheStore(
     }
 
     /**
+     * 登出清空（确认评审收口，对齐 iOS MediaDiskCache.clearAll 同轮补齐）：媒体字节是
+     * 账号派生数据，撤销设备换账号不残留呈现——磁盘此前跨登出持久存活，是双端账号派生
+     * 缓存里唯一漏网。内存 mem/failures 同批清空；整目录删除后重建（writeScope 承 IO，
+     * 调用方即回）。在途写竞态窗至多残留登出前已在途的单张图（设备已撤销，后续取数必
+     * 失败不再增长——知情微窗）。调用方 SettingsScreen 登出链。
+     */
+    fun clearAll() {
+        synchronized(memLock) { mem.clear() }
+        failures.clear()
+        writeScope.launch {
+            runCatching {
+                dir.deleteRecursively()
+                dir.mkdirs()
+            }
+        }
+    }
+
+    /**
      * 原子落盘（自检轮 4 R4-6，对齐 iOS MediaDiskCache.store 的 .atomic 写）：tmp 完整
      * 落盘后 move 到目标——直写目标文件（旧 writeBytes）被 kill/崩溃中断留截断坏文件，load
      * 解码失败自愈删除（R4-6 前不清）之前坏条目每次进视口白付 IO+解码。中断最坏留 tmp
@@ -439,4 +457,7 @@ internal object MediaCache {
     }
 
     suspend fun load(url: String): ImageBitmap? = store.load(url)
+
+    /** 登出清空（见 [MediaCacheStore.clearAll]）；调用方 SettingsScreen 登出链。 */
+    fun clearAll() = store.clearAll()
 }

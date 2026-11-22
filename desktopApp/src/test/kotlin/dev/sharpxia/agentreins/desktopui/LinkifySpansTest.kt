@@ -32,6 +32,23 @@ class LinkifySpansTest {
     }
 
     @Test
+    fun uppercaseSchemeAndWwwLinkifyCaseInsensitively() {
+        // 确认评审收口：匹配/归一大小写不敏感对齐 iOS（NSDataDetector + lowercased 前缀判定）
+        // ——大写 HTTP(S):// 与 WWW. 裸链两端同口径成链；www 重写 https:// 保持其余原串。
+        assertEquals(
+            listOf(
+                MdSpan.Link("HTTP://E.COM/a", "HTTP://E.COM/a"),
+                MdSpan.Text(" 与 "),
+                MdSpan.Link("WWW.E.COM/x", "https://WWW.E.COM/x"),
+            ),
+            linkifySpans(listOf(MdSpan.Text("HTTP://E.COM/a 与 WWW.E.COM/x"))),
+        )
+        assertEquals("HTTP://E.COM/a", normalizeUrl("HTTP://E.COM/a"))
+        assertEquals("https://WWW.E.COM/x", normalizeUrl("WWW.E.COM/x"))
+        assertTrue(looksLikeMarkdown("看 HTTP://E.COM/a"))
+    }
+
+    @Test
     fun inlineCodeAndBoldAreNotLinkified() {
         // 行内代码内 URL 不转（iOS autolink 只跳显式链接与行内代码——此形态两端同语义）
         assertEquals(

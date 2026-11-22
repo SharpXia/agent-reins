@@ -871,7 +871,8 @@ internal fun ConversationScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            // 时间线键盘导航（2026-11-23 批次二轮，对齐 iOS ⌘↓ 菜单回底 HubViews:1184-1192）：
+            // 时间线键盘导航（2026-11-23 批次二轮，对齐 iOS ⌘↓ 菜单回底——HubViews.swift
+            // onChange(of: hub.jumpToBottomToken)，确认评审收口改符号引用防漂移）：
             // preview 相自根下行——composer 聚焦时 Home/End/⌘↓↑ 全放行给文本编辑（聚焦门，
             // preview 相根级 return true 会抢走 composer 行首/行尾光标键）；时间线导航仅在无
             // 输入聚焦态生效（iOS ⌘↓ 菜单回底在 composer 聚焦态同样不生效，两平台输入惯例

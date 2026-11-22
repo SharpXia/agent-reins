@@ -122,9 +122,13 @@ internal fun looksLikeMarkdown(text: String): Boolean {
             // 消息（生图输出常见形态）会误落纯文本回退
             MD_IMAGE_LINE.matches(t.trim()) ||
             // URL 语素（2026-11-23 批次二轮链接化）：裸 URL 消息必须进解析管线吃链接化，
-            // 不得落纯文本回退（对齐 iOS isPlain 刻意排除 http/www 的口径 MarkdownView
-            // .swift:510；含 _ 的 URL 已被词边界规则挡住不误判强调，解析产物逐字等价）
-            t.contains("http://") || t.contains("https://") || t.contains("www.")
+            // 不得落纯文本回退（对齐 iOS isPlain 刻意排除 http/www 的口径，MarkdownView
+            // .swift isPlain 返回句——确认评审收口改符号引用防漂移；含 _ 的 URL 已被词边界
+            // 规则挡住不误判强调，解析产物逐字等价）。小写判定（确认评审收口，对齐 iOS
+            // lowercased 前缀判定大小写不敏感）——大写 HTTP(S)/WWW. 消息同样进管线，否则
+            // 桌面留纯文本不可点而 iOS 可点，双端口径劈叉。
+            t.lowercase().contains("http://") || t.lowercase().contains("https://")
+                || t.lowercase().contains("www.")
     }
 }
 

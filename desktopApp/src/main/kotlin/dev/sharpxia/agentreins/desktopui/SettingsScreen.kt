@@ -331,6 +331,9 @@ internal fun SettingsScreen(
                                     client.stop()
                                     client.runtime.logout() // 撤销设备 + 清凭据；state 翻转为 NeedsLogin
                                     client.wipeLocalData()
+                                    // 确认评审收口（对齐 iOS MediaDiskCache 登出清空）：媒体缓存是
+                                    // 账号派生数据，随登出清空不跨账号残留。
+                                    MediaCache.clearAll()
                                     onLoggedOut()
                                 }
                             },

@@ -262,7 +262,8 @@ private fun MarkdownTable(
     // 描边+圆角 clip 挂 TableGrid 内容侧（R4-2，见上函数注：随表整体移动对齐 iOS）；外层
     // 只承担横向滚动——容器内不 fillMaxWidth（宽表横向滚出），窄表贴内容左对齐（iOS
     // .leading 同口径）。clip 在 border 外层（镜像 iOS overlay(stroke) 后 clipShape：描边
-    // 外半随内容裁进圆角，表头底色不溢出圆角）
+    // 外半随内容裁进圆角，表头底色不溢出圆角）；圆角 6dp 对齐 iOS LiteTableView
+    // cornerRadius 6（确认评审收口——桌面代码块/JSON 卡同为 6dp，表格曾独走 8dp）
     Box(modifier = Modifier.horizontalScroll(rememberScrollState())) {
         TableGrid(
             table = table,
@@ -270,8 +271,8 @@ private fun MarkdownTable(
             accent = accent,
             onLinkTap = onLinkTap,
             modifier = Modifier
-                .clip(RoundedCornerShape(8.dp))
-                .border(BorderStroke(1.dp, ink.borderPrimary), RoundedCornerShape(8.dp)),
+                .clip(RoundedCornerShape(6.dp))
+                .border(BorderStroke(1.dp, ink.borderPrimary), RoundedCornerShape(6.dp)),
         )
     }
 }
@@ -528,9 +529,11 @@ private fun headingStyle(level: Int) = when (level) {
  * iOS NSDataDetector 宽松匹配同向，知情口径）；句尾 CJK 标点由 [MD_URL_TRAILING_PUNCT]
  * 剥离兜底（标点收尾形态），句中粘连属已知观感面。www 分支带前置词边界（自检轮 R1-14）：
  * 词中 www.（`foo.www.bar` 域中段、`user@www.example.com` 邮箱本地部）不产假链接——对齐
- * iOS NSDataDetector 自带词边界语义；http(s) 分支自证 scheme 不需要边界。
+ * iOS NSDataDetector 自带词边界语义；http(s) 分支自证 scheme 不需要边界。大小写不敏感
+ * （IGNORE_CASE，确认评审收口对齐 iOS lowercased 前缀判定）：大写 HTTP(S):// 与 WWW. 裸链
+ * 两端同口径成链，展示文本保留原串大小写。
  */
-private val MD_URL_REGEX = Regex("""(https?://[^\s<>()]+|(?<![\w./@-])www\.[^\s<>()]+)""")
+private val MD_URL_REGEX = Regex("""(https?://[^\s<>()]+|(?<![\w./@-])www\.[^\s<>()]+)""", RegexOption.IGNORE_CASE)
 
 /** URL 句尾标点剥离集（行文句读紧跟 URL 的常见形态；本体不含 `)`——正则已排除括号）。 */
 private val MD_URL_TRAILING_PUNCT = charArrayOf(
@@ -545,10 +548,16 @@ private val MD_URL_TRAILING_PUNCT = charArrayOf(
  * link 目标为 https://（NSDataDetector 实测自带 http://，不采纳），两端复制/打开目标同串
  * 互锚；单端改值必须双端同步。
  */
-internal fun normalizeUrl(raw: String): String? = when {
-    raw.startsWith("http://") || raw.startsWith("https://") -> raw
-    raw.startsWith("www.") -> "https://" + raw
-    else -> null
+internal fun normalizeUrl(raw: String): String? {
+    // scheme 前缀判定小写化（确认评审收口）：匹配面已 IGNORE_CASE，归一判定若仍大小写
+    // 敏感则大写 HTTP(S):// 会被误判 null 退回纯文本；www 分支按 iOS 口径重写 https://
+    // 目标，其余保持原串大小写。
+    val lower = raw.lowercase()
+    return when {
+        lower.startsWith("http://") || lower.startsWith("https://") -> raw
+        lower.startsWith("www.") -> "https://" + raw
+        else -> null
+    }
 }
 
 /**
@@ -633,7 +642,6 @@ internal val LocalLinkBubbleOwner = staticCompositionLocalOf { LinkBubbleOwner()
  * 预览行口径（自检轮 4 R4-3）：恒展示 [normalizedUrl]（归一完整 URL，与 iOS
  * Text(url.absoluteString) HubViews.swift:3219 同串），[displayUrl]（原样匹配文本）只在
  * 归一缺席时兜底——预览串与复制/打开目标同串不变式。
- * 关闭面双端知情差异（自检轮 3 R3-3/R3-10，与 HubViews.swift:3048-3051 互锚注释）：
  * 关闭面双端知情差异（自检轮 3 R3-3/R3-10，与 HubViews.swift:3048-3051 互锚注释）：
  * 桌面=Popup 外点即关（点他行/composer/任意窗外点都收）；iOS=行域三路收起（行内空白
  * 关闭层/胶囊空白/换链接重建），他行点按、收键盘 tap 与滚动不收——既定行域设计不对齐，

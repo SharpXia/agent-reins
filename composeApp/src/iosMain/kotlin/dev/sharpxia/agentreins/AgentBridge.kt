@@ -14,7 +14,6 @@ import dev.sharpxia.agentreins.hub.UiMessagesPage
 import dev.sharpxia.agentreins.hub.UiWorkActivity
 import dev.sharpxia.agentreins.hub.auth.DeviceInfo
 import dev.sharpxia.agentreins.hub.avatar.AvatarProfile
-import dev.sharpxia.agentreins.hub.avatar.conversationAvatarMapFromEntries
 import dev.sharpxia.agentreins.hub.avatar.encodeConversationAvatarMapJson
 import dev.sharpxia.agentreins.hub.avatar.encodeJson
 import dev.sharpxia.agentreins.hub.avatar.parseAvatarProfileJson
@@ -136,6 +135,9 @@ class AgentBridge {
         hubWorkActivityJob?.cancel(); hubWorkActivityJob = null
         hubPhaseJob?.cancel(); hubPhaseJob = null
         hubAvatarJob?.cancel(); hubAvatarJob = null
+        // v1.5.2 会话覆盖档订阅随登出同批取消（2026-11-22 修复——此前漏取消与下方订阅文档
+        // 「登出随 hubLogout 取消」相矛盾，登出后仍可能收到旧客户端共享流的残余帧回调）
+        hubConversationAvatarJob?.cancel(); hubConversationAvatarJob = null
         val client = hubClient
         hubClient = null
         client?.stop()
@@ -302,16 +304,19 @@ class AgentBridge {
 
     /**
      * 会话覆盖档清单读取（端点 #34，v1.5.2 additive；显式刷新直调不走幂等队列）：onDone 非
-     * null = 成功（全量覆盖档对象映射 JSON 串，形态同 [hubWatchConversationAvatarProfiles]，
+     * null = 成功（覆盖档对象映射 JSON 串，形态同 [hubWatchConversationAvatarProfiles]，
      * 无覆盖 = `{}`）；null = 通道不可用（未登录/网络不可达/Hub FAILED），error = 人读失败原因。
-     * 成功响应已整体替换落 shared 流（订阅侧自动收帧）。
+     * 成功响应已经 [dev.sharpxia.agentreins.hub.HubClient.listConversationAvatarProfiles]
+     * **per-key 收敛+写水位**落 shared 流；onDone 交付**收敛后 shared 流现值**（2026-11-22
+     * 复核返工——此前回传原始清单，陈旧条目经此桥面绕过守卫直达 Swift 镜像整体替换，B1
+     * 残留复现路径）。并发登出清空期（store 已复位 null）回退 `{}`（登出面随即复位镜像）。
      */
     fun hubGetConversationAvatarProfiles(onDone: (mapJson: String?, error: String?) -> Unit) {
         scope.launch {
             val r = runCatching { hubClient?.listConversationAvatarProfiles() ?: throw HubException.notLoggedIn() }
-            val list = r.getOrNull()
-            if (list != null) {
-                onDone(conversationAvatarMapFromEntries(list).encodeConversationAvatarMapJson(), null)
+            if (r.isSuccess) {
+                val converged = hubClient?.conversationAvatarProfiles?.value
+                onDone((converged ?: emptyMap()).encodeConversationAvatarMapJson(), null)
             } else {
                 onDone(null, describeError(r.exceptionOrNull()))
             }

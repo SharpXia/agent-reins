@@ -9,7 +9,7 @@ import dev.sharpxia.agentreins.hub.avatar.AvatarProfile
 import dev.sharpxia.agentreins.hub.avatar.AvatarProfileRequest
 import dev.sharpxia.agentreins.hub.avatar.ConversationAvatarProfileEntry
 import dev.sharpxia.agentreins.hub.avatar.convergeAvatarProfile
-import dev.sharpxia.agentreins.hub.avatar.conversationAvatarMapFromEntries
+import dev.sharpxia.agentreins.hub.avatar.conversationAvatarMapConvergeFromEntries
 import dev.sharpxia.agentreins.hub.avatar.mergeConversationAvatarProfile
 import dev.sharpxia.agentreins.hub.command.CommandClient
 import dev.sharpxia.agentreins.hub.command.DefaultCommandClient
@@ -42,6 +42,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -306,6 +307,21 @@ class DefaultHubClient(
     private val conversationAvatarState = MutableStateFlow<Map<String, AvatarProfile>?>(null)
     val conversationAvatarProfiles: StateFlow<Map<String, AvatarProfile>?> get() = conversationAvatarState
 
+    /**
+     * 会话覆盖档「本地写水位」（2026-11-22 竞速修复轮）：conversationId → 最近一次本地写
+     * （PUT 权威回包收敛 / DELETE 204 清键）完成的逻辑序号；[ConversationAvatarWriteMarks.counter]
+     * = 已发号总数。#34 水合在发起 GET 前读 counter 作快照发起序——「写水位 ≤ 发起序」= 写的
+     * 服务端效果已落、快照必含其效果（缺席/在场可信，照常清除/接受）；「> 发起序」= 写可能
+     * 晚于快照生成（陈旧快照的缺席/在场不可信，以本地现值为准，待下个权威快照）——防陈旧
+     * #34 清单回滚在途 PUT 态/复活在途 DELETE 键。单 MutableStateFlow 整体 CAS（[update]）
+     * 保证发号与落键原子；逻辑序而非单调钟（跨平台时钟语义不引入）。登出随 [wipeLocalData]
+     * 复位。
+     */
+    private data class ConversationAvatarWriteMarks(val counter: Long, val perKey: Map<String, Long>)
+
+    private val conversationAvatarWriteMarks =
+        MutableStateFlow(ConversationAvatarWriteMarks(counter = 0L, perKey = emptyMap()))
+
     /** 登录态就绪后组装同步栈并启动（幂等：重复调用忽略；登出后 stop 再 login 需重新 start）。 */
     fun start() {
         val stack = runtime.authStack ?: return
@@ -432,6 +448,7 @@ class DefaultHubClient(
         // per-key LWW 拒收至其首次写）。
         avatarProfileState.value = null
         conversationAvatarState.value = null
+        conversationAvatarWriteMarks.value = ConversationAvatarWriteMarks(counter = 0L, perKey = emptyMap())
         val db = db ?: return
         db.hubQueries.transaction {
             db.hubQueries.clearGateways()
@@ -927,9 +944,10 @@ class DefaultHubClient(
      * 直接回填，客户端无二程 GET）：未登录抛 IllegalStateException；形状校验/非 ULID → 400
      * HUB-BIZ-004、目标查无/无权 → 404 HUB-BIZ-002 防枚举按 HubException 冒泡呈现，不静默。
      * 保存 = 先 PUT 成功再落本地（镜像 #31 口径，低频不敏感免回滚复杂度）；成功响应经
-     * [noteConversationAvatarProfile] per-key 收敛进 [conversationAvatarProfiles]，发起设备随后
-     * 自收的 conversation.avatar.updated 帧因 updatedAt 相等而幂等跳过（防回环双保险之二在
-     * 服务端同值不广播）。
+     * [noteConversationAvatarProfile] per-key 收敛进 [conversationAvatarProfiles]（收敛前先经
+     * [noteConversationAvatarLocalWrite] 发写水位——保护在途 #34 水合不以此键的陈旧缺席回滚），
+     * 发起设备随后自收的 conversation.avatar.updated 帧因 updatedAt 相等而幂等跳过（防回环
+     * 双保险之二在服务端同值不广播）。
      */
     suspend fun putConversationAvatarProfile(conversationId: String, profile: AvatarProfile): AvatarProfile {
         val overrideApi = conversationAvatarApiOverride
@@ -939,6 +957,7 @@ class DefaultHubClient(
             val stack = runtime.authStack ?: throw IllegalStateException("未登录")
             stack.auth.withBearer { stack.api.putConversationAvatarProfile(conversationId, AvatarProfileRequest(profile)) }
         }
+        noteConversationAvatarLocalWrite(conversationId)
         noteConversationAvatarProfile(conversationId, saved)
         return saved
     }
@@ -947,7 +966,9 @@ class DefaultHubClient(
      * 会话形象覆盖档清除（#33，v1.5.2 additive）：204 幂等终态——无覆盖重复 DELETE 亦 204
      * （幂等不依赖读状态）；「不存在/无权」统一 404 HUB-BIZ-002 防枚举，失败按 HubException
      * 冒泡呈现。清除 = 先 DELETE 成功再移除本地键（镜像「先成功再落本地」口径）；键移除即
-     * 渲染回落 seed 派生默认——**本 store 只移除键、不造默认档**。
+     * 渲染回落 seed 派生默认——**本 store 只移除键、不造默认档**。清键前先经
+     * [noteConversationAvatarLocalWrite] 发写水位（镜像 PUT 口径——保护在途 #34 水合不以
+     * 陈旧在场条目复活已清键）。
      */
     suspend fun deleteConversationAvatarProfile(conversationId: String) {
         val overrideApi = conversationAvatarApiOverride
@@ -957,24 +978,36 @@ class DefaultHubClient(
             val stack = runtime.authStack ?: throw IllegalStateException("未登录")
             stack.auth.withBearer { stack.api.deleteConversationAvatarProfile(conversationId) }
         }
+        noteConversationAvatarLocalWrite(conversationId)
         noteConversationAvatarProfile(conversationId, null)
     }
 
     /**
-     * 会话形象覆盖档清单（#34，v1.5.2 additive，水合/显式刷新读面）：成功即**整体替换**落
-     * [conversationAvatarProfiles]（权威 = REST 读面全量清单——键缺席 = 覆盖已清除，快照整体
-     * 覆盖先例口径；与在途 PUT/DELETE 的毫秒级并发窗理论竞速由下个 sync.ready 回拉自愈）。
-     * 返回原清单透出（服务端 conversationId ULID 升序；空清单 = emptyMap 落表，非 null）。
+     * 会话形象覆盖档清单（#34，v1.5.2 additive，水合/显式刷新读面）：成功即经
+     * [conversationAvatarMapConvergeFromEntries] **per-key 收敛**落 [conversationAvatarProfiles]
+     * （2026-11-22 竞速修复轮——原「整体替换」会被发于在途 PUT/DELETE 之前的陈旧清单回滚，
+     * UI 呈「切换后形象没变」直至下个 sync.ready；现逐键 LWW 合并，缺席清除/在场复活仅对
+     * 无未落定本地写的键生效，未落定键以本地现值为准）。返回原清单透出（服务端
+     * conversationId ULID 升序；空清单 = emptyMap 落表，非 null）。
      */
     suspend fun listConversationAvatarProfiles(): List<ConversationAvatarProfileEntry> {
         val overrideApi = conversationAvatarApiOverride
+        // 快照发起序（发 GET 前读发号器）：此刻前完成的本地写，快照必含其服务端效果
+        val issuedSeq = conversationAvatarWriteMarks.value.counter
         val list = if (overrideApi != null) {
             overrideApi.listConversationAvatarProfiles() // desktopTest 注入通道
         } else {
             val stack = runtime.authStack ?: throw IllegalStateException("未登录")
             stack.auth.withBearer { stack.api.listConversationAvatarProfiles() }
         }
-        conversationAvatarState.value = conversationAvatarMapFromEntries(list)
+        // 发号器此后只增：响应处理期读 perKey,「> issuedSeq」的键 = 快照发起后才完成的本地写（未落定）
+        val unsettled = conversationAvatarWriteMarks.value.perKey
+            .filterValues { it > issuedSeq }.keys
+        conversationAvatarState.value = conversationAvatarMapConvergeFromEntries(
+            conversationAvatarState.value,
+            list,
+            unsettled,
+        )
         return list
     }
 
@@ -992,6 +1025,18 @@ class DefaultHubClient(
     private fun noteConversationAvatarProfile(conversationId: String, profile: AvatarProfile?) {
         mergeConversationAvatarProfile(conversationAvatarState.value, conversationId, profile)?.let {
             conversationAvatarState.value = it
+        }
+    }
+
+    /**
+     * 会话覆盖档本地写发号（#32 PUT 权威回包 / #33 DELETE 204 收到即发号——服务端效果已落，
+     * 此后发起的 #34 快照必含其效果；先发号后落本地内存态，防落态与水合竞速窗内水位缺席）：
+     * CAS 单点递增（[conversationAvatarWriteMarks]）。
+     */
+    private fun noteConversationAvatarLocalWrite(conversationId: String) {
+        conversationAvatarWriteMarks.update { wm ->
+            val seq = wm.counter + 1
+            ConversationAvatarWriteMarks(counter = seq, perKey = wm.perKey + (conversationId to seq))
         }
     }
 

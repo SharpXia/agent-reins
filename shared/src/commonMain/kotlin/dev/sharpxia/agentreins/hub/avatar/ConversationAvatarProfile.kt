@@ -20,7 +20,7 @@ import kotlinx.serialization.json.JsonPrimitive
  * 默认渲染——**store 不造默认值**（无覆盖不是一张「默认档」，是「没有」）。
  */
 
-/** 会话覆盖档列表条目（端点 #34，v1.5.2）：三字段全 required。updatedAt ≡ profile.updatedAt（同一服务端权威值——列表层便利键非第二事实源，水合整体替换不必展开比较）。 */
+/** 会话覆盖档列表条目（端点 #34，v1.5.2）：三字段全 required。updatedAt ≡ profile.updatedAt（同一服务端权威值——列表层便利键非第二事实源，水合 per-key 收敛直接以 profile.updatedAt 判新旧）。 */
 @Serializable
 data class ConversationAvatarProfileEntry(
     val conversationId: String,
@@ -89,13 +89,48 @@ fun mergeConversationAvatarProfile(
 }
 
 /**
- * #34 清单水合落表（权威 = REST 读面全量清单，**整体替换**——快照整体覆盖先例口径）：键缺席
- * = 该会话覆盖已清除（清库行非墓碑，列表即不再含）；空清单 = emptyMap（非 null——已水合
- * 无覆盖）。与在途 PUT/DELETE 的毫秒级并发窗理论上可被陈旧清单覆盖，由下个 sync.ready 回拉
- * 自愈（低频用户偏好，不承诺秒级实时——契约同步承诺口径）。
+ * #34 清单条目 → 覆盖档映射纯转换（线格式便捷面，不再承担水合落表——水合走
+ * [conversationAvatarMapConvergeFromEntries] per-key 收敛）：键 = conversationId，值 = 档。
+ * 空清单 = emptyMap（非 null——已水合无覆盖）。
  */
 fun conversationAvatarMapFromEntries(entries: List<ConversationAvatarProfileEntry>): Map<String, AvatarProfile> =
     entries.associate { it.conversationId to it.profile }
+
+/**
+ * #34 清单水合落表·per-key 收敛（2026-11-22 竞速修复轮，替换原「整体替换」落表）：快照整体
+ * 覆盖会被**发于在途 PUT/DELETE 之前、迟到抵达的陈旧清单**回滚（UI 呈「切换后形象没变」
+ * 直至下个 sync.ready），改为逐键收敛——
+ * - 清单在场 + 本地在场：per-key updatedAt 大者胜（同值幂等跳过，镜像 [convergeAvatarProfile]）；
+ * - 清单缺席 + 本地在场：缺席 = 该会话覆盖已清除（清库行非墓碑），但仅当该键无**未落定
+ *   本地写**（[unsettledKeys]，即本地写完成于快照发起之后）才移除——未落定期快照可能发于
+ *   写之前，缺席不可信，保本地现值待下个权威快照；
+ * - 清单在场 + 本地缺席：对称守卫——未落定本地写（DELETE 已清本地键）期快照可能发于删之前，
+ *   不得以陈旧条目复活已清键；已落定（或本会话期从未本地写）则接受（含他端真重建）。
+ * 未水合（[current] = null）就地建表：空清单 = emptyMap（保持已水合语义），有条目落键。
+ * 无变化时返回 [current] 同实例（StateFlow 同值不重推）。
+ */
+fun conversationAvatarMapConvergeFromEntries(
+    current: Map<String, AvatarProfile>?,
+    entries: List<ConversationAvatarProfileEntry>,
+    unsettledKeys: Set<String>,
+): Map<String, AvatarProfile> {
+    val base = current ?: emptyMap()
+    val incoming = entries.associate { it.conversationId to it.profile }
+    var result = base
+    for (id in base.keys + incoming.keys) {
+        val local = base[id]
+        val entry = incoming[id]
+        when {
+            entry != null && local != null ->
+                if (avatarUpdatedAtNewer(entry.updatedAt, local.updatedAt)) result = result + (id to entry)
+            entry != null && local == null ->
+                if (id !in unsettledKeys) result = result + (id to entry)
+            entry == null && local != null ->
+                if (id !in unsettledKeys) result = result - id
+        }
+    }
+    return result
+}
 
 // ── JSON 便捷面（桥面交付：iOS 桥以 JSON 串跨边界，DTO 纪律同 [AvatarProfile.encodeJson]） ──
 

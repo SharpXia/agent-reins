@@ -111,6 +111,25 @@ private fun UiMessage?.isFailedMessage(): Boolean {
     return m.state == "failed" || m.uiState == "failed"
 }
 
+/**
+ * 已读上报水位 = 已渲染行中最大的真实服务端 seq（2026-11-22 B3 根修，排除三类非真实行）：
+ * - 乐观哨兵行（seq=Long.MAX_VALUE 占位，服务端尚无对应行）；
+ * - failed 行（非服务端消息行，不上报）；
+ * - 流式行（state="streaming"，含 dstream:<runId> 占位行）——其 seq=conv.lastSeq+1（投影层
+ *   占位行不推进 lastSeq，DefaultEventProjector 同口径）恰与该 run assistant final 行落库的
+ *   真实 seq 同值：计入即「借未来 seq」——流式期按它上报被服务端 readUpTo 存在性校验恒拒
+ *   （400 HUB-BIZ-004「不指向当前化身既有 message seq」），而基线已先行推进、命令 FAILED
+ *   不重试；final 收敛落库 seq 同值、水位无变化→重报不触发，已读游标永久落后一拍
+ *   （countUnread=1、重进会话才自愈）。排除后流式期不再借未来 seq，final 收敛时水位自
+ *   lastSeq 真实跳变至 S 触发重报，此刻行已存在→受理→read.updated 回声清零；中途离场不
+ *   预支已读，final 落地时无打开视图→未读=1 属正确语义。
+ * 与 iOS HubViews.swift HubChatView maxRenderedSeq 同口径双端对锁（单端改口径须双端同步）。
+ */
+internal fun maxRenderedReadSeq(messages: List<UiMessage>): Long =
+    messages
+        .filter { it.seq != OPTIMISTIC_SEQ_SENTINEL && it.state != "failed" && it.state != "streaming" }
+        .maxOfOrNull { it.seq } ?: 0L
+
 /** 动态斜杠命令目录内存缓存 TTL（2026-11-07 动态目录轮）：5 分钟，过期即重拉。 */
 private const val SLASH_COMMANDS_TTL_MS: Long = 5 * 60 * 1000L
 
@@ -311,7 +330,8 @@ internal fun ConversationScreen(
         }
     }
     val scope = rememberCoroutineScope()
-    // 已读上报基线：只认真实服务端 seq（乐观行占位 seq=Long.MAX_VALUE、failed 行非服务端消息，均不计入）
+    // 已读上报基线：只认真实服务端 seq（乐观哨兵/failed/流式行三类均不计入——口径与根因链
+    // 详见 maxRenderedReadSeq 注；只推进不回退，避免噪声）
     var reportedReadUpTo by remember { mutableStateOf(0L) }
 
     // wp-8②：实时行——conversationId 是打开时刻的句柄，hasActiveRun/activeRunId 随 run.* 事件
@@ -404,10 +424,11 @@ internal fun ConversationScreen(
     /** LazyColumn 项下标换算：layoutIndex = messagesIndex + 常驻前缀项数（翻页行 + 错误横幅）。 */
     val prefixCountNow = { timelinePrefixItemCount(loaderVisibleNow(), loadEarlierError != null) }
 
-    // 已读上报（会话完整渲染后 readUpTo = 已渲染最大真实 seq；只推进不回退，避免噪声）
-    val maxRenderedSeq = messages
-        .filter { it.seq != OPTIMISTIC_SEQ_SENTINEL && it.state != "failed" }
-        .maxOfOrNull { it.seq } ?: 0L
+    // 已读上报（会话完整渲染后 readUpTo = 已渲染最大真实 seq；只推进不回退，避免噪声）。
+    // 2026-11-22 B3 根修：口径换 maxRenderedReadSeq——排除流式行（不借 lastSeq+1 的未来 seq），
+    // 流式期不上报，final 收敛时水位 lastSeq→S 真实跳变触发本效果重报，此刻行已在服务端→
+    // 受理→read.updated 回声清零（旧内联口径计入流式行的根因链见该函数注）。
+    val maxRenderedSeq = maxRenderedReadSeq(messages)
     LaunchedEffect(conversationId, maxRenderedSeq) {
         if (maxRenderedSeq > reportedReadUpTo) {
             reportedReadUpTo = maxRenderedSeq
@@ -1311,13 +1332,16 @@ internal const val TYPEWRITER_FLOOD_BACKLOG_CHARS = 8192
 
 /**
  * 打字机步进（2026-11-21 流式单行归一轮；同日走查②扩洪泛档；同日簇计量统一轮——积压单位
- * 改按字素 Cluster，与 iOS String.count 同义，常量 8192//12//3 两端从此同义）：
- * - 常规档 max(8, 积压/12)：慢流恒 8 簇/16ms（≈500 簇/秒打字感下限），大块积压 ~12 步（≈200ms）
- *   内追平、积压不跨下一块；
- * - 洪泛档 积压/3（积压>8192 簇）：特大块若走几何档需 ~90 tick、且揭示循环每 tick 对已揭示前缀
- *   整体重嗅探+重解析（MarkdownText remember(content)），累计解析 ~45×积压，主线程掉帧；
- *   洪泛档 256KiB 量级 ~9 tick 追平、累计 ~2×积压（阈值邻域 1 tick）。>8k 簇积压下逐字观感
- *   本已不可信（恒 8 档需 16s+），快速追平无体感损失。
+ * 改按字素 Cluster，与 iOS String.count 同义；2026-11-22 pacing 对齐轮——常规档改
+ * max(1, 积压/90)，常量 8192//90//3 两端从此同义）：
+ * - 常规档 max(1, 积压/90)：步长与桥 2s 合并窗时长对齐（≈90 tick×16ms≈1.4s 抽干一个窗、
+ *   贴数据节拍），CJK 慢流（每窗 10-60 簇积压）呈 1 簇/16ms 逐字揭示——旧档 max(8, 积压/12)
+ *   以 ≤~12 tick（≈200ms）抽干全部积压、下限 8 簇/16ms≈500 簇/秒，是数据节拍的 30-100 倍，
+ *   流式行呈「逐 2s 块瞬增」、打字体感在数学上不存在（B2 根因），本档废止；
+ * - 洪泛档 积压/3（积压>8192 簇）：特大块若走常规档需数百 tick、且揭示循环每 tick 对已揭示
+ *   前缀整体重嗅探+重解析（MarkdownText remember(content)），累计解析 ~百×积压，主线程掉帧；
+ *   洪泛档 256KiB 量级 ~9 tick 追平、累计 ~2×积压（阈值邻域 1 tick）。洪泛输出下逐字观感
+ *   本已不可信（常规档 8192 簇需 ~545 tick≈8.7s），快速追平无体感损失（走查②判定维持）。
  * 与 iOS HubViews.swift StreamingTypewriter（revealStep 双档 + 16ms tick）双端注释对锁——单端
  * 改值必须双端同步，桌面回归锚兼作两端行为契约不漂移（StreamingRowPresentationTest 同纪律）。
  * 本函数与单位无关（入参=积压簇数、返回值=步进簇数），簇口径由推进方
@@ -1325,7 +1349,7 @@ internal const val TYPEWRITER_FLOOD_BACKLOG_CHARS = 8192
  * Cluster」计量知情差异废止：非 BMP（emoji 等）两端揭示速度/洪泛触发点从此同语义）。
  */
 internal fun typewriterRevealStep(backlog: Int): Int =
-    if (backlog > TYPEWRITER_FLOOD_BACKLOG_CHARS) backlog / 3 else maxOf(8, backlog / 12)
+    if (backlog > TYPEWRITER_FLOOD_BACKLOG_CHARS) backlog / 3 else maxOf(1, backlog / 90)
 
 /**
  * 簇边界表（2026-11-21 簇计量统一轮，退役 typewriterSnapToCodePointBoundary）：ends[k] = 前

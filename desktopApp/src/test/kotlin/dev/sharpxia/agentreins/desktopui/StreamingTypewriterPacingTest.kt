@@ -14,39 +14,44 @@ import kotlin.test.assertTrue
  * 两端行为契约不漂移（单端改值须双端同步）。2026-11-21 走查②双端同扩洪泛档（积压>8192 转
  * 积压/3）；同日簇计量统一轮：积压/步长单位 UTF-16 码元 → 字素 Cluster
  * （typewriterClusterEnds = java.text.BreakIterator extended grapheme cluster，与 iOS
- * String.count 同义），双端常量 8192//12//3 @16ms 从此同义，非 BMP 漂移知情差异废止
- * ——单位语义锁在⑥⑦⑧，纯数值账（①②④⑤）不受单位改写影响。
+ * String.count 同义）；2026-11-22 pacing 对齐轮（B2）：常规档 max(8, 积压/12) →
+ * max(1, 积压/90)——步长与桥 2s 合并窗时长对齐（≈90 tick×16ms≈1.4s 抽干一个窗、慢流
+ * 1 簇/16ms 逐字），旧档 ≤~12 tick 抽干+500 簇/秒下限是数据节拍的 30-100 倍、打字体感
+ * 在数学上不存在，双端同轮同改，双端常量 8192//90//3 @16ms 从此同义——单位语义锁在⑥⑦⑧，
+ * 纯数值账（①②③④⑤）随档改写。
  */
 class StreamingTypewriterPacingTest {
 
-    // ── ① 小积压恒 8（打字感下限：慢流 ≈500 簇/秒，8 簇/16ms） ──
+    // ── ① 小积压恒 1（2026-11-22 pacing 对齐轮：慢流逐字档 1 簇/16ms≈62.5 簇/秒，贴数据节拍） ──
     // 簇计量统一轮改写：单位口径 码元→簇，值表零变化——步进纯函数与单位无关（入参即积压
     // 簇数、返回值即步进簇数），簇口径由 typewriterClusterEnds/推进方落地，锁在⑥⑦⑧。
 
     @Test
-    fun smallBacklogFloorsAt8() {
-        assertEquals(8, typewriterRevealStep(0))
-        assertEquals(8, typewriterRevealStep(1))
-        assertEquals(8, typewriterRevealStep(12))
-        assertEquals(8, typewriterRevealStep(95)) // 95/12=7（整数除）→ max(8, 7)=8，96/12=8 才越界
-        assertEquals(8, typewriterRevealStep(96)) // 96/12=8，max 恒 8
+    fun smallBacklogFloorsAt1() {
+        assertEquals(1, typewriterRevealStep(0))
+        assertEquals(1, typewriterRevealStep(1))
+        assertEquals(1, typewriterRevealStep(89))  // 89/90=0（整数除）→ max(1, 0)=1
+        assertEquals(1, typewriterRevealStep(90))  // 90/90=1，恒 1
+        assertEquals(1, typewriterRevealStep(179)) // 179/90=1，180/90=2 才越界（见②）
     }
 
-    // ── ② 大块积压比例步进（2s 合并窗整块到达：~12 步内追平，积压不跨下一块） ──
-    // 簇计量统一轮改写：同①，单位=簇，值表零变化。
+    // ── ② 大块积压比例步进（2s 合并窗整块到达：~90 步（≈1.4s）内抽干，贴数据节拍） ──
+    // 簇计量统一轮改写：同①，单位=簇。2026-11-22 pacing 对齐轮：比例 1/12→1/90。
 
     @Test
     fun largeBacklogScalesProportionally() {
-        assertEquals(10, typewriterRevealStep(120)) // 评审锚例：积压 120 簇 → 步 10 簇
-        assertEquals(8, typewriterRevealStep(97))   // 97/12=8（除后仍是下限）
-        assertEquals(100, typewriterRevealStep(1200))
-        assertEquals(200, typewriterRevealStep(2400))
+        assertEquals(2, typewriterRevealStep(180))   // 180/90=2（恒 1 档出界点）
+        assertEquals(10, typewriterRevealStep(900))  // 锚例：积压 900 簇 → 步 10 簇
+        assertEquals(20, typewriterRevealStep(1800))
+        assertEquals(50, typewriterRevealStep(4500))
+        assertEquals(91, typewriterRevealStep(8192)) // 常规档顶：8192/90=91（8193 起洪泛，见④）
     }
 
-    // ── ③ 追平敛零：整块积压按调用方 clamp 语义迭代收敛（步数 ≈ 12 有界、末段回落恒 8 步进） ──
+    // ── ③ 追平敛零：整块积压按调用方 clamp 语义迭代收敛（几何 ≈89/90 递减 + 恒 1 尾段） ──
     // 簇计量统一轮改写：模拟循环升格为簇口径实演——target 取自 typewriterClusterEnds(实串)
-    // （同 StreamingTypewriterText 求值序），步进按簇数推进；BMP 文案簇数==码元数（2400 簇），
-    // 步数账与旧码元口径一致（几何 ~38 + 恒 8 尾段 12 = 50 量级），故收敛界沿用。
+    // （同 StreamingTypewriterText 求值序），步进按簇数推进；BMP 文案簇数==码元数（2400 簇）。
+    // 2026-11-22 pacing 对齐轮：比例 1/12→1/90，收敛步数账随之拉长（实算 434 步≈7s 追平
+    // 一块 2400 簇——贴 2s 数据节拍的逐字揭示即本意，洪泛档兜底特大块）。
 
     @Test
     fun backlogConvergesToZeroBoundedSteps() {
@@ -59,40 +64,41 @@ class StreamingTypewriterPacingTest {
         while (shown < target) {
             val backlog = target - shown
             val step = typewriterRevealStep(backlog)
-            assertTrue(step >= 8, "step=$step < 下限 8 @ backlog=$backlog")
-            assertTrue(step <= backlog + 7, "step=$step 显著超积压 @ backlog=$backlog") // clamp 前上界
+            assertTrue(step >= 1, "step=$step < 下限 1 @ backlog=$backlog")
+            assertTrue(step <= backlog, "step=$step 超积压 @ backlog=$backlog") // clamp 前上界
             shown = minOf(target, shown + step)
             steps++
-            assertTrue(steps < 200, "200 步未收敛：shown=$shown")
+            assertTrue(steps < 1000, "1000 步未收敛：shown=$shown")
         }
         assertEquals(target, shown)
-        // 几何相位（积压 ≈11/12 递减）2400→96 约 38 步 + 恒 8 尾段 12 步 = 实算 50 步；
-        // 上界 60 防步进公式被改成更慢档（更快的 /6、/12→/24 由①②值表另锁）。
-        assertTrue(steps in 40..60, "收敛步数 $steps 越界（几何 ~38 + 尾段 12 = 50 量级）")
+        // 几何相位（积压 ≈89/90 递减）2400→~90 约 344 步 + 恒 1 尾段 ~90 步 = 实算 434 步；
+        // 上界 480 防步进公式被改成更慢档（更快的 /12、/90→/180 由①②值表另锁）。
+        assertTrue(steps in 400..480, "收敛步数 $steps 越界（几何 ~344 + 尾段 ~90 = 434 量级）")
         assertEquals(0, target - shown)
     }
 
     // ── ④ 洪泛档（2026-11-21 走查②）：积压 >8192 转 积压/3 快速追平，特大块不逐字拖帧 ──
     // 簇计量统一轮改写：阈值语义 码元→簇（8192 簇，与 iOS floodBacklogChars=String.count
-    // 同义），纯数值账零变化（入参即簇数）；簇口径阈值边界实演在⑧。
+    // 同义）；簇口径阈值边界实演在⑧。2026-11-22 pacing 对齐轮：8192 簇常规档步长随 /90 改。
 
     @Test
     fun floodTierActivatesAboveThreshold() {
         // 阈值边界：8192 簇本身仍常规档（> 才洪泛），8193 簇起洪泛
-        assertEquals(682, typewriterRevealStep(8192))   // 8192/12=682
+        assertEquals(91, typewriterRevealStep(8192))    // 8192/90=91（常规档顶）
         assertEquals(2731, typewriterRevealStep(8193))  // 8193/3=2731
-        // 桥合并缓冲硬帽量级（256KiB）：步长比例档，不再是几何档的 backlog/12
+        // 桥合并缓冲硬帽量级（256KiB）：步长比例档，不再是常规档的 backlog/90
         assertEquals(65536 / 3, typewriterRevealStep(65536))
         assertEquals(262144 / 3, typewriterRevealStep(262144))
     }
 
     // ── ⑤ 洪泛相位有界 tick 收敛（2026-11-21 走查②：洪泛 ~2/3 几何递减 + 常规尾段封顶） ──
-    // 簇计量统一轮改写：模拟积压数按簇计量，步数账零变化——同硬帽下簇数 ≤ 码元数，
-    // 收敛只会更快，既有 tick 上界恒安全。
+    // 簇计量统一轮改写：模拟积压数按簇计量——同硬帽下簇数 ≤ 码元数，收敛只会更快。
+    // 2026-11-22 pacing 对齐轮：常规档改 /90 后尾段拉长（8192 簇起实算 ~545 tick≈8.7s
+    // 逐字收尾，即新档的贴节拍语义），tick 上界随之改。
 
     @Test
     fun floodBacklogConvergesBoundedTicks() {
-        // 洪泛相位 ~2/3 递减：256KiB → 8.2k 约 7 tick；余量 ≤8192 回常规档（既有最坏情形封顶）
+        // 洪泛相位 ~2/3 递减：256KiB → ≤8.2k 约 9 tick（走查②行为不变）
         var shown = 0
         val target = 262144
         var floodTicks = 0
@@ -101,12 +107,13 @@ class StreamingTypewriterPacingTest {
             floodTicks++
             assertTrue(floodTicks < 20, "洪泛相位 $floodTicks tick 未收口（~9 tick 量级）")
         }
-        // 全程（洪泛 + 常规尾段）以有界 tick 收敛：洪泛 ~9 + 常规几何 ~49 + 恒 8 尾段 12 ≈ 70
+        // 全程（洪泛 + 常规尾段）以有界 tick 收敛：洪泛 ~9 + 常规档尾段（≤8192 簇 ≈89/90
+        // 递减 + 恒 1 段）~528 = 实算 537；上界 640 防步进公式被改成更慢档（①②④值表另锁）。
         var total = floodTicks
         while (shown < target) {
             shown = minOf(target, shown + typewriterRevealStep(target - shown))
             total++
-            assertTrue(total < 120, "$total tick 未收敛")
+            assertTrue(total < 640, "$total tick 未收敛")
         }
         assertEquals(target, shown)
     }
@@ -162,11 +169,12 @@ class StreamingTypewriterPacingTest {
 
     @Test
     fun floodThresholdCountsClustersNotCodeUnits() {
-        // 纯 BMP：簇数==码元数，阈值账与旧口径同值（8192 簇恰常规档顶、8193 簇起洪泛）
-        assertEquals(682, typewriterRevealStep(typewriterClusterEnds("字".repeat(8192)).size))
+        // 纯 BMP：簇数==码元数，阈值账与旧口径同值（8192 簇恰常规档顶、8193 簇起洪泛；
+        // 常规档步长随 2026-11-22 pacing 对齐轮改 /90）
+        assertEquals(91, typewriterRevealStep(typewriterClusterEnds("字".repeat(8192)).size))
         assertEquals(2731, typewriterRevealStep(typewriterClusterEnds("字".repeat(8193)).size))
         // 非 BMP 锁「簇」语义：8642 码元 > 8192 旧码元口径会误入洪泛档；簇口径 4321 簇恒常规
         assertEquals(4321, typewriterClusterEnds("😀".repeat(4321)).size)
-        assertEquals(360, typewriterRevealStep(4321)) // 4321/12=360
+        assertEquals(48, typewriterRevealStep(4321)) // 4321/90=48
     }
 }

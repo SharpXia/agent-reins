@@ -31,7 +31,9 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.HttpHeaders
 import io.ktor.http.content.TextContent
 import io.ktor.serialization.kotlinx.json.json
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -60,9 +62,12 @@ import kotlin.test.assertTrue
  *    不入、DELETE 204、GET 列表解码含空数组）；
  * ④ DefaultSyncScheduler 会话覆盖档推送钩子（profile 帧与 null 清除帧直达）；
  * ⑤ DefaultHubClient store 语义（conversationAvatarApiOverride 注入通道，镜像 sessionAdminApiOverride
- *    先例）：PUT 先成功再落 store、DELETE 先 204 再清键（重复 DELETE 幂等）、#34 水合整体替换
- *    （陈旧键随清单缺席清除）、空清单水合 = emptyMap、未登录门面抛 IllegalStateException、
- *    wipeLocalData 复位 null。
+ *    先例）：PUT 先成功再落 store、DELETE 先 204 再清键（重复 DELETE 幂等）、#34 水合 per-key
+ *    收敛（陈旧键随缺席清除）、空清单水合 = emptyMap、未登录门面抛 IllegalStateException、
+ *    wipeLocalData 复位 null；
+ * ⑥ #34 水合竞速回归（2026-11-22 修复轮，gate 桩复现「快照发于本地写之前、响应迟到」）：
+ *    陈旧清单不回滚新 PUT 态（在场条目）/ 陈旧空清单不清掉首次 PUT（缺席守卫）/ 陈旧清单不
+ *    复活已 DELETE 键（复活守卫）/ 落定后的权威快照照常缺席清除与他端重建接受。
  */
 class ConversationAvatarProfileTest {
 
@@ -165,12 +170,12 @@ class ConversationAvatarProfileTest {
     fun mergeOnUnhydratedKeepsNullForClearCreatesMapForProfile() {
         // 未水合期（null）：清除帧保持 null 不虚假升格 emptyMap（null = 尚未水合的独立状态）
         assertNull(mergeConversationAvatarProfile(null, CONV, null))
-        // profile 帧则就地建表落键（未水合先 PUT 的合法路径，随后 #34 水合整体替换）
+        // profile 帧则就地建表落键（未水合先 PUT 的合法路径，随后 #34 水合 per-key 收敛）
         assertEquals(mapOf(CONV to profile(T1, AvatarPalette.CYAN)), mergeConversationAvatarProfile(null, CONV, profile(T1, AvatarPalette.CYAN)))
     }
 
     @Test
-    fun hydrateFromEntriesWholesaleAndEmptyListGivesEmptyMap() {
+    fun mapFromEntriesConvertsAndEmptyListGivesEmptyMap() {
         val entries = listOf(entry(CONV, T1, AvatarPalette.CYAN), entry(CONV2, T2, AvatarPalette.BLUE))
         assertEquals(
             mapOf(CONV to profile(T1, AvatarPalette.CYAN), CONV2 to profile(T2, AvatarPalette.BLUE)),
@@ -329,7 +334,7 @@ class ConversationAvatarProfileTest {
     }
 
     @Test
-    fun facadeHydrateReplacesWholesaleRemovingStaleKeys() = runTest {
+    fun facadeHydrateConvergesPerKeyAndClearsAbsentKeys() = runTest {
         val client = newClient(backgroundScope)
         val api = ConvAvatarFakeApi()
         client.conversationAvatarApiOverride = api
@@ -337,7 +342,7 @@ class ConversationAvatarProfileTest {
         api.listResult = listOf(entry(CONV, T1, AvatarPalette.CYAN), entry(CONV2, T1, AvatarPalette.BLUE))
         client.listConversationAvatarProfiles()
         assertEquals(2, client.conversationAvatarProfiles.value?.size)
-        // 二次水合：清单只剩一键（他端已清除 CONV2）→ #34 权威整体替换，陈旧键随缺席清除
+        // 二次水合：清单只剩一键（他端已清除 CONV2）→ 无未落定本地写，缺席 = 权威清除照常生效
         api.listResult = listOf(entry(CONV, T1, AvatarPalette.CYAN))
         client.listConversationAvatarProfiles()
         assertEquals(setOf(CONV), client.conversationAvatarProfiles.value?.keys)
@@ -369,6 +374,87 @@ class ConversationAvatarProfileTest {
         assertTrue(client.conversationAvatarProfiles.value?.isNotEmpty() == true)
         client.wipeLocalData() // 登出闭环：档随账号清空（旧用户较新 updatedAt 不得把新用户拒收至其首次写）
         assertNull(client.conversationAvatarProfiles.value)
+    }
+
+    // ── ⑥ #34 水合竞速回归（2026-11-22 修复轮：gate 桩复现「快照发于本地写之前、响应迟到」时序） ──
+
+    @Test
+    fun facadeStaleSnapshotDoesNotRollBackNewerPut() = runTest {
+        val client = newClient(backgroundScope)
+        val api = ConvAvatarRacyApi(authority = profile(T2, AvatarPalette.PURPLE))
+        client.conversationAvatarApiOverride = api
+        // #34 GET 发起并挂在途（此刻服务端尚无权威 T2——模拟陈旧快照，如换装 sheet onAppear 首刷）
+        val hydration = launch { client.listConversationAvatarProfiles() }
+        api.listIssued.await()
+        testScheduler.runCurrent()
+        // PUT 插队完成：权威 T2 PURPLE 先落 store
+        client.putConversationAvatarProfile(CONV, profile(T1, AvatarPalette.CYAN))
+        assertEquals(AvatarPalette.PURPLE, client.conversationAvatarProfiles.value?.get(CONV)?.paletteId)
+        // 陈旧清单（仍携 T1 CYAN）迟到抵达 → 不得回滚新 PUT 态
+        api.listResult = listOf(entry(CONV, T1, AvatarPalette.CYAN))
+        api.releaseList.complete(Unit)
+        hydration.join()
+        assertEquals(AvatarPalette.PURPLE, client.conversationAvatarProfiles.value?.get(CONV)?.paletteId)
+        assertEquals(T2, client.conversationAvatarProfiles.value?.get(CONV)?.updatedAt)
+    }
+
+    @Test
+    fun facadeStaleEmptySnapshotDoesNotEraseFirstPut() = runTest {
+        val client = newClient(backgroundScope)
+        val api = ConvAvatarRacyApi(authority = profile(T2, AvatarPalette.CYAN))
+        client.conversationAvatarApiOverride = api
+        // 未水合期（null）发起 #34（如 sheet onAppear 首刷）并挂在途
+        val hydration = launch { client.listConversationAvatarProfiles() }
+        api.listIssued.await()
+        testScheduler.runCurrent()
+        client.putConversationAvatarProfile(CONV, profile(T1)) // 首次覆盖 PUT 完成：T2 落 store 并发写水位
+        assertEquals(1, client.conversationAvatarProfiles.value?.size)
+        // 陈旧空清单（发于 PUT 前）迟到 → 缺席守卫生效，首覆盖不被清掉
+        api.listResult = emptyList()
+        api.releaseList.complete(Unit)
+        hydration.join()
+        assertEquals(AvatarPalette.CYAN, client.conversationAvatarProfiles.value?.get(CONV)?.paletteId)
+        assertEquals(T2, client.conversationAvatarProfiles.value?.get(CONV)?.updatedAt)
+    }
+
+    @Test
+    fun facadeStaleSnapshotDoesNotResurrectDeletedKey() = runTest {
+        val client = newClient(backgroundScope)
+        val api = ConvAvatarRacyApi(authority = profile(T2, AvatarPalette.CYAN))
+        client.conversationAvatarApiOverride = api
+        client.putConversationAvatarProfile(CONV, profile(T1)) // 先有覆盖 T2
+        assertEquals(1, client.conversationAvatarProfiles.value?.size)
+        val hydration = launch { client.listConversationAvatarProfiles() }
+        api.listIssued.await()
+        testScheduler.runCurrent()
+        client.deleteConversationAvatarProfile(CONV) // DELETE 插队完成：键已清并发写水位
+        assertNull(client.conversationAvatarProfiles.value?.get(CONV))
+        // 陈旧清单仍携已删条目迟到 → 复活守卫生效，不回滚「恢复默认」
+        api.listResult = listOf(entry(CONV, T2, AvatarPalette.CYAN))
+        api.releaseList.complete(Unit)
+        hydration.join()
+        assertNull(client.conversationAvatarProfiles.value?.get(CONV))
+    }
+
+    @Test
+    fun facadeSettledSnapshotStillPropagatesClearAndReAdd() = runTest {
+        val client = newClient(backgroundScope)
+        val api = ConvAvatarFakeApi()
+        client.conversationAvatarApiOverride = api
+        api.authority = profile(T2, AvatarPalette.CYAN)
+        client.putConversationAvatarProfile(CONV, profile(T1))
+        api.authority = profile(T2, AvatarPalette.BLUE)
+        client.putConversationAvatarProfile(CONV2, profile(T1))
+        // 快照发于全部本地写落定之后：他端已清 CONV（服务端行不在）→ 缺席清除照常生效（守卫不误杀）
+        api.listResult = listOf(entry(CONV2, T2, AvatarPalette.BLUE))
+        client.listConversationAvatarProfiles()
+        assertNull(client.conversationAvatarProfiles.value?.get(CONV))
+        assertEquals(AvatarPalette.BLUE, client.conversationAvatarProfiles.value?.get(CONV2)?.paletteId)
+        // 本地 DELETE 落定后再水合：他端真重建（清单携更新的 T3 条目）→ 接受在场条目（不误杀）
+        client.deleteConversationAvatarProfile(CONV2)
+        api.listResult = listOf(entry(CONV2, T3, AvatarPalette.PURPLE))
+        client.listConversationAvatarProfiles()
+        assertEquals(AvatarPalette.PURPLE, client.conversationAvatarProfiles.value?.get(CONV2)?.paletteId)
     }
 
     // ── fixture ──
@@ -442,6 +528,32 @@ class ConversationAvatarProfileTest {
         }
     }
 
+    /**
+     * #34 水合竞速桩（⑥ 用例专用）：list 在 [listIssued] 信号「快照已发起」后挂起于
+     * [releaseList]——测试窗口内 PUT/DELETE 插队完成，再放行携带发于写之前的陈旧清单，
+     * 精确复现「快照发于本地写之前、响应迟到抵达」时序。
+     */
+    private class ConvAvatarRacyApi(
+        var authority: AvatarProfile? = null,
+        var listResult: List<ConversationAvatarProfileEntry> = emptyList(),
+    ) : ConvAvatarStubApi() {
+        val listIssued = CompletableDeferred<Unit>()
+        val releaseList = CompletableDeferred<Unit>()
+
+        override suspend fun putConversationAvatarProfile(conversationId: String, req: AvatarProfileRequest): AvatarProfile {
+            return authority ?: error("PUT 权威档未编排")
+        }
+
+        override suspend fun deleteConversationAvatarProfile(conversationId: String) {
+        }
+
+        override suspend fun listConversationAvatarProfiles(): List<ConversationAvatarProfileEntry> {
+            listIssued.complete(Unit)
+            releaseList.await()
+            return listResult
+        }
+    }
+
     private open class ConvAvatarStubAuth : TokenManager {
         override suspend fun login(username: String, password: String, mfaCode: String?) = TODO()
         override suspend fun registerCurrentDevice(displayName: String, platform: String, model: String?, appVersion: String?) = TODO()
@@ -480,5 +592,6 @@ class ConversationAvatarProfileTest {
         const val WM = "01JAAA0000000000000000000000"
         const val T1 = "2026-11-21T08:00:00.000Z"
         const val T2 = "2026-11-21T09:00:00.000Z"
+        const val T3 = "2026-11-21T10:00:00.000Z"
     }
 }

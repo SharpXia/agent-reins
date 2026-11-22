@@ -505,7 +505,11 @@ struct HubConversationRow: View {
     ///（selectionFill 令牌），行内五处文字钉死 .tertiary/.secondary 时白字糊进高亮块
     ///（beta-0.5.22 用户截图实证「选中行内容看不清」）。选中即整行切 onSelection/
     /// onSelectionMuted 令牌对（明暗对比度 16.61~5.27:1 实测见 InkTheme.swift）。
-    /// 默认 false：iOS 会话列表调用点（HubHomeView）不传参零变化。
+    /// 2026-11-22 对比度收口轮补底色面：选中底不再靠系统 sidebar 半透明 accent 胶囊
+    ///（.tint(selectionFill) 钉色后落屏 α 合成中间调，近白标题对比坍缩——半透明胶囊
+    /// 的 α 不受代码控制，WCAG 数只在不透明令牌对口径成立），改 listRowBackground
+    /// 显式不透明 selectionFill 实底（见 body 尾注），令牌注释里的对比度口径真正
+    /// govern 落屏。默认 false：iOS 会话列表调用点（HubHomeView）不传参零变化。
     var selected: Bool = false
     /// DONE 瞬时窗（角色系统批次2）：hasActiveRun 真→假 触发 900ms 完成弹跳后回落 IDLE。
     /// generation 防 900ms 窗内新 run 启动的陈旧回调误清（真→假→真 序列每次跳变 +1 作废旧窗）。
@@ -596,6 +600,14 @@ struct HubConversationRow: View {
             }
         }
         .padding(.vertical, 2)
+        // 2026-11-22 对比度收口轮：选中底色面收归显式不透明令牌——系统 sidebar 半透明
+        // accent 胶囊（被 .tint(selectionFill) 钉成近黑/近白）落屏 α 合成中间调后近白标题
+        // 对比坍缩（WCAG 16.61/17.18:1 只在不透明令牌对口径成立，半透明 α≈0.3~0.5 合成
+        // 实测跌至 2.17~3.65:1），显式实底接管后 onSelection 系文字令牌的对比度口径在
+        // 落屏成立；未选中传 nil = 系统默认底零变化（iOS 调用点 selected 恒 false）。
+        // sidebar 样式对自定义行底若有平台级覆写（无 API 承诺），以真机明暗双模式走查为
+        // 准（client-ux-round-20261121.md:63 deferred 验收项）。
+        .listRowBackground(selected ? AnyView(RoundedRectangle(cornerRadius: 8).fill(ink.selectionFill)) : nil)
         .onChange(of: c.hasActiveRun) { _, active in
             botDoneGeneration += 1
             if active {
@@ -614,7 +626,8 @@ struct HubConversationRow: View {
 
 /// 会话页：消息时间线（乐观态徽标 + 流式行 + 合成行分隔条）+ 发送条 + 会话操作菜单；
 /// 已读上报（wp-12）：maxRenderedSeq 驱动持续上报（桌面同型，只推进不回退）——打开首帧
-/// 照报、会话期新行渲染即推进，回列表不再假未读；空列表呈「暂无消息」占位（桌面同型）。
+/// 照报、会话期新 final 行渲染即推进（streaming 占位行不入水位，见 maxRenderedSeq 注），
+/// 回列表不再假未读；空列表呈「暂无消息」占位（桌面同型）。
 /// 流式体验（wp-7）：自动滚屏只在「尾部变化且用户在底部」时跟随（onScrollGeometryChange +
 /// onScrollPhaseChange 区分用户上翻与内容增长）；空内容 streaming 行呈 typing 三点脉冲；
 /// 流式正文 typewriter 渐进揭示；消息列表写入侧经 HubStore 75ms 合帧。
@@ -949,14 +962,24 @@ struct HubChatView: View {
     /// 占位行（「正在思考…/xx 正在处理中…」动画文案，见 HubMessageRow）；workActivity 数据面
     /// 保留（isThinkingNow 判定依赖）。
 
-    /// wp-12：已渲染最大真实 seq（桌面 ConversationScreen.maxRenderedSeq 同口径）——
-    /// 乐观行占位 seq（Int64.max）与 failed 行不计入；streaming 行（含 dstream 占位行）
-    /// 已渲染即计入（与桌面同型：用户看着流式输出时水位随渲染推进，离场不留假未读）。
-    /// 持续已读上报的驱动源：onAppear 首报 + onChange 增量推进（HubStore.markReadUpTo
-    /// 基线只推进不回退），替代旧「appear+400ms 单次取值」一次性上报。
+    /// wp-12：已渲染最大真实 seq（桌面 ConversationScreen.maxRenderedReadSeq 同口径双端
+    /// 对锁，单端改口径须双端同步）——乐观行占位 seq（Int64.max）、failed 行与 streaming
+    /// 行（含 dstream 占位行）三类均不计入。2026-11-22 未读债修复轮废止旧「streaming 行
+    /// 已渲染即计入」口径：占位行 seq=conv.lastSeq+1（投影层不推进 lastSeq）恰与该 run
+    /// assistant final 行落库的真实 seq 同值，计入即「借未来的 seq」——流式期按它上报被
+    /// 服务端 readUpTo 存在性校验恒拒（400 HUB-BIZ-004「不指向当前化身既有 message seq」，
+    /// final 行尚不存在），基线却已先行推进且 FAILED 命令不重试；final 落库 seq 同值、
+    /// 水位无变化→onChange 不触发→已读游标永久落后一拍（countUnread=1，须重进会话自愈）。
+    /// 排除后流式期不预支已读，final 收敛时水位自 lastSeq 真实跳变至 S 必然触发重报，此刻
+    /// 行已存在→受理→read.updated 回声清零；中途离场（流式未完）final 落地时无打开视图
+    /// →未读=1 属正确语义。持续已读上报的驱动源：onAppear 首报 + onChange 增量推进
+    /// （HubStore.markReadUpTo 基线只推进不回退），替代旧「appear+400ms 单次取值」。
     private var maxRenderedSeq: Int64 {
         hub.messages
-            .filter { $0.seq != HubStore.optimisticSeqSentinel && $0.state != "failed" }
+            .filter {
+                $0.seq != HubStore.optimisticSeqSentinel && $0.state != "failed"
+                    && $0.state != "streaming"
+            }
             .map(\.seq)
             .max() ?? 0
     }
@@ -1393,25 +1416,60 @@ struct HubChatView: View {
                 .accessibilityLabel("添加图片（最多 \(HubStore.maxDraftAttachments) 张）")
                 // 2026-11-21 会话形象轮 CI 实证（beta-0.5.24 Release 归档 :1394 超时）：三闭包
                 // 构造提为局部 let 拆散 TextField 长链的 Release 类型检查负担（行为等价）。
+                // 2026-11-22 键位通道修复轮：面板/空白/多行三个渲染期快照提共享局部 let——
+                // .onKeyPress 双保险挂载与文本视图层 composer（Catalyst 分支见下）同帧同
+                // 快照注入，分流全走 ComposerKeyRouter 纯表语义恒同。
+                let panelVisibleNow = !slashSuggestions.isEmpty
+                let draftTextIsBlankNow = draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                let draftIsMultilineNow = draftText.contains("\n")
                 let keyHandlers = ComposerKeyHandlers(
                     isFocused: composerFocused,
-                    panelVisible: !slashSuggestions.isEmpty,
-                    draftTextIsBlank: draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                    draftIsMultiline: draftText.contains("\n"),
+                    panelVisible: panelVisibleNow,
+                    draftTextIsBlank: draftTextIsBlankNow,
+                    draftIsMultiline: draftIsMultilineNow,
                     onSend: { sendDraft() },
                     onMoveHighlight: { slashMoveSelection($0) },
                     onTabComplete: { slashHandleTab() },
                 )
-                TextField("发消息…", text: draftBinding, axis: .vertical)
-                    .focused($composerFocused) // 批次4：输入聚焦下视（角色 gaze 后三路之一）
-                    // 2026-11-21 回车语义轮：Enter 生效门=聚焦+IME（面板可见性下沉为 Enter
-                    // 分流内的行为分支——「非斜杠单行草稿 Enter=发送」在本挂载下真正可达）；
-                    // ↑↓/Tab 另挂三重门（聚焦+IME+面板可见）。分流序全表见 ComposerKeyHandlers
-                    // 头注释；shift/⌘/Ctrl 读 press.modifiers 键值实时值，面板/空白/多行是
-                    // 渲染期快照 flag（HubStore @Observable 草稿变化即重渲染）。
-                    .modifier(keyHandlers)
-                    .lineLimit(1...4)
-                    .padding(8)
+                // 2026-11-22 键位通道修复轮（Catalyst 分支）：composer 换 UITextView 本体
+                //（ComposerTextViewBase）——return/tab/↑↓ 在文本视图层直拦（pressesBegan
+                // 主通道 + insertText 兜底，IME 组合期 markedText 内建让行），分流走
+                // ComposerKeyRouter 纯表。占位/聚焦/限高镜像 TextField 既有观感（placeholder
+                // overlay + FocusState 桥 + 4 行 intrinsic 帽，观感 parity 以真机走查为准）；
+                // iOS 分支 TextField 原文零变化。.modifier(keyHandlers) 双保险挂载两分支共用
+                //（iOS 编译期剔除零操作；Catalyst 文本视图层已消费的事件不再以 SwiftUI
+                // press 形态可达，挂载待新层真机验证后撤）。
+                // 2026-11-21 回车语义轮注记保留：Enter 生效门=聚焦+IME（面板可见性下沉为
+                // Enter 分流内的行为分支）；shift/⌘/Ctrl 读键值实时修饰键，面板/空白/多行是
+                // 渲染期快照 flag（HubStore @Observable 草稿变化即重渲染）。
+                Group {
+                    #if targetEnvironment(macCatalyst)
+                    ZStack(alignment: .topLeading) {
+                        ComposerTextView(
+                            text: draftBinding,
+                            focus: $composerFocused,
+                            maxHeightLines: 4,
+                            panelVisible: panelVisibleNow,
+                            draftTextIsBlank: draftTextIsBlankNow,
+                            draftIsMultiline: draftIsMultilineNow,
+                            onSend: { sendDraft() },
+                            onMoveHighlight: { slashMoveSelection($0) },
+                            onTabComplete: { slashHandleTab() },
+                        )
+                        if draftText.isEmpty {
+                            Text("发消息…")
+                                .foregroundStyle(Color(uiColor: .placeholderText))
+                                .allowsHitTesting(false) // 占位不拦点按，点透文本视图获焦
+                        }
+                    }
+                    #else
+                    TextField("发消息…", text: draftBinding, axis: .vertical)
+                        .focused($composerFocused) // 批次4：输入聚焦下视（角色 gaze 后三路之一）
+                        .lineLimit(1...4)
+                    #endif
+                }
+                .modifier(keyHandlers)
+                .padding(8)
                     .background(RoundedRectangle(cornerRadius: 18).fill(ink.surfaceTertiary))
                     // #21：草稿以 "/" 起手时按需拉取动态命令目录（TTL 5 分钟缓存 + 在途去重
                     // 在 HubStore.fetchCommandsIfNeeded；其余输入空转零网络）。观察源 = store
@@ -1475,14 +1533,16 @@ struct HubChatView: View {
                         // 2026-11-21 观感整治轮：.plain 灭 bezel（同 photo 键注）；Catalyst 挂
                         // 统一圆钮面，iOS 零面变化（走查核）。
                         .buttonStyle(.plain)
-                        // UxPlan item3：⌘Return 发送。2026-11-21 回车语义轮注记：旧注「Enter
-                        // 直发需 composer 换 NSTextView」结论已过时——onKeyPress(.return) 返回
-                        // .handled 即可吞掉 multiline TextField 的默认换行，单行裸 Enter=发送与
-                        // 多行 ⌘Enter=强发已在 ComposerKeyHandlers 实装；本快捷键与其并存构成
-                        // 双通道（两者都可能先收到事件，发送在途由 HubStore.sendingDraftFor 防
-                        // 重保证单次；键盘快捷键在发送按钮被 ProgressView 替换后自然离场，彼时
-                        // 仅 onKeyPress 通道消费）。仅 Catalyst 挂（iPad 硬件键盘无此惯例，
-                        // 不引入歧义）。
+                        // UxPlan item3：⌘Return 发送。2026-11-22 键位通道修复轮注记：2026-11-21
+                        // 注「onKeyPress .handled 可吞默认换行、旧 NSTextView 结论过时」在
+                        // Catalyst 实为误判——.onKeyPress 对 multiline TextField 的 .return
+                        // 不可达（事件被文本视图层键位环先吞，见 ComposerTextViewBase 注），
+                        // 单行裸 Enter=发送与多行 ⌘Enter=强发由文本视图层 composer + .onKeyPress
+                        // 双保险挂载承担（分流同表 ComposerKeyRouter）。本快捷键与发送动作并
+                        // 存：文本视图层分支③消费 ⌘Enter 后事件不再下行、键盘快捷键自然不触发，
+                        // 反向先到亦单发——发送在途由 HubStore.sendingDraftFor 防重保证单次；
+                        // 键盘快捷键在发送按钮被 ProgressView 替换后自然离场。仅 Catalyst 挂
+                        //（iPad 硬件键盘无此惯例，不引入歧义）。
                         #if targetEnvironment(macCatalyst)
                         .keyboardShortcut(.return, modifiers: .command)
                         #endif
@@ -1679,8 +1739,10 @@ struct HubChatView: View {
         #endif
         // wp-12：持续已读上报（桌面 maxRenderedSeq 驱动 LaunchedEffect 同型，替代旧
         // appear+400ms 单次取值）——onAppear 首报（首帧慢于旧 400ms 定时器也照报，快照
-        // 先到不漏）+ onChange 增量推进（会话打开期间新 final/streaming 行渲染即上报，
-        // 回列表不再假未读）；只推进不回退由 HubStore.markReadUpTo 基线承担。挂外层
+        // 先到不漏）+ onChange 增量推进（会话打开期间新 final 行渲染即上报，streaming
+        // 占位行不入水位——其 seq=lastSeq+1 与 final 行真实 seq 同值，流式期上报会被
+        // 服务端 readUpTo 存在性校验 400 拒收且毒化基线，根因链见 maxRenderedSeq 注），
+        // 回列表不再假未读；只推进不回退由 HubStore.markReadUpTo 基线承担。挂外层
         // VStack：空态（时间线被占位替换）与时间线两态都活着。
         .onAppear { hub.markReadUpTo(maxRenderedSeq) }
         .onChange(of: maxRenderedSeq) { _, latest in hub.markReadUpTo(latest) }
@@ -2060,33 +2122,82 @@ private struct SlashCommandPanel: View {
 }
 
 /// 2026-11-21 回车语义轮：composer 键位拦截（2026-11-20 Mac 键盘交互轮的 Enter 语义按用户
-/// 口径重排 + 普通回车矩阵补齐，2026-11-17 UX 轮「Enter 直发需 composer 换 NSTextView」的
-/// deferred 前提已被 onKeyPress .handled 可吞默认换行推翻）。拆成两个 onKeyPress 挂载：
+/// 口径重排 + 普通回车矩阵补齐）。2026-11-22 键位通道修复轮勘误与下沉：11-21 注「onKeyPress
+/// .handled 可吞默认换行、11-17「Enter 直发需 composer 换 NSTextView」deferred 前提已推翻」
+/// 在 Catalyst 实为误判——.onKeyPress 事件对 multiline TextField 的 .return/.tab 从未可达
+///（c01acea 起四轮未真机生效，交付层被文本视图 insertNewline:/insertTab: 键位环先吞事件），
+/// 11-17 的下沉结论才是对的。本轮交付层下沉为文本视图本体（Catalyst composer 换
+/// ComposerTextViewBase，UITextView 子类直拦 return/tab/↑↓；诊断备选 NSEvent 局部监视器
+/// 在本 SDK 实证不可用——AppKit NSEvent 于 macCatalyst 显式 unavailable，Catalyst 编译
+/// 门禁抓），本 struct 的两个 .onKeyPress 挂载保留为双保险（挂 representable 容器上，
+/// 文本视图层已消费的事件不再以 SwiftUI press 形态可达，无双发；新层真机四态走查通过后
+/// 按诊断撤本挂载）；分流体抽成 ComposerKeyRouter 纯表，两通道语义恒同：
 /// - Enter（keys:[.return]，仅门聚焦+IME，不看面板）分流序——首个命中生效，与桌面
-///   resolveEnterKey 一张表（前缀序号 = 优先级）：
-///   ① Shift → .ignored（任何情况强制换行）；
-///   ② 空白草稿 → .handled（消费 no-op 不发不换行；先于 ⌘ 判定——空白+⌘Enter 与发送中
+///   resolveEnterKey 一张表（前缀序号 = 优先级，全表见 ComposerKeyRouter.routeEnter）：
+///   ① Shift → 让行（任何情况强制换行）；
+///   ② 空白草稿 → 消费（no-op 不发不换行；先于 ⌘ 判定——空白+⌘Enter 与发送中
 ///     +⌘Enter 不落默认换行）。空白判据=纯文本不含附件（附件独发走发送键，与桌面一致）；
 ///     知情边界：发送按钮的 ⌘Return 键盘快捷键通道语义跟按钮（draftHasContent 含附件），
 ///     纯附件草稿（文本空白+附件在场）在②按空白消费 no-op，但快捷键通道仍可能先触发按钮
-///     发送——同键同草稿态可能「发附件/不动」分叉，两通道先后无官方次序，实机 ⌘Enter 四态
+///     发送——同键同草稿态可能「发附件/不动」分叉，实机 ⌘Enter 四态
 ///     走查覆盖（桌面键盘通道 2026-11-21 债清已对齐=draftHasContent 含附件即发，本分叉仅
-///     存在于 Catalyst 自身双通道间）；
-///   ③ ⌘/Ctrl → 强制发送（onSend + .handled；含 .control——桌面 isMetaOrCtrlPressed 同
+///     存在于 Catalyst 自身通道间）；
+///   ③ ⌘/Ctrl → 强制发送（onSend；含 .control——桌面 isMetaOrCtrlPressed 同
 ///     口径，Ctrl+Enter 多行同发，2026-11-21 走查修复②对齐；发送在途由 HubStore
-///     .sendingDraftFor 防重保证单次——发送按钮在场时与 ⌘Return 键盘快捷键构成双通道，
+///     .sendingDraftFor 防重保证单次——发送按钮在场时与 ⌘Return 键盘快捷键构成多通道，
 ///     任一路只发一次）；
 ///   ④ 面板可见 → 原样发送当前输入（不走补全；与分支⑤单行同果，保留分支只为表意——
 ///     「面板可见 Enter 直接发送」的用户口径）；
-///   ⑤ 多行 → .ignored（需求2：已多行 Enter=插换行，让 TextField 默认行为）；单行 → 发送。
+///   ⑤ 多行 → 让行（需求2：已多行 Enter=插换行，让 TextField 默认行为）；单行 → 发送。
 /// - ↑↓/Tab（keys:[.upArrow,.downArrow,.tab]，三重门聚焦+IME+面板可见）：↑↓ 移动高亮、
 ///   Tab 补全高亮（无键盘动作即首行）命令+空格。
-/// Shift/⌘ 读 press.modifiers 键值实时值（渲染期快照会失真）；panelVisible/空白/多行是
+/// Shift/⌘ 读键值实时修饰键（渲染期快照会失真）；panelVisible/空白/多行是
 /// 渲染期快照 flag（HubStore @Observable 草稿变化即重渲染，若实测「刚输入的换行未被计入
 /// 多行」竞态，回退改 keypress 时经 store 读现值——风险在案）。IME 组合门 = ComposerIME
 /// 组合期探测，组合态变化不触发 SwiftUI 重渲染，只能在 action 内逐键调用（enabled 类
 /// 渲染期快照会失真）。onKeyPress 系 iOS 17 API（部署目标 15.0 → 可用性门内挂）；Catalyst
 /// 门控——iOS 触控软键盘无键盘交互诉求，整段编译期剔除零变化。
+
+/// composer 键位分流纯表（2026-11-22 键位通道修复轮从 ComposerKeyHandlers 分流体抽出）：
+/// .onKeyPress 双保险挂载与文本视图层 composer（ComposerTextViewBase）共用，两通道语义
+/// 恒同，分流序与桌面 SlashCommandRules.resolveEnterKey 逐支对齐不动。入参 = 渲染期快照
+/// flag + 键值实时修饰键，无 UI 依赖；返回 true = 消费（默认行为不落）。
+private enum ComposerKeyRouter {
+    /// ↑↓/Tab 键位（KeyPress.key 与 UIKey.keyCode 两映射都归到本枚举）。
+    enum ArrowTabKey { case up, down, tab }
+
+    /// Enter 分流（分流序 Shift→空白→⌘/Ctrl→面板可见→多行/单行；序号 = 优先级，
+    /// 首个命中生效）。allowsSend=false = 限权模式（insertText 兜底通道专用）：修饰键
+    /// 上下文不可得，只允许消费②空白 no-op，发送分支（③④⑤-send）一律让行默认换行、
+    /// 永不触发 onSend——两道闸之二（2026-11-22 复核轮，见 ComposerTextViewBase 类注）。
+    static func routeEnter(
+        shift: Bool, metaOrCtrl: Bool, draftTextIsBlank: Bool,
+        panelVisible: Bool, draftIsMultiline: Bool, onSend: () -> Void,
+        allowsSend: Bool = true
+    ) -> Bool {
+        if shift { return false } // ① 任何情况强制换行
+        if draftTextIsBlank { return true } // ② 空白兜底 no-op（先于 ⌘ 判定）
+        if !allowsSend { return false } // 限权：③④⑤-send 全让行（默认插换行）
+        if metaOrCtrl { onSend(); return true } // ③ ⌘/Ctrl+Enter 强制发送
+        if panelVisible { onSend(); return true } // ④ 面板可见=原样发送当前输入（不走补全）
+        if draftIsMultiline { return false } // ⑤ 多行=默认插换行
+        onSend() // ⑤ 单行=发送
+        return true
+    }
+
+    /// ↑↓/Tab 分流（三重门聚焦+IME+面板可见已由调用方过门）：↑↓ 移动高亮、
+    /// Tab 补全高亮（无键盘动作即首行）命令+空格。
+    static func routeArrowTab(
+        _ key: ArrowTabKey, onMoveHighlight: (Int) -> Void, onTabComplete: () -> Bool
+    ) -> Bool {
+        switch key {
+        case .up: onMoveHighlight(-1); return true
+        case .down: onMoveHighlight(1); return true
+        case .tab: return onTabComplete()
+        }
+    }
+}
+
 private struct ComposerKeyHandlers: ViewModifier {
     /// Enter 生效门：聚焦 + IME（面板可见性下沉为 Enter 分流内的行为分支）。
     let isFocused: Bool
@@ -2111,32 +2222,28 @@ private struct ComposerKeyHandlers: ViewModifier {
                 .onKeyPress(keys: [.return]) { press in
                     guard isFocused, !ComposerIME.isComposing() else { return .ignored }
                     let m = press.modifiers
-                    if m.contains(.shift) { return .ignored } // ① 任何情况强制换行
-                    if draftTextIsBlank { return .handled } // ② 空白兜底 no-op（先于 ⌘ 判定）
-                    if m.contains(.command) || m.contains(.control) { // ③ ⌘/Ctrl+Enter 强制发送
-                        onSend()
-                        return .handled
-                    }
-                    if panelVisible { // ④ 面板可见=原样发送当前输入（不走补全）
-                        onSend()
-                        return .handled
-                    }
-                    if draftIsMultiline { return .ignored } // ⑤ 多行=默认插换行
-                    onSend() // ⑤ 单行=发送
-                    return .handled
+                    let consumed = ComposerKeyRouter.routeEnter(
+                        shift: m.contains(.shift),
+                        metaOrCtrl: m.contains(.command) || m.contains(.control),
+                        draftTextIsBlank: draftTextIsBlank,
+                        panelVisible: panelVisible,
+                        draftIsMultiline: draftIsMultiline,
+                        onSend: onSend,
+                    )
+                    return consumed ? .handled : .ignored
                 }
                 .onKeyPress(keys: [.upArrow, .downArrow, .tab]) { press in
                     guard isFocused, !ComposerIME.isComposing(), panelVisible else { return .ignored }
+                    let key: ComposerKeyRouter.ArrowTabKey
                     switch press.key {
-                    case .upArrow:
-                        onMoveHighlight(-1)
-                        return .handled
-                    case .downArrow:
-                        onMoveHighlight(1)
-                        return .handled
-                    default:
-                        return onTabComplete() ? .handled : .ignored
+                    case .upArrow: key = .up
+                    case .downArrow: key = .down
+                    default: key = .tab
                     }
+                    let consumed = ComposerKeyRouter.routeArrowTab(
+                        key, onMoveHighlight: onMoveHighlight, onTabComplete: onTabComplete
+                    )
+                    return consumed ? .handled : .ignored
                 }
         } else {
             content
@@ -2148,32 +2255,279 @@ private struct ComposerKeyHandlers: ViewModifier {
 }
 
 #if targetEnvironment(macCatalyst)
-/// IME 组合期探测（2026-11-21 回车语义轮）：组合中（拼音未上屏）Enter 绝不能触发发送或
-/// 换行副作用、↑↓ 属候选词导航、Tab 属候选选定——全键让行默认行为。探测 = 首响应者是
-/// UITextInput 且 markedTextRange 非 nil（依赖「SwiftUI 多行 TextField 背后是 UITextView」
-/// 这一 backing 实现细节，社区共识非 API 承诺——真机中文 IME 走查是验收门，探测落空的
-/// 回退路线 = 旧 deferred 的 NSTextView 层拦截）。整段 Catalyst 门控，iOS 编译期零残留。
+/// IME 组合期探测（2026-11-21 回车语义轮；2026-11-22 键位通道修复轮起仅服务 .onKeyPress
+/// 双保险挂载——文本视图层 composer 的 IME 门内建其 markedTextRange 直读，不再依赖本探测
+/// 的 backing 假设）：组合中（拼音未上屏）Enter 绝不能触发发送或换行副作用、↑↓ 属候选词
+/// 导航、Tab 属候选选定——全键让行默认行为。探测 = 首响应者是 UITextInput 且
+/// markedTextRange 非 nil（依赖「SwiftUI 多行 TextField 背后是 UITextView」这一 backing
+/// 实现细节，社区共识非 API 承诺——真机中文 IME 走查是验收门）。整段 Catalyst 门控，
+/// iOS 编译期零残留。
 private enum ComposerIME {
-    /// 组合期判定（须在 onKeyPress action 内逐键调用——组合态变化不触发 SwiftUI 重渲染，
+    /// 组合期判定（须在键事件 action 内逐键调用——组合态变化不触发 SwiftUI 重渲染，
     /// 渲染期快照会失真）。
     static func isComposing() -> Bool {
         guard let scene = UIApplication.shared.connectedScenes.first(where: {
             $0.activationState == .foregroundActive
-        }) as? UIWindowScene, let window = scene.keyWindow else { return false }
-        return hasMarkedText(view: window)
+        }) as? UIWindowScene, let window = scene.keyWindow,
+              let input = findFirstResponder(in: window) as? UITextInput else { return false }
+        return input.markedTextRange != nil
     }
 
-    /// 递归找 isFirstResponder，命中且为 UITextInput 时读 markedTextRange。
-    private static func hasMarkedText(view: UIView) -> Bool {
-        if view.isFirstResponder, let input = view as? UITextInput,
-           input.markedTextRange != nil {
-            return true
+    /// 递归找 isFirstResponder。
+    private static func findFirstResponder(in view: UIView) -> UIView? {
+        if view.isFirstResponder { return view }
+        for subview in view.subviews {
+            if let hit = findFirstResponder(in: subview) { return hit }
         }
-        for subview in view.subviews where hasMarkedText(view: subview) {
-            return true
-        }
-        return false
+        return nil
     }
+}
+
+/// Catalyst composer 桥（2026-11-22 键位通道修复轮）：SwiftUI ↔ ComposerTextViewBase。
+/// text 单向同步（SwiftUI 草稿层为源，等值跳过防光标重置）；focus 经 FocusState<Bool>.Binding
+/// 双向桥（didBegin/didEnd 回写，写入由 becomeFirstResponder/resign 承担）——gaze 聚焦
+/// 下视与键位门复用既有 @FocusState 零改型；高度 = 内容自适应 + maxHeightLines 行帽
+///（TextField axis:.vertical + lineLimit(1...4) 同语义）；每帧把渲染期快照重封进
+/// routeKey 闭包（与 .onKeyPress 双保险挂载同帧同快照）。
+private struct ComposerTextView: UIViewRepresentable {
+    let text: Binding<String>
+    let focus: FocusState<Bool>.Binding
+    /// 最大可见行数帽（帽内自适应、超帽滚动）。
+    let maxHeightLines: Int
+    /// 渲染期快照：斜杠面板可见（= !slashSuggestions.isEmpty）。
+    let panelVisible: Bool
+    /// 渲染期快照：草稿纯文本 trim 后为空。
+    let draftTextIsBlank: Bool
+    /// 渲染期快照：草稿已含换行（多行）。
+    let draftIsMultiline: Bool
+    let onSend: () -> Void
+    /// ↑↓ 移动高亮（±1，环绕）。
+    let onMoveHighlight: (Int) -> Void
+    /// 返回 true = 已消费（高亮命令已预填）。
+    let onTabComplete: () -> Bool
+
+    func makeUIView(context: Context) -> ComposerTextViewBase {
+        let view = ComposerTextViewBase()
+        view.backgroundColor = .clear
+        view.font = .preferredFont(forTextStyle: .body)
+        view.adjustsFontForContentSizeCategory = true
+        view.textContainerInset = .zero
+        view.textContainer.lineFragmentPadding = 0
+        view.delegate = context.coordinator
+        return view
+    }
+
+    func updateUIView(_ view: ComposerTextViewBase, context: Context) {
+        view.maxHeightLines = maxHeightLines
+        if view.text != text.wrappedValue {
+            view.text = text.wrappedValue
+            view.refreshHeight()
+        }
+        // 键位分流快照每帧重封（与渲染同帧；IME 门在文本视图内建，不经此处）。
+        view.routeKey = { key in
+            switch key {
+            case let .enter(shift, metaOrCtrl):
+                return ComposerKeyRouter.routeEnter(
+                    shift: shift,
+                    metaOrCtrl: metaOrCtrl,
+                    draftTextIsBlank: draftTextIsBlank,
+                    panelVisible: panelVisible,
+                    draftIsMultiline: draftIsMultiline,
+                    onSend: onSend,
+                )
+            case .enterFromFallback:
+                // insertText 兜底限权模式：永不触发 onSend（见 Key.enterFromFallback 注）。
+                return ComposerKeyRouter.routeEnter(
+                    shift: false,
+                    metaOrCtrl: false,
+                    draftTextIsBlank: draftTextIsBlank,
+                    panelVisible: panelVisible,
+                    draftIsMultiline: draftIsMultiline,
+                    onSend: onSend,
+                    allowsSend: false,
+                )
+            case .tab:
+                guard panelVisible else { return false } // 三重门：面板隐藏放行默认（制表符）
+                return ComposerKeyRouter.routeArrowTab(
+                    .tab, onMoveHighlight: onMoveHighlight, onTabComplete: onTabComplete
+                )
+            case .upArrow:
+                guard panelVisible else { return false } // 面板隐藏放行默认（光标上移）
+                ComposerKeyRouter.routeArrowTab(
+                    .up, onMoveHighlight: onMoveHighlight, onTabComplete: onTabComplete
+                )
+                return true
+            case .downArrow:
+                guard panelVisible else { return false } // 面板隐藏放行默认（光标下移）
+                ComposerKeyRouter.routeArrowTab(
+                    .down, onMoveHighlight: onMoveHighlight, onTabComplete: onTabComplete
+                )
+                return true
+            }
+        }
+        if focus.wrappedValue, !view.isFirstResponder {
+            view.becomeFirstResponder()
+        } else if !focus.wrappedValue, view.isFirstResponder {
+            view.resignFirstResponder()
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var parent: ComposerTextView
+        init(_ parent: ComposerTextView) { self.parent = parent }
+
+        func textViewDidChange(_ textView: UITextView) {
+            parent.text.wrappedValue = textView.text
+            (textView as? ComposerTextViewBase)?.refreshHeight()
+        }
+
+        func textViewDidBeginEditing(_ textView: UITextView) {
+            parent.focus.wrappedValue = true
+        }
+
+        func textViewDidEndEditing(_ textView: UITextView) {
+            parent.focus.wrappedValue = false
+        }
+    }
+}
+
+/// Catalyst composer 本体（UITextView 子类，2026-11-22 键位通道修复轮——落地 11-17 UX 轮
+/// deferred 结论：键位拦截下沉文本视图层）。SwiftUI .onKeyPress 在 Catalyst multiline
+/// TextField 上对 .return/.tab 从未可达（c01acea 起四轮未真机生效，交付层被文本视图
+/// insertNewline:/insertTab: 键位环先吞）；诊断备选 NSEvent 局部监视器在本 SDK 实证不可用
+///（AppKit NSEvent 于 macCatalyst 显式 unavailable，Catalyst 编译门禁抓）。本类直接持有
+/// 文本视图：return/tab/↑↓ 在 pressesBegan 直拦（UIEvent.modifierFlags 键值实时读）。
+/// insertText 只作兜底且**永不重入完整分流表**（2026-11-22 复核轮勘误：原「不消费分支
+/// 零副作用故双路由无害」论证不成立——兜底无修饰键上下文，Shift+Enter 未消费落到 super
+/// 后若默认换行经 insertText 回流，重入即以「无修饰」假入参改判成分支④/⑤发送；现
+/// presses 已路由的 press 一律直放超类、未见 press 的直插走 enterFromFallback 永不
+/// onSend，两道闸见 pressAlreadyRouted/ComposerKeyRouter.routeEnter allowsSend 注；
+/// 若 UIKit 默认换行实际不经 insertText 则兜底为死代码，真机四态走查证实后可收口删除）。
+/// IME 组合期内建门（本视图 markedTextRange 非 nil 全键让行——backing 假设不再参与判定，
+/// 较 ComposerIME 窗口递归探测更稳）；面板隐藏时 ↑↓/Tab 放行超类默认（光标移动/制表符），
+/// 与分流表三重门同语义。
+final class ComposerTextViewBase: UITextView {
+    /// 键型（修饰键由本类从 UIEvent.modifierFlags 解出，分流闭包只收语义键）。
+    enum Key {
+        case enter(shift: Bool, metaOrCtrl: Bool)
+        /// insertText 兜底专用：pressesBegan 未见的直插（软键盘/程序注入，Catalyst 恒硬件
+        /// 键盘理论不达）——无修饰键上下文，分流表只允许消费②空白 no-op，发送分支
+        /// （③④⑤-send）一律让行默认换行，永不触发 onSend。
+        case enterFromFallback
+        case tab
+        case upArrow
+        case downArrow
+    }
+
+    /// 分流闭包（representable 每帧重封渲染期快照；返回 true = 已消费）。
+    var routeKey: ((Key) -> Bool)?
+    /// 最大可见行数帽（representable updateUIView 每帧同步）。
+    var maxHeightLines = 4
+    /// pressesBegan 已对本 press 路由且未消费的标记：未消费落到 super 后，super 的默认
+    /// 换行/制表若经 insertText 回流，此处不得再入分流表——修饰键上下文（Shift/⌘）已
+    /// 丢失，重入=以「无修饰」假入参把 Shift+Enter 改判成发送（复核轮勘误，见类注）。
+    /// press 序列起始复位；若 super 换行实际不走 insertText 则标记滞留到下一 press，
+    /// 代价仅为该窗口内一次直插不过兜底（兜底本身近死代码，可忽略）。
+    private var pressAlreadyRouted = false
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        // IME 组合期（markedText 非 nil）或事件缺修饰键面：全键让行超类（组合期 Enter=
+        // 候选确认、↑↓=候选导航、Tab=候选选定）。
+        pressAlreadyRouted = false // 新 press 序列起始复位（上一 press 未回流则不跨序列残留）
+        guard markedTextRange == nil, let event else {
+            super.pressesBegan(presses, with: event)
+            return
+        }
+        let flags = event.modifierFlags
+        for press in presses {
+            guard let key = press.key else { continue }
+            let consumed: Bool
+            switch key.keyCode {
+            case .keyboardReturnOrEnter:
+                consumed = routeKey?(
+                    .enter(shift: flags.contains(.shift),
+                           metaOrCtrl: flags.contains(.command) || flags.contains(.control))
+                ) ?? false
+            case .keyboardTab:
+                consumed = routeKey?(.tab) ?? false
+            case .keyboardUpArrow:
+                consumed = routeKey?(.upArrow) ?? false
+            case .keyboardDownArrow:
+                consumed = routeKey?(.downArrow) ?? false
+            default:
+                consumed = false
+            }
+            if consumed { return } // 已消费：事件不再下行（无双发）
+            if key.keyCode == .keyboardReturnOrEnter || key.keyCode == .keyboardTab
+                || key.keyCode == .keyboardUpArrow || key.keyCode == .keyboardDownArrow {
+                // 未消费（①Shift 强制换行/⑤多行换行/面板隐藏）：super 的默认行为若经
+                // insertText 回流不得重入分流表（修饰键上下文已丢，见类注/pressAlreadyRouted 注）。
+                pressAlreadyRouted = true
+            }
+        }
+        super.pressesBegan(presses, with: event) // 未消费（Shift 换行/多行换行/面板隐藏）走默认
+    }
+
+    override func insertText(_ text: String) {
+        // 兜底通道（2026-11-22 复核轮收口，两道闸）：
+        // 闸一——pressesBegan 已路由未消费的 press（含 super 默认换行/制表回流）一律直放
+        // 超类：修饰键上下文已丢失，重入分流表会以「无修饰」假入参把 Shift+Enter 改判成
+        // 分支④/⑤发送（原注释「不消费分支零副作用」只对同判重放成立，对不同入参重入不成立）。
+        if pressAlreadyRouted {
+            pressAlreadyRouted = false
+            super.insertText(text)
+            return
+        }
+        // 闸二——pressesBegan 未见过该 press 的直插（软键盘/程序注入，Catalyst 恒硬件键盘
+        // 理论不达）：走 enterFromFallback 限权分流，永不触发 onSend（发送只能由带修饰键
+        // 实况的 presses 主通道或发送键承担；②空白 no-op 消费保持）。
+        if markedTextRange == nil, text == "\n", routeKey?(.enterFromFallback) == true {
+            return
+        }
+        if markedTextRange == nil, text == "\t", routeKey?(.tab) == true {
+            return
+        }
+        super.insertText(text)
+    }
+
+    // MARK: 高度（TextField axis:.vertical + lineLimit(1...4) 同语义：帽内自适应、超帽滚动）
+
+    private var lineHeight: CGFloat { font?.lineHeight ?? 17 }
+
+    private var contentHeight: CGFloat {
+        let fitWidth = bounds.width > 0 ? bounds.width : frame.width
+        let fit = sizeThatFits(CGSize(width: fitWidth, height: .greatestFiniteMagnitude))
+        let cap = lineHeight * CGFloat(max(1, maxHeightLines))
+            + textContainerInset.top + textContainerInset.bottom
+        return min(max(fit.height, lineHeight), cap)
+    }
+
+    override var intrinsicContentSize: CGSize {
+        CGSize(width: UIView.noIntrinsicMetric, height: contentHeight)
+    }
+
+    /// 高度重算入口（草稿变化/文本外部重置/宽度变化三路调用）。
+    func refreshHeight() {
+        invalidateIntrinsicContentSize()
+        let fitWidth = bounds.width > 0 ? bounds.width : frame.width
+        let overflows = sizeThatFits(CGSize(width: fitWidth, height: .greatestFiniteMagnitude)).height
+            > lineHeight * CGFloat(max(1, maxHeightLines)) + 1
+        if isScrollEnabled != overflows { isScrollEnabled = overflows }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if bounds.width != lastLayoutWidth {
+            lastLayoutWidth = bounds.width
+            refreshHeight()
+        }
+    }
+
+    private var lastLayoutWidth: CGFloat = 0
 }
 #endif
 
@@ -3796,11 +4150,16 @@ private struct PagedChoiceGrid<Item, ID: Hashable, Card: View>: View {
 ///
 /// 数据侧 2s 合并大块到达（bridge 2s 窗，delta-coalesce DEFAULT_COALESCE_WINDOW_MS=2_000），
 /// 渲染侧从「已见前缀」向新内容逐字放出，双档步长 @ 16ms（2026-11-21 走查②与桌面
-/// desktopui/ConversationScreen.kt typewriterRevealStep 双端对锁，单端改值必须双端同步）：
-/// - 常规档 max(8, 积压/12)：慢流 ≈500 字/秒打字感，大块积压 ~12 步（≈200ms）内追平，积压不跨下一块；
-/// - 洪泛档 积压/3（积压>8192 字）：特大块（桥合并缓冲硬帽 256KiB 量级）走几何档需 ~90 tick、
-///   每 tick 对已揭示前缀整体重解析累计 ~45×积压，主线程掉帧；洪泛档 ~9 tick 追平、累计
-///   ~2×积压——此量级逐字观感本已不可信，快速追平无体感损失。
+/// desktopui/ConversationScreen.kt typewriterRevealStep 双端对锁，单端改值必须双端同步；
+/// 2026-11-22 pacing 对齐轮——步长从「尽快抽干积压」改为与合并窗时长对齐）：
+/// - 常规档 max(1, 积压/90)：≈90 tick×16ms≈1.4s 抽干一个 2s 窗，贴数据节拍——人眼打字
+///   感知量级 5~15 字/秒，CJK 慢流每窗 10-60 字积压呈 1 字/16ms 逐字揭示。旧档
+///   max(8, 积压/12) 以 ≤~12 tick（≈200ms）抽干全部积压、下限 8 字/16ms≈500 字/秒，是
+///   数据节拍的 30-100 倍，流式行呈「逐 2s 块瞬增」、打字体感在数学上不存在（B2 根因），废止；
+/// - 洪泛档 积压/3（积压>8192 字）不变：特大块（桥合并缓冲硬帽 256KiB 量级）走常规档需
+///   数百 tick、每 tick 对已揭示前缀整体重解析累计上百×积压，主线程掉帧；洪泛档 ~9 tick
+///   追平、累计 ~2×积压——洪泛量级逐字观感本已不可信（常规档 8192 字需 ~545 tick≈8.7s），
+///   快速追平无体感损失（走查②判定维持）。
 ///
 /// 语义边界：
 /// - 挂载首帧贴齐现有内容（快照行/滚动往返物化不重打），仅本行存活期间的 append 逐字；
@@ -3819,9 +4178,10 @@ private struct StreamingTypewriter: View {
     /// 洪泛档阈值（字符，> 阈值转洪泛档；与桌面 TYPEWRITER_FLOOD_BACKLOG_CHARS 同值对锁）。
     private static let floodBacklogChars = 8_192
 
-    /// 双档步长（与桌面 typewriterRevealStep 同表；回归值表锁在桌面 StreamingTypewriterPacingTest）。
+    /// 双档步长（与桌面 typewriterRevealStep 同表 8192//90//3；回归值表锁在桌面
+    /// StreamingTypewriterPacingTest）。
     private static func revealStep(_ backlog: Int) -> Int {
-        backlog > floodBacklogChars ? backlog / 3 : max(8, backlog / 12)
+        backlog > floodBacklogChars ? backlog / 3 : max(1, backlog / 90)
     }
 
     var body: some View {

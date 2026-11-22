@@ -70,9 +70,12 @@ struct InkColors {
     /// dark  0x4D9BFF 对 paper 6.64 / 气泡面 6.11 / 卡面 5.51 / elevated 5.91
     /// ——全表面 ≥4.5（描边/薄底等非文本用法 ≥3 同过）。
     let accent: Color
-    // ── 选中面（sidebar 胶囊 + 行内文字对）──
-    /// 系统选中胶囊面（List(selection:) 作用域 .tint 钉住此令牌）。今日与全局 tint 同值
-    /// （light=ink:45 / dark=ink:83），作用是钉住令牌防全局 tint 漂移，非本轮变色项。
+    // ── 选中面（行选中实底 + 行内文字对）──
+    /// 选中行底色面（2026-11-22 对比度收口轮：HubConversationRow 选中时经
+    /// listRowBackground 显式不透明实底接管，取代系统 sidebar 半透明 accent 胶囊——
+    /// 半透明胶囊落屏 α 合成不受控、对比度坍缩；本令牌不透明，onSelection 系文字对
+    /// 它的 WCAG 数在落屏成立。List(selection:) 作用域 .tint 钉住同令牌保留）。
+    /// 今日与全局 tint 同值（light=ink:45 / dark=ink:83），非本轮变色项。
     let selectionFill: Color
     /// 选中行主文字（标题）。light 0xFCFCFC 对 selectionFill 16.61:1 / dark 0x121212 对 17.18:1。
     let onSelection: Color

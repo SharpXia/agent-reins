@@ -93,9 +93,14 @@ struct ConversationAvatarSheet: View {
             }
         }
         .presentationDetents([.medium, .large])
-        // #34 显式刷新（best-effort：登录/sync.ready 已自动水合，此处兜长驻进程陈旧窗口；
-        // 失败静默——观察面仍以 shared 流为准）。
-        .onAppear { hub.refreshConversationAvatarProfiles() }
+        // #34 显式刷新（2026-11-22 修复轮收敛触发源）：仅「未水合」（hub.
+        // conversationAvatarProfiles == nil）才拉——已水合一律不拉。原「必发一次」的整体
+        // 替换刷新存在竞速窗：发于 PUT 之前的陈旧清单若迟到，会把刚生效的覆盖档整体回滚
+        // 回 seed 派生（shared HubClient #34 水合为整体替换语义，per-key 收敛由 shared 侧
+        // 根修），恰呈「切换后形象没变」。实时权威由 shared 流 + sync.ready 回拉承担。
+        .onAppear {
+            if hub.conversationAvatarProfiles == nil { hub.refreshConversationAvatarProfiles() }
+        }
         // 远端收敛（#34 刷新/实时帧/他端 PUT）落地后清陈旧预览（AvatarSettingsView onChange
         // 先例同款：防陈旧草稿遮蔽权威档、确认旧形覆盖远端新档）；AvatarProfileModel Equatable。
         .onChange(of: authoritative) { _, _ in

@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import PhotosUI
+import os
 import composeApp
 
 // ── v1.3 发送链：会话草稿模型（文件域类型——HubViews 与本 store 共用） ──
@@ -664,12 +665,23 @@ final class HubStore {
         }
     }
 
-    /// #34 显式刷新（换装 sheet 打开时 best-effort 对账——登录/sync.ready 已自动水合，此处
-    /// 只兜长驻进程的陈旧窗口；失败静默不呈现，观察面仍以 shared 流为准。成功响应已整体
-    /// 替换落 shared 流，订阅侧自动收帧，本回调不另带数据）。
+    /// #34 刷新失败留痕（2026-11-22 修复轮：失败不再纯静默——os_log 留轨迹可查，呈现面
+    /// 仍以 shared 流为准零变化）。
+    private static let avatarProfilesLog = Logger(subsystem: "dev.sharpxia.agentreins", category: "avatar-profiles")
+
+    /// #34 显式刷新（换装 sheet 打开且**未水合**时 best-effort 对账——登录/sync.ready 已
+    /// 自动水合，已水合的调用点一律不拉，2026-11-22 修复轮消除陈旧快照竞速触发源，见
+    /// ConversationAvatarSheet.onAppear 注）。失败 os_log 留痕不落表（整体替换语义下把
+    /// null 落表会把已水合镜像整体退回未水合——错误路径宁保现值，下个 sync.ready 自愈）；
+    /// 成功响应已整体替换落 shared 流，订阅侧自动收帧，本回调不另带数据。
     func refreshConversationAvatarProfiles() {
-        bridge.hubGetConversationAvatarProfiles { [weak self] mapJson, _ in
-            self?.applyConversationAvatarMap(mapJson as String?)
+        bridge.hubGetConversationAvatarProfiles { [weak self] mapJson, error in
+            guard let self else { return }
+            if let error, !error.isEmpty {
+                Self.avatarProfilesLog.error("#34 refresh failed: \(error, privacy: .public)")
+                return
+            }
+            self.applyConversationAvatarMap(mapJson as String?)
         }
     }
 
@@ -2102,8 +2114,10 @@ final class HubStore {
         // 流在桥 hubLogout → wipeLocalData 同批清空；订阅随桥取消，重登 watchAvatarProfile
         // 重新挂）。
         avatar.resetForLogout()
-        // v1.5.2：会话覆盖档镜像随登出复位 nil（未水合语义）——订阅随桥取消后不再有帧推回，
-        // 不复位则重登新账号在 #34 回拉到达前的窗口会错用旧用户覆盖档渲染（用户级数据同纪律）。
+        // v1.5.2：会话覆盖档镜像随登出复位 nil（未水合语义）——订阅随桥取消（hubLogout 已
+        // 显式 cancel hubConversationAvatarJob，2026-11-22 修复轮补漏对齐桥面文档；此前漏
+        // 取消时本行复位仍兜住换账号串档）后不再有帧推回，不复位则重登新账号在 #34 回拉
+        // 到达前的窗口会错用旧用户覆盖档渲染（用户级数据同纪律）。
         conversationAvatarProfiles = nil
         bridge.hubLogout()
     }

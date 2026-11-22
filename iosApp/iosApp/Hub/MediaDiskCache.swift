@@ -39,7 +39,12 @@ func stableCacheKey(_ raw: String) -> String {
           let queryItems = comps.queryItems, !queryItems.isEmpty else { return raw }
     let kept = queryItems.filter { !volatileQueryKeys.contains($0.name.lowercased()) }
     guard kept.count != queryItems.count else { return raw }
-    comps.queryItems = kept.sorted { $0.name.lowercased() < $1.name.lowercased() }
+    // 同名重复参数须全项 tiebreak（自检轮 R4-7）：Swift 标准库 sort 不保证稳定序，仅按名
+    // 排序时同名异值参数的相对次序随实现漂移——归一键可轮转换键（签名轮换若同时重排同名
+    // 参数则缓存失效重下）。名同再比值（nil 值按空串先序），对齐桌面 MediaCache.kt
+    // stableCacheKey 的 compareBy(参数名, 全项) 定序——iOS 比解码值、桌面比原始串，同名
+    // 且解码值相等、仅百分号编码异形的极端对仍可能漂序，退化为不命中（错误方向安全）。
+    comps.queryItems = kept.sorted { ($0.name.lowercased(), $0.value ?? "") < ($1.name.lowercased(), $1.value ?? "") }
     return comps.string ?? raw
 }
 

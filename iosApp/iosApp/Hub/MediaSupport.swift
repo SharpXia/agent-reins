@@ -99,6 +99,20 @@ enum MediaImageProcessing {
         guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
         return UIImage(cgImage: cg)
     }
+
+    /// NSCache 内存字节帽（自检轮 R4-8，双 loader 共用）：96MB——对齐桌面 MediaCache.kt
+    /// DEFAULT_MEMORY_CAP_BYTES 字节帽同参互锁（单端改值双端同步）。
+    static let decodedBitmapCostLimitBytes = 96 * 1024 * 1024
+
+    /// NSCache 成本口径（自检轮 R4-8，双 loader 共用）：解码位图 RGBA 字节数——2048 帽内
+    /// 单张至 ~16MB，totalCostLimit 96MB 以此计量（对齐桌面 MediaCache.kt DEFAULT_MEMORY_CAP_BYTES
+    /// 96MB 字节帽同参互锁；不改变命中行为，只把被动压力驱逐换成主动逐出）。
+    static func decodedBitmapBytes(_ image: UIImage) -> Int {
+        guard let cg = image.cgImage else {
+            return Int(image.size.width * image.size.height * image.scale) * 4
+        }
+        return cg.width * cg.height * 4
+    }
 }
 
 // ── mediaId 预检（ULID 字形；服务端 404 HUB-BIZ-002 为权威，此处只防显然病态的路径串） ──
@@ -127,6 +141,10 @@ final class HubMediaLoader {
 
     private init() {
         cache.countLimit = 96
+        // 内存字节帽（自检轮 R4-8，成本口径见 MediaImageProcessing.decodedBitmapBytes）：
+        // countLimit 只限条数，2048px 解码图单张至 ~16MB RGBA，满载可驻留 GB 级、仅靠系统
+        // 内存压力被动驱逐——补 totalCostLimit 主动帽，对齐桌面 MediaCache 96MB 字节帽。
+        cache.totalCostLimit = MediaImageProcessing.decodedBitmapCostLimitBytes
     }
 
     func image(for mediaId: String) async -> UIImage? {
@@ -147,7 +165,8 @@ final class HubMediaLoader {
                 return MediaImageProcessing.decodeForDisplay(raw)
             }.value
             if let diskImage {
-                self.cache.setObject(diskImage, forKey: mediaId as NSString)
+                self.cache.setObject(diskImage, forKey: mediaId as NSString,
+                                     cost: MediaImageProcessing.decodedBitmapBytes(diskImage))
                 self.inflight[mediaId] = nil
                 return diskImage
             }
@@ -166,7 +185,10 @@ final class HubMediaLoader {
                 MediaDiskCache.shared.store(raw, forKey: mediaId)
                 return decoded
             }.value
-            if let image { self.cache.setObject(image, forKey: mediaId as NSString) }
+            if let image {
+                self.cache.setObject(image, forKey: mediaId as NSString,
+                                     cost: MediaImageProcessing.decodedBitmapBytes(image))
+            }
             self.inflight[mediaId] = nil
             return image
         }
@@ -180,7 +202,8 @@ final class HubMediaLoader {
 
 /// 外链图片加载器：URLSession 直拉（无鉴权头）；缓存三级同 HubMediaLoader 口径
 ///（需求4 2026-11-23 批次一），内存/磁盘键同 = stableCacheKey(URL)（自检轮 R3-8 对齐
-/// 桌面 MediaCache 同构：签名窗轮转内存直中，不再磁盘命中后重解码一次）。
+/// 桌面 MediaCache 同构：签名窗轮转内存直中，不再磁盘命中后重解码一次）；自检轮 R4-9
+/// 增失败负缓存退避窗（见 failures 注；force 参数 = 显式重试通道）。
 @MainActor
 final class RemoteImageLoader {
     static let shared = RemoteImageLoader()
@@ -190,6 +213,31 @@ final class RemoteImageLoader {
 
     private init() {
         cache.countLimit = 96
+        // 内存字节帽（自检轮 R4-8，成本口径见 MediaImageProcessing.decodedBitmapBytes）：
+        // 同 HubMediaLoader——主动字节帽对齐桌面 MediaCache 96MB。
+        cache.totalCostLimit = MediaImageProcessing.decodedBitmapCostLimitBytes
+    }
+
+    // ── 失败负缓存（自检轮 R4-9，桌面 MediaCacheStore 同轮落同参互锚——基准 TTL 60s /
+    // 退避帽 300s，单端改值双端同步）：死链外链图行滚动往返重物化即重发注定失败的网络
+    // 尝试（连接超时 8s 量级），长会话上下滚动反复白付 IO。内存级失败记录 键→（上次失败
+    // 时刻, 连续失败数）：退避窗内非强制取数直回 nil 不启网络（失败态即现，chip 不再闪
+    // 「加载失败」风暴）；退避 = 基准 TTL × 连续失败数（帽 300s），生长来自 TTL 自然到期
+    // 重开的自动重试；用户点 chip 重试走 force=true 清记录强拉（失败后从基准 TTL 重新
+    // 起算——显式重试不累加旧账）。仅进程内存级（重启即清），成功取数即清记录。
+    private struct FailureRecord {
+        let at: Date
+        let consecutive: Int
+    }
+    private var failures: [String: FailureRecord] = [:]
+    private static let failureTTLSeconds: TimeInterval = 60
+    private static let failureBackoffCapSeconds: TimeInterval = 300
+
+    /// 失败门是否放行：无记录放行；有记录且未过退避窗（基准 TTL × 连续数，帽 300s）拦截。
+    private func failureGateOpen(for key: String) -> Bool {
+        guard let record = failures[key] else { return true }
+        let ttl = min(Self.failureTTLSeconds * Double(record.consecutive), Self.failureBackoffCapSeconds)
+        return Date().timeIntervalSince(record.at) >= ttl
     }
 
     /// 自检轮 R2-11：取数体量帽——`URLSession.data` 对响应体全量缓冲无上限，外链内容不受
@@ -198,21 +246,23 @@ final class RemoteImageLoader {
     /// 之外补齐「网络→内存」这一跳。
     private nonisolated static let maxFetchBytes = 32 * 1024 * 1024
 
-    /// 帽内流式取数（iOS 15+ bytes 流）：逐字节累计、超帽即中止返回 nil——走失败态可重试/
-    /// chip 降级，错误方向安全（不显示而非 OOM）。已知取舍（自检轮 R3-5/R3-11 属实化）：
-    /// Foundation 的 AsyncBytes 无公开分块读面，逐元素遍历吞吐劣于 URLSession.data 整块
-    /// 缓冲读，本仓未实测差值（多 MB 外链图首载或有可感延迟）——换的是超帽响应不进协程
-    /// 内存。响应头可判的两条早退路（自检轮 R3-6/R3-5）：非 2xx 与 Content-Length 超帽
-    /// 直接返回 nil，不启动逐字节消费（错误体/超大响应既不进循环也不进内存）；仅余无
-    /// 长度头的 chunked 响应靠循环内计数兜底。中止/早退后剩余响应不再进入本协程内存
-    ///（未消费字节随流对象弃置回收）。其余语义（默认超时/重定向）与 URLSession.data
-    /// 一致。nonisolated：@MainActor 类的 static 成员默认随主 actor，逐字节循环须离主
-    /// 线程（SE-0338 全局执行器）。
+    /// 帽内取数（iOS 15+）：响应头先行预检（bytes 流在消费前只持头），预检通过且已知长度
+    /// 时走 URLSession.data 整块缓冲快路径。自检轮 R4-5：基线（a947f9a 前）为 URLSession.data
+    /// 整块缓冲，R2-11 换逐字节循环换体量帽，但 AsyncBytes 逐元素遍历多 MB 图即 10^7 次
+    /// await 挂起/恢复，吞吐显著劣化——已知 Content-Length（≥0 且 ≤帽）的响应体已被头
+    /// 预检限界，可安全回整块缓冲，吞吐回归基线（多付的只是一次轻量头请求）；仅无长度头
+    /// 的 chunked/未知长度响应保留逐字节循环兜底（Foundation 的 AsyncBytes 无公开分块读面，
+    /// 自检轮 R3-5/R3-11 结论）——体量帽语义不变，错误方向安全（不显示而非 OOM）。响应头
+    /// 可判的两条早退路（自检轮 R3-6/R3-5）：非 2xx 与 Content-Length 超帽直接返回 nil，
+    /// 不消费字节流（错误体/超大响应既不进快路径也不进循环）。中止/早退后剩余响应不再
+    /// 进入本协程内存（未消费字节随流对象弃置回收）。其余语义（默认超时/重定向）与
+    /// URLSession.data 一致。nonisolated：@MainActor 类的 static 成员默认随主 actor，
+    /// 取数须离主线程（SE-0338 全局执行器）。
     private nonisolated static func fetchCapped(_ url: URL) async -> (Data, URLResponse)? {
         guard let (bytes, response) = try? await URLSession.shared.bytes(from: url) else { return nil }
         // 状态门前置（自检轮 R3-6，对齐桌面 MediaCache.fetchFromNetwork 读体先判状态）：
         // URLSession 对 4xx/5xx 不抛错、错误页字节照回——状态在响应头即已可判，非 2xx
-        // 直接 nil，错误体（可为 HTML 大页）既不进逐字节循环也不进协程内存。
+        // 直接 nil，错误体（可为 HTML 大页）既不进快路径也不进逐字节循环。
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             return nil
         }
@@ -220,6 +270,12 @@ final class RemoteImageLoader {
         // expectedContentLength == -1（chunked/未知长度）不预判，交给循环内计数兜底。
         let expected = response.expectedContentLength
         if expected >= 0 && expected > maxFetchBytes { return nil }
+        // 快路径（自检轮 R4-5）：已知长度 ≤帽——响应体已被头预检限界（服务端自报长度
+        // 违规属协议外病态，不在防御面内），直接整块缓冲取体，吞吐回归基线。
+        if expected >= 0 {
+            guard let (data, dataResponse) = try? await URLSession.shared.data(from: url) else { return nil }
+            return (data, dataResponse)
+        }
         var data = Data()
         data.reserveCapacity(1 << 20)
         do {
@@ -233,7 +289,9 @@ final class RemoteImageLoader {
         return (data, response)
     }
 
-    func image(for url: URL) async -> UIImage? {
+    /// force = 用户显式重试通道（行内 chip / 查看器失败态点按重试，R4-9）：清失败记录强拉。
+    /// 默认 false——常规取数（行物化/拷贝图片/查看器首载）受失败负缓存退避窗节流。
+    func image(for url: URL, force: Bool = false) async -> UIImage? {
         // 需求4（2026-11-23 批次一，复核 B6 对锁）：缓存键 = stableCacheKey——剥离已知
         // 时效/签名 query 参数并重排序归一，签名窗轮转不换键；白名单外参数全保留（未知签名
         // 退化为不命中而非错命中）。内存与磁盘同键（自检轮 R3-8 对齐桌面 MediaCache 同构：
@@ -242,6 +300,13 @@ final class RemoteImageLoader {
         let key = stableCacheKey(url.absoluteString)
         if let hit = cache.object(forKey: key as NSString) { return hit }
         if let running = inflight[key] { return await running.value }
+        // 负缓存门（自检轮 R4-9）：inflight 检查在前——并发的强制重试任务照常被等待，不吞
+        // 其结果；未过退避窗且非强制 → 直回 nil 不启网络（失败态即现）。
+        if force {
+            failures[key] = nil
+        } else if !failureGateOpen(for: key) {
+            return nil
+        }
         let task = Task<UIImage?, Never> { [weak self] () -> UIImage? in
             guard let self else { return nil }
             // 磁盘命中路径（磁盘 IO 与解码 utility detached 离主线程，同 HubMediaLoader 口径）。
@@ -250,7 +315,8 @@ final class RemoteImageLoader {
                 return MediaImageProcessing.decodeForDisplay(raw)
             }.value
             if let diskImage {
-                self.cache.setObject(diskImage, forKey: key as NSString)
+                self.cache.setObject(diskImage, forKey: key as NSString,
+                                     cost: MediaImageProcessing.decodedBitmapBytes(diskImage))
                 self.inflight[key] = nil
                 return diskImage
             }
@@ -270,7 +336,15 @@ final class RemoteImageLoader {
                 MediaDiskCache.shared.store(raw, forKey: key)
                 return decoded
             }.value
-            if let image { self.cache.setObject(image, forKey: key as NSString) }
+            if let image {
+                self.cache.setObject(image, forKey: key as NSString,
+                                     cost: MediaImageProcessing.decodedBitmapBytes(image))
+                self.failures[key] = nil
+            } else {
+                // 失败记账（R4-9）：连续失败数续增驱动退避（force 清记录后从 1 重新起算）。
+                let prior = self.failures[key]?.consecutive ?? 0
+                self.failures[key] = FailureRecord(at: Date(), consecutive: prior + 1)
+            }
             self.inflight[key] = nil
             return image
         }
@@ -434,7 +508,9 @@ struct RemoteImageView: View {
         .task(id: attempt) {
             guard image == nil else { return }
             failed = false
-            if let loaded = await RemoteImageLoader.shared.image(for: url) {
+            // attempt 自增 = 用户显式重试（R4-9）→ force 绕过失败负缓存退避窗强拉；
+            // 首载与行重建（attempt==0，滚动往返重物化即此形态）仍受节流，死链不重发请求。
+            if let loaded = await RemoteImageLoader.shared.image(for: url, force: attempt > 0) {
                 image = loaded
             } else if image == nil {
                 failed = true

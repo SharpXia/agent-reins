@@ -182,7 +182,9 @@ private struct ImageViewerPageView: View {
             case let .hub(mediaId):
                 image = await HubMediaLoader.shared.image(for: mediaId)
             case let .remote(url):
-                image = await RemoteImageLoader.shared.image(for: url)
+                // attempt 自增 = 用户显式重试（R4-9）→ force 绕过失败负缓存退避窗强拉；
+                // 查看器首载（attempt==0）仍受节流，与行内 RemoteImageView 同口径。
+                image = await RemoteImageLoader.shared.image(for: url, force: attempt > 0)
             case let .inline(img):
                 image = img
             }

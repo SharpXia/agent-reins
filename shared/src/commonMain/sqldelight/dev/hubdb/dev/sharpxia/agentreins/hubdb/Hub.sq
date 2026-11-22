@@ -567,6 +567,25 @@ UPDATE hubCommands SET commandId = ?, updatedAt = ? WHERE idempotencyKey = ?;
 selectNonTerminalCommands:
 SELECT * FROM hubCommands WHERE state NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'INDETERMINATE');
 
+-- FLOW-4 债清偿（2026-11-22）：终态行年龄剪枝。此前终态行无任何清理路径（markRead 每次新幂等键
+-- 新行、唯一出口 wipeLocalData 全表清空）→ 长期装机无界增长。判据钉 createdAt（epoch 毫秒数字串，
+-- 唯一写入口径 DefaultCommandClient.nowText；updatedAt 会被事件路径覆写成 ISO 串不可作数值判据），
+-- 定长字串典序比较即数值序（13 位覆盖 2001→2286）。终态名单 = CommandState.isTerminal 四终态
+-- （与 selectNonTerminalCommands 的 NOT IN 同闭集）。保留窗 7 天：message.send 终态行的
+-- conversationId 供映射学习链（resolveConversation② selectCommandByKey）消费，响应映射发生在
+-- 分钟级，窗后无消费场景——message.send 终态同在被剪范围，窗口即其保留语义；read.mark 行高频
+-- 推进是主要清理对象。挂点与节流：DefaultEventProjector.noteTerminalTransition（每 32 次终态
+-- 转移一次）+ DefaultHubClient.start 尾部启动兜底。仅剪终态行，非终态条目（retryUnfinished
+-- 与探针消费面）不受影响。
+pruneTerminalCommandsBefore:
+DELETE FROM hubCommands
+WHERE state IN ('COMPLETED', 'FAILED', 'CANCELLED', 'INDETERMINATE')
+  AND createdAt < ?;
+
+-- FLOW-4：终态行计数（剪枝用例断言面；剪枝查询的闭环对读）。
+countTerminalCommands:
+SELECT COUNT(*) FROM hubCommands WHERE state IN ('COMPLETED', 'FAILED', 'CANCELLED', 'INDETERMINATE');
+
 upsertReadCursor:
 INSERT INTO hubReadCursors(conversationId, readUpTo) VALUES (?, ?)
 ON CONFLICT(conversationId) DO UPDATE SET readUpTo = MAX(readUpTo, excluded.readUpTo);

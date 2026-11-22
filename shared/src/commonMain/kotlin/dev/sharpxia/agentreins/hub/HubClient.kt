@@ -370,6 +370,9 @@ class DefaultHubClient(
         scheduler?.start()
         // 断线恢复：未终态命令按同键幂等重发（05 §3.5 恢复流程收尾步）
         scope.launch { runCatching { commands?.retryUnfinished() } }
+        // FLOW-4 债清偿（2026-11-22）：启动尾部兜底剪枝——停机/离线窗口内堆积的终态行此时一次清掉
+        // （运行期由投影层每 32 次终态转移节流增量剪；失败静默，同隔壁 launch 口径）。
+        scope.launch { runCatching { baseProjection.pruneAgedTerminalCommands() } }
         // 网关目录对账回拉（2026-11-15 死卡修复轮）：restore 路径不触发快照（快照才整体
         // 清灌 hubGateways）——登录/重连组装点拉一次 REST #6 对账（防抖通道，含差集删除），
         // 撤销网关卡免等 agents_changed 边沿即收敛。失败静默（runCatching 内，事件/快照兜底）。

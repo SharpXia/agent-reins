@@ -204,6 +204,10 @@ class DefaultEventProjector(
 
     val stats = ProjectionStats()
 
+    // FLOW-4 债清偿（2026-11-22）：终态转移节流计数（best-effort——投影事件流单协程消费，
+    // 计数竞态最坏推迟一次剪枝，无害）。运行期挂点；启动兜底 = DefaultHubClient.start 尾部。
+    private var terminalTransitions: Long = 0
+
     // ── 快照整体覆盖（05 §3.11 铁律：先覆盖基线，禁止 upsert 到已含事件的模型上） ──
 
     override fun applySnapshot(snapshot: SnapshotResponse) {
@@ -786,6 +790,7 @@ class DefaultEventProjector(
             else -> Unit
         }
         learnMappingFromCommand(envelope, d.idempotencyKey)
+        noteTerminalTransition(d.status) // FLOW-4：终态行节流剪枝（四终态才计数，先学习后剪枝保映射消费序）
     }
 
     private fun onCommandFailed(envelope: EventEnvelope) {
@@ -795,6 +800,7 @@ class DefaultEventProjector(
             db.hubQueries.setMessageUiStateByIdem(UI_FAILED, d.idempotencyKey)
         }
         learnMappingFromCommand(envelope, d.idempotencyKey)
+        noteTerminalTransition(d.status) // FLOW-4：同 acked 口径
     }
 
     private fun onReadUpdated(envelope: EventEnvelope) {
@@ -882,6 +888,35 @@ class DefaultEventProjector(
         db.hubQueries.upsertConvKey(envelope.gatewayId, sk, convId)
     }
 
+    /**
+     * FLOW-4 债清偿（2026-11-22）：终态转移节流计数——每 32 次四终态转移跑一次
+     * [pruneAgedTerminalCommands]。高频 read.mark 每条新消息渲染即推进一行终态
+     * （DefaultCommandClient.markRead 每次新幂等键 INSERT），不宜每次终态都跑全表 DELETE；
+     * 节流把摊还成本压平。DefaultCommandClient.submit 直写 FAILED（确定性拒绝，不经事件流）
+     * 不计数——该行由下一次节流点/启动兜底顺带清掉（年龄剪枝对时点不敏感）。
+     */
+    private fun noteTerminalTransition(status: String) {
+        if (status !in COMMAND_TERMINAL_STATES) return
+        terminalTransitions += 1
+        if (terminalTransitions % PRUNE_EVERY_TERMINAL_TRANSITIONS != 0L) return
+        pruneAgedTerminalCommands()
+    }
+
+    /**
+     * FLOW-4 债清偿（2026-11-22）：hubCommands 终态行年龄剪枝——删除 createdAt 早于 7 天保留窗的
+     * 四终态行（CommandState.isTerminal 同名单，见 [COMMAND_TERMINAL_STATES]；此前终态行唯一
+     * 出口 wipeLocalData 全表清空）。createdAt 为 epoch 毫秒数字串（唯一写入口径
+     * DefaultCommandClient.nowText；updatedAt 会被事件路径覆写成 ISO 串，不可作数值判据），定长
+     * 字串典序比较即数值序（13 位覆盖 2001→2286）。保留窗依据：message.send 终态行的
+     * conversationId 供映射学习链（resolveConversation② selectCommandByKey）消费，响应映射发生在
+     * 分钟级，7 天窗后无消费场景——message.send 终态同在被剪范围，窗口即其保留语义；仅剪终态行，
+     * 非终态条目（retryUnfinished 与探针消费面）不受影响。internal = 启动兜底调用点
+     * DefaultHubClient.start 尾部直调（nowMs 缺省真实钟；desktopTest 固定钟注入）。
+     */
+    internal fun pruneAgedTerminalCommands(nowMs: Long = kotlin.time.Clock.System.now().toEpochMilliseconds()) {
+        db.hubQueries.pruneTerminalCommandsBefore((nowMs - COMMAND_PRUNE_RETENTION_MS).toString())
+    }
+
     private fun <T> decode(serializer: KSerializer<T>, data: JsonElement): T? =
         runCatching { json.decodeFromJsonElement(serializer, data.jsonObject) }.getOrNull()
 
@@ -903,6 +938,15 @@ class DefaultEventProjector(
 
         /** wp-15：每会话工具活动累积上限（「工作过程」披露条呈现的是近期工作，非全量账本）。 */
         internal const val TOOL_EVENTS_MAX_PER_CONV: Long = 200
+
+        /** FLOW-4：hubCommands 终态剪枝保留窗 7 天（依据见 [DefaultEventProjector.pruneAgedTerminalCommands] 注）。 */
+        private const val COMMAND_PRUNE_RETENTION_MS: Long = 7L * 24 * 60 * 60 * 1000
+
+        /** FLOW-4：终态转移节流步长（每 N 次终态转移跑一次剪枝，见 [DefaultEventProjector.noteTerminalTransition] 注）。 */
+        private const val PRUNE_EVERY_TERMINAL_TRANSITIONS: Long = 32
+
+        /** FLOW-4：四终态名单（= CommandState.isTerminal 闭集；Hub.sq 剪枝/非终态查询字面量同源）。 */
+        private val COMMAND_TERMINAL_STATES = setOf("COMPLETED", "FAILED", "CANCELLED", "INDETERMINATE")
 
         private val ListSerializerAgentRef =
             kotlinx.serialization.builtins.ListSerializer(AgentRef.serializer())

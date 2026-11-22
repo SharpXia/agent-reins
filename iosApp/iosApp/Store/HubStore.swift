@@ -2125,6 +2125,16 @@ final class HubStore {
         // 取消时本行复位仍兜住换账号串档）后不再有帧推回，不复位则重登新账号在 #34 回拉
         // 到达前的窗口会错用旧用户覆盖档渲染（用户级数据同纪律）。
         conversationAvatarProfiles = nil
+        // 确认评审收口：媒体缓存随登出清空——磁盘层 MediaDiskCache 整目录清空（串行队列
+        // 承 IO）+ 双 loader NSCache/在途/失败记账清空（loader 是 @MainActor，logout 非隔离
+        // 上下文，Task 跳主 Actor 清——媒体字节是账号派生数据，撤销设备换账号不残留呈现；
+        // 与形象档 resetForLogout 同纪律）。竞态窗：清空瞬间在途取数任务至多回写单张图，
+        // 设备已撤销后续取数必失败不再增长——知情微窗。
+        MediaDiskCache.shared.clearAll()
+        Task { @MainActor in
+            HubMediaLoader.shared.clearForLogout()
+            RemoteImageLoader.shared.clearForLogout()
+        }
         bridge.hubLogout()
     }
 }

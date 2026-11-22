@@ -147,6 +147,13 @@ final class HubMediaLoader {
         cache.totalCostLimit = MediaImageProcessing.decodedBitmapCostLimitBytes
     }
 
+    /// 登出清空（确认评审收口，调用方 HubStore.logout()）：NSCache 与在途表随登出清空；
+    /// 在途任务不取消（完成态回写竞态窗见调用点注）。
+    func clearForLogout() {
+        cache.removeAllObjects()
+        inflight.removeAll()
+    }
+
     func image(for mediaId: String) async -> UIImage? {
         if let hit = cache.object(forKey: mediaId as NSString) { return hit }
         if let running = inflight[mediaId] { return await running.value }
@@ -218,6 +225,14 @@ final class RemoteImageLoader {
         cache.totalCostLimit = MediaImageProcessing.decodedBitmapCostLimitBytes
     }
 
+    /// 登出清空（确认评审收口，调用方 HubStore.logout()）：NSCache、在途表与失败记账随
+    /// 登出清空；在途任务不取消（完成态回写竞态窗见调用点注）。
+    func clearForLogout() {
+        cache.removeAllObjects()
+        inflight.removeAll()
+        failures.removeAll()
+    }
+
     // ── 失败负缓存（自检轮 R4-9，桌面 MediaCacheStore 同轮落同参互锚——基准 TTL 60s /
     // 退避帽 300s，单端改值双端同步）：死链外链图行滚动往返重物化即重发注定失败的网络
     // 尝试（连接超时 8s 量级），长会话上下滚动反复白付 IO。内存级失败记录 键→（上次失败
@@ -250,7 +265,8 @@ final class RemoteImageLoader {
     /// 时走 URLSession.data 整块缓冲快路径。自检轮 R4-5：基线（a947f9a 前）为 URLSession.data
     /// 整块缓冲，R2-11 换逐字节循环换体量帽，但 AsyncBytes 逐元素遍历多 MB 图即 10^7 次
     /// await 挂起/恢复，吞吐显著劣化——已知 Content-Length（≥0 且 ≤帽）的响应体已被头
-    /// 预检限界，可安全回整块缓冲，吞吐回归基线（多付的只是一次轻量头请求）；仅无长度头
+    /// 预检限界，可安全回整块缓冲，吞吐回归基线（代价=同 URL 第二次 GET；预检流在第二段
+    /// 取数前显式弃置，不与其并发传输响应体——确认评审收口）；仅无长度头
     /// 的 chunked/未知长度响应保留逐字节循环兜底（Foundation 的 AsyncBytes 无公开分块读面，
     /// 自检轮 R3-5/R3-11 结论）——体量帽语义不变，错误方向安全（不显示而非 OOM）。响应头
     /// 可判的两条早退路（自检轮 R3-6/R3-5）：非 2xx 与 Content-Length 超帽直接返回 nil，
@@ -259,7 +275,18 @@ final class RemoteImageLoader {
     /// URLSession.data 一致。nonisolated：@MainActor 类的 static 成员默认随主 actor，
     /// 取数须离主线程（SE-0338 全局执行器）。
     private nonisolated static func fetchCapped(_ url: URL) async -> (Data, URLResponse)? {
-        guard let (bytes, response) = try? await URLSession.shared.bytes(from: url) else { return nil }
+        // 预检流持有位（确认评审收口）：bytes(from:) 是全量 GET 非 HEAD，流对象存活期间
+        // 底层任务持续传输响应体——此前局部常量存活至函数返回，快路径第二段 data 下载全程
+        // 与第一响应体并发传输（同 URL 双 GET，带宽最高 2x）。快路径置 nil 弃置流对象即
+        // 中止底层传输；慢路径（chunked）仍复用同一流（单 GET 语义不变）。
+        var byteStream: URLSession.AsyncBytes?
+        let response: URLResponse
+        if let (bytes, head) = try? await URLSession.shared.bytes(from: url) {
+            byteStream = bytes
+            response = head
+        } else {
+            return nil
+        }
         // 状态门前置（自检轮 R3-6，对齐桌面 MediaCache.fetchFromNetwork 读体先判状态）：
         // URLSession 对 4xx/5xx 不抛错、错误页字节照回——状态在响应头即已可判，非 2xx
         // 直接 nil，错误体（可为 HTML 大页）既不进快路径也不进逐字节循环。
@@ -273,9 +300,11 @@ final class RemoteImageLoader {
         // 快路径（自检轮 R4-5）：已知长度 ≤帽——响应体已被头预检限界（服务端自报长度
         // 违规属协议外病态，不在防御面内），直接整块缓冲取体，吞吐回归基线。
         if expected >= 0 {
+            byteStream = nil
             guard let (data, dataResponse) = try? await URLSession.shared.data(from: url) else { return nil }
             return (data, dataResponse)
         }
+        guard let bytes = byteStream else { return nil }
         var data = Data()
         data.reserveCapacity(1 << 20)
         do {
@@ -369,9 +398,10 @@ struct MessageAttachmentView: View {
         if attachment.source == "hub", let mediaId = attachment.mediaId {
             HubMediaThumbnail(mediaId: mediaId, fileName: attachment.fileName)
                 .contextMenu {
-                    // UxPlan item4（评审修正⑦(b)）：拷贝图片——走 HubMediaLoader（NSCache/磁盘
-                    // 命中或 #24 重取后解码，MediaSupport.swift:116-167），不是压缩管线
-                    //（:44-102 为上传前 MediaImageProcessing，不持展示位图）。
+                    // UxPlan item4（评审修正⑦(b)）：拷贝图片——走 HubMediaLoader.image(for:)
+                    //（NSCache/磁盘命中或 #24 重取后解码），不是上传压缩管线；行号引用一律
+                    // 符号名防漂移（确认评审收口）——MediaImageProcessing.prepare 为上传前
+                    // 处理，展示位图来自 decodeForDisplay（即本动作依赖的解码路径）。
                     // 双平台生效：iOS 长按同款，作为有意接受的 iOS 增益（与会话行右键同决策）。
                     Button {
                         Task { @MainActor in

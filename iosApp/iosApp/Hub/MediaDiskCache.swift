@@ -5,6 +5,8 @@ import Foundation
 // HubMediaLoader / RemoteImageLoader 的二级存储：NSCache 驱逐或进程重启后，行内缩略图不再
 // 重走网络下载原图（此前字节仅在解码窗口内存持有）。目录 = Caches/media-thumbs/（Caches
 // 本就不入 iCloud 备份、系统磁盘紧张时可整目录回收——属预期行为，缺页只退化为重下）；
+// 登出整目录清空（HubStore.logout() → clearAll：媒体字节是账号派生数据，撤销设备换账号
+// 不残留呈现，与 HubStore 各账号派生缓存「随登出清空」纪律同位——确认评审收口）；
 // 文件名 = SHA256(key) 十六进制（键可为 mediaId 或 stableCacheKey(URL) 串，防特殊字符与
 // 路径穿越，文件系统只见定长哈希名）；trim 按 mtime LRU（磁盘命中即 touch
 // modificationDate），256MB 惰性清理。线程安全：串行 utility 队列承全部磁盘 IO，不占主
@@ -103,6 +105,16 @@ final class MediaDiskCache {
             } catch {
                 // 写失败（磁盘满/目录被系统回收）静默：下次取数走网络重下。
             }
+        }
+    }
+
+    /// 登出清空（账号语义的主动清空，与「可被系统回收」的被动回收不同；调用方
+    /// HubStore.logout()）：整目录删除后重建，串行队列承 IO。在途写竞态窗至多残留登出前
+    /// 已在途的单张图（设备已撤销，后续取数必失败不再增长——知情微窗）。
+    func clearAll() {
+        queue.async { [directory] in
+            try? FileManager.default.removeItem(at: directory)
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         }
     }
 

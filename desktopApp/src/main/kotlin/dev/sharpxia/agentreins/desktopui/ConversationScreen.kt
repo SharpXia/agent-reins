@@ -343,6 +343,8 @@ internal fun ConversationScreen(
         }
     }
     val scope = rememberCoroutineScope()
+    // DSK-1 散写收敛：墨水令牌单点读取
+    val ink = LocalDesktopInk.current
     // 已读上报基线：只认真实服务端 seq（乐观哨兵/failed/流式行三类均不计入——口径与根因链
     // 详见 maxRenderedReadSeq 注；只推进不回退，避免噪声）
     var reportedReadUpTo by remember { mutableStateOf(0L) }
@@ -791,7 +793,7 @@ internal fun ConversationScreen(
                         Text(
                             text = gatewayNameFor(gateways, gatewayId),
                             fontSize = 10.sp,
-                            color = Color(0xFF999999),
+                            color = ink.textTertiary, // 原 0xFF999999（DSK-1 散写收敛）
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -836,7 +838,7 @@ internal fun ConversationScreen(
                     Text(
                         "发送第一条消息开始（历史随快照与事件流回填）",
                         fontSize = 11.sp,
-                        color = Color(0xFF888888),
+                        color = ink.textTertiary, // 原 0xFF888888
                         modifier = Modifier.padding(top = 4.dp),
                     )
                 }
@@ -871,7 +873,7 @@ internal fun ConversationScreen(
                         ) {
                             CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
                             Spacer(Modifier.width(6.dp))
-                            Text("加载更早…", fontSize = 11.sp, color = Color(0xFF999999))
+                            Text("加载更早…", fontSize = 11.sp, color = ink.textTertiary) // 原 0xFF999999
                         }
                     }
                     EarlierRowState.Loadable -> item(key = "earlier-loader") {
@@ -884,7 +886,7 @@ internal fun ConversationScreen(
                         Text(
                             "已到最早消息",
                             fontSize = 11.sp,
-                            color = Color(0xFF999999),
+                            color = ink.textTertiary, // 原 0xFF999999
                             modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
                             textAlign = TextAlign.Center,
                         )
@@ -897,7 +899,7 @@ internal fun ConversationScreen(
                         Text(
                             "⚠ $loadEarlierError",
                             fontSize = 11.sp,
-                            color = Color(0xFFC53030),
+                            color = ink.dangerText, // 原 0xFFC53030 错误红
                             modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
                             textAlign = TextAlign.Center,
                         )
@@ -1011,7 +1013,7 @@ internal fun ConversationScreen(
                                         },
                                         contentPadding = PaddingValues(horizontal = 4.dp),
                                     ) {
-                                        Text("✕", fontSize = 10.sp, color = Color(0xFF999999))
+                                        Text("✕", fontSize = 10.sp, color = ink.textTertiary) // 原 0xFF999999
                                     }
                                 }
                             }
@@ -1022,7 +1024,7 @@ internal fun ConversationScreen(
                     Text(
                         "⚠ $attachmentError",
                         fontSize = 11.sp,
-                        color = Color(0xFFC53030),
+                        color = ink.dangerText, // 原 0xFFC53030 错误红
                         modifier = Modifier.padding(top = 2.dp),
                     )
                 }
@@ -1182,7 +1184,7 @@ internal fun ConversationScreen(
                         // 此前禁用 Stop 独占 + 发送键被替换 = 服务端聚合卡 true 时 composer 整体锁死
                         //（真机实测 roster 瞬态信号把会话活跃 run 卡死）。
                         if (isRunActive) {
-                            Text("结束中", fontSize = 10.sp, color = Color(0xFF999999))
+                            Text("结束中", fontSize = 10.sp, color = ink.textTertiary) // 原 0xFF999999
                             Spacer(Modifier.width(6.dp))
                         }
                         // 空正文防线（发送侧）：空白草稿禁发（isNotBlank = 去空白后非空），点击再兜一层。
@@ -1281,6 +1283,8 @@ private fun MessageRow(
 
 @Composable
 private fun UserMessageRow(m: UiMessage) {
+    // DSK-1 散写收敛：墨水令牌单点读取（状态徽标/时间戳弱化灰）
+    val ink = LocalDesktopInk.current
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.End,
@@ -1300,7 +1304,7 @@ private fun UserMessageRow(m: UiMessage) {
             Text(
                 // wp-8③ 空正文防线：空 SENDING 用户行不渲染空气泡，占位「…」+ 状态徽标照常翻转
                 text = if (isEmptyUserBody(m)) "…" else m.content,
-                color = if (isEmptyUserBody(m)) Color(0xFF999999) else Color.Unspecified,
+                color = if (isEmptyUserBody(m)) ink.textTertiary else Color.Unspecified, // 原 0xFF999999
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
             )
         }
@@ -1308,15 +1312,17 @@ private fun UserMessageRow(m: UiMessage) {
             modifier = Modifier.padding(top = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(formatTs(m.ts), fontSize = 11.sp, color = Color(0xFF999999))
+            Text(formatTs(m.ts), fontSize = 11.sp, color = ink.textTertiary) // 原 0xFF999999
             when (m.uiState) {
                 // #3（2026-11-08）：排队中 = 消息级落库状态（发送时 run 活跃），run 终态由
                 // 投影层统一释放翻已送达——替代旧 composer 会话级队列提示。
-                "queued" -> TagChip("排队中", Color(0xFFB26A00), Modifier.padding(start = 6.dp))
-                "sending" -> TagChip("发送中…", Color(0xFF666666), Modifier.padding(start = 6.dp))
+                // DSK-1 散写收敛：警示橙（原 0xFFB26A00）→ warningText、弱化灰（原 0xFF666666）
+                // → textTertiary、状态绿（原 0xFF2E9E44）→ successText。
+                "queued" -> TagChip("排队中", ink.warningText, Modifier.padding(start = 6.dp))
+                "sending" -> TagChip("发送中…", ink.textTertiary, Modifier.padding(start = 6.dp))
                 "failed" -> TagChip("发送失败", MaterialTheme.colorScheme.error, Modifier.padding(start = 6.dp))
-                "delivered" -> TagChip("已送达", Color(0xFF2E9E44), Modifier.padding(start = 6.dp))
-                "read" -> TagChip("已读", Color(0xFF2E9E44), Modifier.padding(start = 6.dp))
+                "delivered" -> TagChip("已送达", ink.successText, Modifier.padding(start = 6.dp))
+                "read" -> TagChip("已读", ink.successText, Modifier.padding(start = 6.dp))
                 else -> Unit
             }
             if (m.state == "failed") {
@@ -1441,6 +1447,8 @@ private fun AssistantMessageRow(
     if (presentation == StreamingRowPresentation.Silent) {
         return
     }
+    // DSK-1 散写收敛：墨水令牌单点读取（占位灰/时间戳/流式 chip）
+    val ink = LocalDesktopInk.current
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.Start,
@@ -1469,7 +1477,7 @@ private fun AssistantMessageRow(
                 presentation == StreamingRowPresentation.Placeholder -> Text(
                     assistantPlaceholderText(thinkingNow, agentLabel),
                     fontStyle = FontStyle.Italic,
-                    color = Color(0xFF999999),
+                    color = ink.textTertiary, // 原 0xFF999999 占位灰（DSK-1 散写收敛）
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                 )
                 // wp-8③ 空正文防线：final/failed 空助手行渲染占位（不再出现空气泡——
@@ -1485,7 +1493,7 @@ private fun AssistantMessageRow(
                     Text(
                         "（无文本内容）",
                         fontStyle = FontStyle.Italic,
-                        color = Color(0xFF999999),
+                        color = ink.textTertiary, // 原 0xFF999999
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                     )
                 }
@@ -1513,11 +1521,11 @@ private fun AssistantMessageRow(
             modifier = Modifier.padding(top = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(formatTs(m.ts), fontSize = 11.sp, color = Color(0xFF999999))
+            Text(formatTs(m.ts), fontSize = 11.sp, color = ink.textTertiary) // 原 0xFF999999
             // 2026-11-19 纯显示偏好：chip 与 MarkdownText 光标同门（=Progressive）——流式输出关
             // 的非空行呈占位文案不挂 chip；僵尸流式行（runActive=false）同样不挂（清账①）。
             if (presentation == StreamingRowPresentation.Progressive) {
-                TagChip("流式生成中", Color(0xFF2B6CB0), Modifier.padding(start = 6.dp))
+                TagChip("流式生成中", ink.accent, Modifier.padding(start = 6.dp)) // 原 0xFF2B6CB0 交互强调（DSK-1）
             }
         }
         FailedReasonLine(m)
@@ -1598,7 +1606,7 @@ private fun FailedReasonLine(m: UiMessage) {
     Text(
         text = "⚠ $reason",
         fontSize = 11.sp,
-        color = Color(0xFFC53030),
+        color = LocalDesktopInk.current.dangerText, // 原 0xFFC53030 错误红（DSK-1 散写收敛）
         modifier = Modifier.padding(top = 2.dp),
     )
 }
@@ -1708,7 +1716,7 @@ private fun SlashCommandPanel(
                     // 2026-11-08 修复轮：行尾 ✎ = 预填续写参数（原「带参命令点行预填」行为
                     // 移到此处，点行语义让位给直接发送）
                     TextButton(onClick = { onPrefill(cmd) }) {
-                        Text("✎", fontSize = 12.sp, color = Color(0xFF999999))
+                        Text("✎", fontSize = 12.sp, color = LocalDesktopInk.current.textTertiary) // 原 0xFF999999（DSK-1 散写收敛）
                     }
                 }
                 if (index < suggestions.lastIndex) {
@@ -1736,6 +1744,8 @@ private fun ModelsInteractiveCard(
     onSelect: (ModelOptionItem) -> Unit,
 ) {
     val cached = ModelsCache.valid(conversationId)
+    // DSK-1 散写收敛：墨水令牌单点读取
+    val ink = LocalDesktopInk.current
     Surface(
         color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(10.dp),
@@ -1749,22 +1759,22 @@ private fun ModelsInteractiveCard(
                 Text(
                     "点击发送 /model <模型>",
                     fontSize = 11.sp,
-                    color = Color(0xFF999999),
+                    color = ink.textTertiary, // 原 0xFF999999
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                 )
                 if (cached?.truncated == true) {
-                    Text("已截断", fontSize = 11.sp, color = Color(0xFF999999))
+                    Text("已截断", fontSize = 11.sp, color = ink.textTertiary) // 原 0xFF999999
                 }
             }
             if (cached != null) {
                 if (cached.models.isEmpty()) {
-                    Text("暂无可用模型", fontSize = 12.sp, color = Color(0xFF999999))
+                    Text("暂无可用模型", fontSize = 12.sp, color = ink.textTertiary) // 原 0xFF999999
                 } else {
                     val grouped = cached.models.groupBy { it.provider }
                     grouped.forEach { (provider, models) ->
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(provider, fontSize = 11.sp, color = Color(0xFF777777))
+                            Text(provider, fontSize = 11.sp, color = ink.textTertiary) // 原 0xFF777777
                             FlowRow(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                                 verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -1782,13 +1792,13 @@ private fun ModelsInteractiveCard(
                 Text(
                     "模型目录不可用（该网关未提供）；可直接发送 /model <模型名> 切换",
                     fontSize = 12.sp,
-                    color = Color(0xFF999999),
+                    color = ink.textTertiary, // 原 0xFF999999
                 )
             } else {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.width(6.dp))
-                    Text("正在获取模型目录…", fontSize = 12.sp, color = Color(0xFF999999))
+                    Text("正在获取模型目录…", fontSize = 12.sp, color = ink.textTertiary) // 原 0xFF999999
                 }
             }
         }
@@ -1807,6 +1817,8 @@ private fun CommandOptionsCard(
     onSelectValue: (String) -> Unit,
 ) {
     val choices = command.choices ?: emptyList()
+    // DSK-1 散写收敛：墨水令牌单点读取
+    val ink = LocalDesktopInk.current
     Surface(
         color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(10.dp),
@@ -1818,18 +1830,18 @@ private fun CommandOptionsCard(
                 Text(command.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 command.argName?.let { arg ->
                     Spacer(Modifier.width(6.dp))
-                    Text("/$arg", fontSize = 11.sp, color = Color(0xFF999999))
+                    Text("/$arg", fontSize = 11.sp, color = ink.textTertiary) // 原 0xFF999999
                 }
                 Spacer(Modifier.weight(1f))
                 Text(
                     "点击发送 /" + command.name.removePrefix("/") + " <选项>",
                     fontSize = 11.sp,
-                    color = Color(0xFF999999),
+                    color = ink.textTertiary, // 原 0xFF999999
                     maxLines = 1,
                 )
             }
             if (choices.isEmpty()) {
-                Text("暂无可用选项", fontSize = 12.sp, color = Color(0xFF999999))
+                Text("暂无可用选项", fontSize = 12.sp, color = ink.textTertiary) // 原 0xFF999999
             } else {
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -1845,7 +1857,7 @@ private fun CommandOptionsCard(
                                 Text(
                                     choice.value,
                                     fontSize = 10.sp,
-                                    color = Color(0xFF999999),
+                                    color = ink.textTertiary, // 原 0xFF999999
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
@@ -1873,7 +1885,7 @@ private fun ModelOptionButton(item: ModelOptionItem, onSelect: (ModelOptionItem)
             Text(
                 item.id,
                 fontSize = 10.sp,
-                color = Color(0xFF999999),
+                color = LocalDesktopInk.current.textTertiary, // 原 0xFF999999（DSK-1 散写收敛）
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )

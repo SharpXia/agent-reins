@@ -1,6 +1,7 @@
 package dev.sharpxia.agentreins.desktopui
 
 import androidx.compose.animation.Crossfade
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -15,6 +16,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -26,7 +28,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import dev.sharpxia.agentreins.hub.DefaultHubClient
 import dev.sharpxia.agentreins.hub.hubRootScopeGuard
@@ -138,27 +139,35 @@ internal fun DesktopHubApp(windowPrefs: DesktopWindowPreferences? = null) {
         if (authState is HubAuthState.NeedsLogin || authState is HubAuthState.LoggedIn) submitting = false
     }
 
-    MaterialTheme {
-        when {
-            authState is HubAuthState.LoggedIn -> {
-                HubShell(client, authState as HubAuthState.LoggedIn, coordinator, mutePrefs, displayPrefs, avatarPrefs, windowPrefs, agentGroups)
+    // DSK-1 清偿轮（2026-11-22）：应用主题随系统明暗翻面——此前裸 MaterialTheme 无
+    // colorScheme 分支，null 走无条件 lightColorScheme，系统暗色下应用恒亮。根单点装配：
+    // Material 槽位映射（inkColorScheme）+ 墨水令牌 CompositionLocal（LocalDesktopInk）
+    // 同帧下发，BotCharacter 的 isSystemInDarkTheme 与此同源（2026-11-22 后恒一致）。
+    val dark = isSystemInDarkTheme()
+    val ink = remember(dark) { desktopInk(dark) }
+    CompositionLocalProvider(LocalDesktopInk provides ink) {
+        MaterialTheme(colorScheme = inkColorScheme(dark)) {
+            when {
+                authState is HubAuthState.LoggedIn -> {
+                    HubShell(client, authState as HubAuthState.LoggedIn, coordinator, mutePrefs, displayPrefs, avatarPrefs, windowPrefs, agentGroups)
+                }
+                authState is HubAuthState.NeedsLogin ||
+                    (authState is HubAuthState.Idle && restoreAttempted) || submitting -> {
+                    var loginBase by remember { mutableStateOf(HubEnv.resolveBaseUrl() ?: "") }
+                    LoginScreen(
+                        initialBaseUrl = loginBase,
+                        busy = submitting,
+                        errorMessage = (authState as? HubAuthState.NeedsLogin)?.reason,
+                        onSubmitted = { base, username, password, deviceName ->
+                            submitting = true
+                            loginBase = base
+                            HubEnv.rememberBaseUrl(base)
+                            client.runtime.login(base, username, password, deviceName)
+                        },
+                    )
+                }
+                else -> BootLoadingScreen()
             }
-            authState is HubAuthState.NeedsLogin ||
-                (authState is HubAuthState.Idle && restoreAttempted) || submitting -> {
-                var loginBase by remember { mutableStateOf(HubEnv.resolveBaseUrl() ?: "") }
-                LoginScreen(
-                    initialBaseUrl = loginBase,
-                    busy = submitting,
-                    errorMessage = (authState as? HubAuthState.NeedsLogin)?.reason,
-                    onSubmitted = { base, username, password, deviceName ->
-                        submitting = true
-                        loginBase = base
-                        HubEnv.rememberBaseUrl(base)
-                        client.runtime.login(base, username, password, deviceName)
-                    },
-                )
-            }
-            else -> BootLoadingScreen()
         }
     }
 }
@@ -166,9 +175,11 @@ internal fun DesktopHubApp(windowPrefs: DesktopWindowPreferences? = null) {
 /** 恢复/登录在途占位。 */
 @Composable
 private fun BootLoadingScreen() {
+    // 弱提示灰（原 0xFF888888）→ textTertiary 令牌（DSK-1 散写收敛）
+    val ink = LocalDesktopInk.current
     Surface(modifier = Modifier.fillMaxSize()) {
         Box(contentAlignment = Alignment.Center) {
-            Text("正在恢复会话…", style = MaterialTheme.typography.bodyMedium, color = Color(0xFF888888))
+            Text("正在恢复会话…", style = MaterialTheme.typography.bodyMedium, color = ink.textTertiary)
         }
     }
 }
@@ -322,7 +333,8 @@ private fun HubShell(
                         Text(
                             session.userDisplay ?: "已登录（静默恢复）",
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFF777777),
+                            // 弱提示灰（原 0xFF777777）→ textTertiary 令牌（DSK-1 散写收敛）
+                            color = LocalDesktopInk.current.textTertiary,
                         )
                         MonoText("设备 ${session.deviceId ?: "—"}", modifier = Modifier.padding(top = 2.dp))
                     }
@@ -446,6 +458,11 @@ private fun HubShell(
  */
 @Composable
 private fun SyncPhaseBanner(phase: SyncPhase) {
+    // 令牌域（DSK-1 清偿轮 2026-11-22）：对齐 iOS HubSyncPhaseBanner 状态色收口轮口径——
+    // 警示面走 warning 令牌对（原 0xFFB45309 散写降级橙 → warningText，文字 paper）；
+    // 追平灰面走 surfaceTertiary 薄底（原 0xFFE0E0E0 散写，iOS systemGray6 同灰面语义），
+    // 文字 textSecondary（原 0xFF555555）。
+    val ink = LocalDesktopInk.current
     val degraded = phase != SyncPhase.Catching
     val text = when (phase) {
         SyncPhase.Catching -> "正在同步…"
@@ -454,7 +471,7 @@ private fun SyncPhaseBanner(phase: SyncPhase) {
         SyncPhase.Superseded -> "连接已被本机新会话接管，等待恢复…"
         SyncPhase.Linked -> return
     }
-    Surface(color = if (degraded) Color(0xFFB45309) else Color(0xFFE0E0E0)) {
+    Surface(color = if (degraded) ink.warningText else ink.surfaceTertiary) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -462,7 +479,7 @@ private fun SyncPhaseBanner(phase: SyncPhase) {
             Text(
                 text,
                 style = MaterialTheme.typography.bodySmall,
-                color = if (degraded) Color.White else Color(0xFF555555),
+                color = if (degraded) ink.paper else ink.textSecondary,
             )
         }
     }

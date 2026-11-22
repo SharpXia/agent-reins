@@ -17,7 +17,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -99,6 +98,9 @@ internal fun ApprovalCard(
         ?.let { cid -> conversations.firstOrNull { it.conversationId == cid } }
         ?.let { c -> c.label.ifBlank { c.agentId.ifBlank { "会话" } } }
 
+    // DSK-1 散写收敛：墨水令牌单点读取（警示琥珀/错误红/灰阶文字全收敛）
+    val ink = LocalDesktopInk.current
+
     Surface(
         shape = RoundedCornerShape(14.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -106,33 +108,33 @@ internal fun ApprovalCard(
     ) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("⚙", color = Color(0xFFB7791F), fontSize = 14.sp)
+                Text("⚙", color = ink.warningText, fontSize = 14.sp) // 原 0xFFB7791F 警示琥珀
                 Text(
                     text = a.toolName,
                     style = MaterialTheme.typography.labelLarge,
                     fontFamily = FontFamily.Monospace,
-                    color = Color(0xFF333333),
+                    color = ink.ink, // 原 0xFF333333 强文字
                     maxLines = 1,
                     modifier = Modifier.padding(start = 6.dp).weight(1f),
                 )
-                TagChip("工具审批", Color(0xFFB7791F))
+                TagChip("工具审批", ink.warningText) // 原 0xFFB7791F
             }
             if (a.payloadSummary.isNotEmpty()) {
                 // 有界载荷摘要原样透出（DataApprovalRequested.payloadSummary，消息体不透明 payload 不解析）
-                MonoText(a.payloadSummary, color = Color(0xFF666666))
+                MonoText(a.payloadSummary, color = ink.textTertiary) // 原 0xFF666666
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = conversationTitle ?: "未关联会话",
                     fontSize = 11.sp,
-                    color = Color(0xFF777777),
+                    color = ink.textTertiary, // 原 0xFF777777
                     maxLines = 1,
                 )
                 if (conversationTitle == null) {
                     Text(
                         text = "（归属未学习）",
                         fontSize = 11.sp,
-                        color = Color(0xFFAAAAAA),
+                        color = ink.textTertiary, // 原 0xFFAAAAAA
                         modifier = Modifier.padding(start = 4.dp),
                     )
                 }
@@ -144,23 +146,23 @@ internal fun ApprovalCard(
                     Text(
                         text = "决策通道不可用",
                         fontSize = 12.sp,
-                        color = Color(0xFFC53030),
+                        color = ink.dangerText, // 原 0xFFC53030 错误红
                     )
                     Text(
                         text = "决定未送达（可能为预检未通过或网络不可达），可重试",
                         fontSize = 11.sp,
-                        color = Color(0xFFC53030),
+                        color = ink.dangerText, // 原 0xFFC53030
                     )
                 }
                 submitted -> Text(
                     text = "已提交 · 等待确认（生效以 approval.resolved 事件为准）",
                     fontSize = 11.sp,
-                    color = Color(0xFF666666),
+                    color = ink.textTertiary, // 原 0xFF666666
                 )
                 inFlight -> Text(
                     text = "提交中…",
                     fontSize = 11.sp,
-                    color = Color(0xFF666666),
+                    color = ink.textTertiary, // 原 0xFF666666
                 )
             }
 
@@ -192,12 +194,13 @@ internal fun PendingApprovalsPanel(
     client: DefaultHubClient,
     scope: CoroutineScope,
 ) {
+    val ink = LocalDesktopInk.current
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (approvals.isEmpty()) {
             Text(
                 "暂无待审批（工具审批请求出现后自动列入此处）",
                 style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFF888888),
+                color = ink.textTertiary, // 原 0xFF888888
             )
         } else {
             approvals.forEach { a ->

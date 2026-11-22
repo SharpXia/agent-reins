@@ -140,6 +140,8 @@ internal fun ConversationListPanel(
     var sessionsManagerTarget by remember { mutableStateOf<AgentSessionsTarget?>(null) }
     // 会话级换形象轮：「换形象」目标（会话卡右键菜单；nil = 关）
     var avatarTarget by remember { mutableStateOf<UiConversation?>(null) }
+    // DSK-1 散写收敛：墨水令牌单点读取
+    val ink = LocalDesktopInk.current
 
     fun renameNow(conv: UiConversation, label: String) {
         renameError = null
@@ -218,9 +220,9 @@ internal fun ConversationListPanel(
                         .clickable { compactError = null }
                         .padding(horizontal = 12.dp, vertical = 4.dp),
                 ) {
-                    Text("⚠", color = Color(0xFFB45309), fontSize = 11.sp)
+                    Text("⚠", color = ink.warningText, fontSize = 11.sp) // 原 0xFFB45309 警示橙
                     Spacer(Modifier.width(6.dp))
-                    Text(err, color = Color(0xFFB45309), fontSize = 11.sp, modifier = Modifier.weight(1f))
+                    Text(err, color = ink.warningText, fontSize = 11.sp, modifier = Modifier.weight(1f))
                 }
             }
             if (conversations.isEmpty()) {
@@ -230,7 +232,7 @@ internal fun ConversationListPanel(
                         Text(
                             "登录并追平同步后自动出现（快照 + R4 校准），或经「＋ 新建会话」创建",
                             fontSize = 11.sp,
-                            color = Color(0xFF888888),
+                            color = ink.textTertiary, // 原 0xFF888888
                             modifier = Modifier.padding(top = 4.dp),
                         )
                     }
@@ -331,6 +333,10 @@ private fun ConversationCard(
     onChangeAvatar: () -> Unit,
     onClick: () -> Unit,
 ) {
+    // DSK-1 散写收敛：墨水令牌单点读取。选中行底 = secondaryContainer（inkColorScheme 已映射
+    // 为 selectionFill 实底，对齐 iOS 2026-11-22 对比度收口轮），行内文字须同帧配对切换
+    // （onSelection/onSelectionMuted，ink 文字压 ink 实底不可见的成对纪律）。
+    val ink = LocalDesktopInk.current
     val bg = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent
     // wp-9 右键菜单：menuOpen/menuOffset 为卡片私有组合态；右键 = Press + Secondary 按钮
     // （compose 1.12 无 PointerEventType.SecondaryClick，按 PointerEvent.button 判定），
@@ -409,15 +415,17 @@ private fun ConversationCard(
                 Text(
                     text = conv.label.ifBlank { "（未命名会话）" },
                     style = MaterialTheme.typography.titleSmall,
+                    // 选中行文字对（DSK-1）：onSelection 压 selectionFill 实底（iOS 同帧配对）
+                    color = if (selected) ink.onSelection else Color.Unspecified,
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                 )
                 if (muted) {
-                    TagChip("已静音", Color(0xFF777777))
+                    TagChip("已静音", if (selected) ink.onSelectionMuted else ink.textTertiary) // 原 0xFF777777
                     Spacer(Modifier.width(6.dp))
                 }
                 if (conv.reconciling) {
-                    TagChip("对账中", Color(0xFFB26A00))
+                    TagChip("对账中", if (selected) ink.onSelectionMuted else ink.warningText) // 原 0xFFB26A00 警示橙
                     Spacer(Modifier.width(6.dp))
                 }
                 if (conv.unread > 0) {
@@ -429,7 +437,8 @@ private fun ConversationCard(
             Text(
                 text = gatewayName,
                 fontSize = 10.sp,
-                color = Color(0xFF999999),
+                // 弱化灰（原 0xFF999999）→ textTertiary；选中行配对 onSelectionMuted（DSK-1）
+                color = if (selected) ink.onSelectionMuted else ink.textTertiary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -437,14 +446,14 @@ private fun ConversationCard(
                 Text(
                     text = conv.preview.ifBlank { " " },
                     style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF777777),
+                    color = if (selected) ink.onSelectionMuted else ink.textTertiary, // 原 0xFF777777
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                 )
                 Text(
                     text = formatTs(conv.lastActiveAt),
                     fontSize = 11.sp,
-                    color = Color(0xFF999999),
+                    color = if (selected) ink.onSelectionMuted else ink.textTertiary, // 原 0xFF999999
                 )
             }
         }
@@ -572,6 +581,8 @@ private fun NewConversationDialog(
     onDismiss: () -> Unit,
 ) {
     val gateways by client.observeGateways().collectAsState(initial = emptyList())
+    // DSK-1 散写收敛：墨水令牌单点读取
+    val ink = LocalDesktopInk.current
     // v1.4.0 追补（2026-11-16 用户反馈「新建 agent 会话太容易误触」）：点行先确认再建——
     // 每次新建都是真建一张独立卡（newMainSession 幂等键派生语义），确认层防手滑连建。
     var confirmTarget by remember { mutableStateOf<Pair<String, UiAgentRef>?>(null) }
@@ -582,7 +593,7 @@ private fun NewConversationDialog(
                 Text(
                     "无主线卡 Agent 新建默认主线；已有主线卡的 Agent 新开独立主线会话——均校准后入列",
                     fontSize = 11.sp,
-                    color = Color(0xFF888888),
+                    color = ink.textTertiary, // 原 0xFF888888
                 )
                 Spacer(Modifier.height(10.dp))
                 if (gateways.isEmpty()) {
@@ -604,15 +615,16 @@ private fun NewConversationDialog(
                                 Spacer(Modifier.width(8.dp))
                                 TagChip(
                                     if (gw.online) "在线" else "离线",
-                                    if (gw.online) Color(0xFF2E9E44) else Color(0xFF999999),
+                                    // 状态绿（原 0xFF2E9E44）→ successText / 弱化灰（原 0xFF999999）→ textTertiary（DSK-1）
+                                    if (gw.online) ink.successText else ink.textTertiary,
                                 )
                             }
-                            MonoText(gw.gatewayId, color = Color(0xFF999999))
+                            MonoText(gw.gatewayId, color = ink.textTertiary) // 原 0xFF999999
                             if (gw.agents.isEmpty()) {
                                 Text(
                                     "该网关暂无 active Agent",
                                     fontSize = 12.sp,
-                                    color = Color(0xFFAAAAAA),
+                                    color = ink.textTertiary, // 原 0xFFAAAAAA
                                     modifier = Modifier.padding(vertical = 4.dp),
                                 )
                             } else {
@@ -675,7 +687,7 @@ private fun NewConversationDialog(
                     Text(
                         "每次新建都会创建一张独立的会话卡（多个主会话互不干扰）。",
                         fontSize = 12.sp,
-                        color = Color(0xFF888888),
+                        color = ink.textTertiary, // 原 0xFF888888
                     )
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -700,10 +712,12 @@ private fun NewConversationDialog(
 /** 网关在线圆点（弹窗分节头用；GatewaysPanel.OnlineDot 为文件私有，此处独立同语义实现）。 */
 @Composable
 private fun GatewayOnlineDot(online: Boolean) {
+    // 在线/离线点（原 0xFF2E9E44/0xFF999999）→ successText/textTertiary（DSK-1 散写收敛）
+    val ink = LocalDesktopInk.current
     Box(
         modifier = Modifier
             .size(7.dp)
-            .background(if (online) Color(0xFF2E9E44) else Color(0xFF999999), CircleShape),
+            .background(if (online) ink.successText else ink.textTertiary, CircleShape),
     )
 }
 
@@ -725,7 +739,7 @@ private fun NewConversationAgentRow(
                 Text(
                     "已提交 · 卡片校准后入列（或重进列表）",
                     fontSize = 11.sp,
-                    color = Color(0xFF888888),
+                    color = LocalDesktopInk.current.textTertiary, // 原 0xFF888888（DSK-1 散写收敛）
                 )
             }
         }
@@ -856,6 +870,8 @@ internal fun AgentSessionsManagerDialog(
     // 删除确认载体（终态警示后提交）
     var deleteCandidate by remember { mutableStateOf<SessionSummary?>(null) }
     val scope = rememberCoroutineScope()
+    // DSK-1 散写收敛：墨水令牌单点读取
+    val ink = LocalDesktopInk.current
 
     fun load() {
         if (loading) return
@@ -909,7 +925,7 @@ internal fun AgentSessionsManagerDialog(
                 Text(
                     "全量会话（管理面不筛族）；仅主线行可重命名，删除为终态不可恢复",
                     fontSize = 11.sp,
-                    color = Color(0xFF888888),
+                    color = ink.textTertiary, // 原 0xFF888888
                 )
                 Spacer(Modifier.height(6.dp))
                 Column(
@@ -925,7 +941,7 @@ internal fun AgentSessionsManagerDialog(
                         ) {
                             CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
                             Spacer(Modifier.width(8.dp))
-                            Text("加载中…", fontSize = 12.sp, color = Color(0xFF888888))
+                            Text("加载中…", fontSize = 12.sp, color = ink.textTertiary) // 原 0xFF888888
                         }
                         loadError != null -> Column(Modifier.padding(vertical = 8.dp)) {
                             Text(loadError!!, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
@@ -934,7 +950,7 @@ internal fun AgentSessionsManagerDialog(
                         sessions != null && sessions!!.isEmpty() -> Text(
                             "该 Agent 暂无会话",
                             fontSize = 12.sp,
-                            color = Color(0xFF888888),
+                            color = ink.textTertiary, // 原 0xFF888888
                             modifier = Modifier.padding(vertical = 8.dp),
                         )
                         sessions != null -> sessions!!.forEach { s ->
@@ -1016,7 +1032,7 @@ internal fun AgentSessionsManagerDialog(
                     Text(
                         "删除为终态：会话消息与后台任务一并删除，不可恢复。",
                         fontSize = 12.sp,
-                        color = Color(0xFF888888),
+                        color = ink.textTertiary, // 原 0xFF888888
                     )
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1048,6 +1064,8 @@ private fun SessionManageRow(
     onRename: () -> Unit,
     onDelete: () -> Unit,
 ) {
+    // DSK-1 散写收敛：墨水令牌单点读取
+    val ink = LocalDesktopInk.current
     Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -1057,18 +1075,18 @@ private fun SessionManageRow(
                 modifier = Modifier.weight(1f),
             )
             if (summary.isMainSession) {
-                TagChip("主线", Color(0xFF4A6DA7))
+                TagChip("主线", ink.infoText) // 原 0xFF4A6DA7 信息蓝（主线徽标，信息语义）
             }
             if (busy) {
                 Spacer(Modifier.width(6.dp))
                 CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 2.dp)
             }
         }
-        MonoText(summary.conversationId, color = Color(0xFF999999))
+        MonoText(summary.conversationId, color = ink.textTertiary) // 原 0xFF999999
         Text(
             "最近活跃 ${formatTs(summary.lastActivityAt)}",
             fontSize = 11.sp,
-            color = Color(0xFF888888),
+            color = ink.textTertiary, // 原 0xFF888888
         )
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (canRename) {
@@ -1077,7 +1095,7 @@ private fun SessionManageRow(
                 }
             }
             TextButton(onClick = onDelete, enabled = !busy, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
-                Text("删除", fontSize = 12.sp, color = Color(0xFFB45309))
+                Text("删除", fontSize = 12.sp, color = ink.warningText) // 原 0xFFB45309 警示橙（终态警示非错误红）
             }
         }
     }

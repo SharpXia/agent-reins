@@ -19,7 +19,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 
@@ -59,7 +58,7 @@ internal fun LoginScreen(
                 Text(
                     "登录后注册本设备并静默续期（refreshToken 落 ~/.agentreins）",
                     style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF888888),
+                    color = LocalDesktopInk.current.textTertiary, // 原 0xFF888888（DSK-1 散写收敛）
                     modifier = Modifier.align(Alignment.CenterHorizontally),
                 )
                 OutlinedTextField(

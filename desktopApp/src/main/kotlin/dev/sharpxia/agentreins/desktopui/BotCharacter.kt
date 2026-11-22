@@ -128,6 +128,8 @@ internal fun BotCharacter(
     faceFactorsOverride: List<Double>? = null,
     paletteIndexOverride: Int? = null,
 ) {
+    // 2026-11-22 DSK-1 清偿后恒一致：桌面根装配（DesktopHubApp）已随系统明暗翻面
+    // （inkColorScheme/isSystemInDarkTheme 同源），应用主题与角色调色板明暗表不再失配。
     val isDark = isSystemInDarkTheme()
     val compact = size < BOT_COMPACT_THRESHOLD
 

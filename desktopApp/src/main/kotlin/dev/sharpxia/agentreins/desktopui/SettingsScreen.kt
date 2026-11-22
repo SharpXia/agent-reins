@@ -3,6 +3,7 @@ package dev.sharpxia.agentreins.desktopui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -123,6 +124,8 @@ internal fun SettingsScreen(
     var logoutArmed by remember { mutableStateOf(false) }
     // wp-11 网关入口计数摘要：observeGateways 单点订阅（快照 + gateway.online/offline 翻转）
     val gateways by client.observeGateways().collectAsState(initial = emptyList())
+    // DSK-1 散写收敛：墨水令牌单点读取（根装配 LocalDesktopInk 下发）
+    val ink = LocalDesktopInk.current
 
     fun describe(e: Throwable): String =
         (e as? HubException)?.let { "${it.payload.code} ${it.payload.message}" } ?: (e.message ?: e::class.simpleName ?: "未知错误")
@@ -294,7 +297,7 @@ internal fun SettingsScreen(
                         Text("待审批", style = MaterialTheme.typography.titleSmall)
                         Spacer(Modifier.width(8.dp))
                         if (pendingApprovals.isNotEmpty()) {
-                            TagChip("${pendingApprovals.size} 项待处理", Color(0xFFB7791F))
+                            TagChip("${pendingApprovals.size} 项待处理", ink.warningText) // 原 0xFFB7791F 警示琥珀
                         }
                     }
                     PendingApprovalsPanel(
@@ -314,7 +317,7 @@ internal fun SettingsScreen(
                         "登出将撤销本设备（服务端 Token 即时失效）并清空全部本地数据（命令队列/游标/消息），" +
                             "重登后从空库 bootstrap。",
                         style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF777777),
+                        color = ink.textTertiary, // 原 0xFF777777
                     )
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Button(
@@ -358,6 +361,7 @@ private fun CloseBehaviorCard(
     minimizeToTrayOnClose: Boolean,
     onMinimizeToTrayOnClose: (Boolean) -> Unit,
 ) {
+    val ink = LocalDesktopInk.current
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -365,7 +369,8 @@ private fun CloseBehaviorCard(
                 Text(
                     if (minimizeToTrayOnClose) "最小化到托盘" else "直接退出",
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (minimizeToTrayOnClose) Color(0xFF2E9E44) else Color(0xFF999999),
+                    // 状态绿（原 0xFF2E9E44）→ successText / 弱化灰（原 0xFF999999）→ textTertiary（DSK-1）
+                    color = if (minimizeToTrayOnClose) ink.successText else ink.textTertiary,
                 )
                 Spacer(Modifier.width(8.dp))
                 Switch(checked = minimizeToTrayOnClose, onCheckedChange = onMinimizeToTrayOnClose)
@@ -374,7 +379,7 @@ private fun CloseBehaviorCard(
                 "开启后点窗口关闭按钮会隐藏到系统托盘（后台同步与通知保持运行，托盘「显示主窗」" +
                     "可唤回，菜单「退出」真正退出）；关闭后关窗将直接退出应用。",
                 style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFF777777),
+                color = ink.textTertiary, // 原 0xFF777777
             )
         }
     }
@@ -395,6 +400,7 @@ private fun DisplayPreferencesCard(
     thinkingIndicator: Boolean,
     onThinkingIndicator: (Boolean) -> Unit,
 ) {
+    val ink = LocalDesktopInk.current
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -402,7 +408,8 @@ private fun DisplayPreferencesCard(
                 Text(
                     if (streamingPlayback) "逐字显示" else "完成后一次显示",
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (streamingPlayback) Color(0xFF2E9E44) else Color(0xFF999999),
+                    // 状态绿（原 0xFF2E9E44）→ successText / 弱化灰（原 0xFF999999）→ textTertiary（DSK-1）
+                    color = if (streamingPlayback) ink.successText else ink.textTertiary,
                 )
                 Spacer(Modifier.width(8.dp))
                 Switch(checked = streamingPlayback, onCheckedChange = onStreamingPlayback)
@@ -412,7 +419,7 @@ private fun DisplayPreferencesCard(
                 Text(
                     if (thinkingIndicator) "已开启" else "已关闭",
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (thinkingIndicator) Color(0xFF2E9E44) else Color(0xFF999999),
+                    color = if (thinkingIndicator) ink.successText else ink.textTertiary, // 原同上两色
                 )
                 Spacer(Modifier.width(8.dp))
                 Switch(checked = thinkingIndicator, onCheckedChange = onThinkingIndicator)
@@ -421,7 +428,7 @@ private fun DisplayPreferencesCard(
                 "流式输出关闭后，AI 回复将在生成完成后一次呈现（生成过程与数据不丢失，已读状态" +
                     "照常推进）；思考中指示关闭后仅撤去占位提示，停止按钮等功能不受影响。",
                 style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFF777777),
+                color = ink.textTertiary, // 原 0xFF777777
             )
         }
     }
@@ -466,13 +473,17 @@ private fun AvatarPreferencesCard(
     // 数据类按值相等，三路都体现为 profile 新值触发本 effect（iOS .onChange(of:) 同口径）。
     LaunchedEffect(profile) { randomDraft = null }
     val shown = randomDraft ?: profile
+    // DSK-1 散写收敛：墨水令牌单点读取；暗色旗标 = 应用主题同源（isSystemInDarkTheme，
+    // 2026-11-22 根装配翻面后与 BotCharacter 明暗表恒一致）
+    val ink = LocalDesktopInk.current
+    val dark = isSystemInDarkTheme()
     // 档色序号（AvatarPalette 声明序 = AgentTint 序契约；批次5 换装 BotCharacter 传参用）
     val paletteIndex = AvatarPalette.entries.indexOf(shown.paletteId)
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("形象档（默认造型与动效）", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                if (saving) Text("保存中…", style = MaterialTheme.typography.bodySmall, color = Color(0xFF999999))
+                if (saving) Text("保存中…", style = MaterialTheme.typography.bodySmall, color = ink.textTertiary) // 原 0xFF999999
             }
 
             // 编辑冲突提示（远端更新在途、未覆盖表单）：一键拉取收敛。拉取后 profile 变更
@@ -483,7 +494,7 @@ private fun AvatarPreferencesCard(
                     Text(
                         "其他设备已更新形象",
                         style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFFB45309),
+                        color = ink.warningText, // 原 0xFFB45309 警示橙
                         modifier = Modifier.weight(1f),
                     )
                     TextButton(onClick = onPullRemote) { Text("拉取") }
@@ -510,19 +521,19 @@ private fun AvatarPreferencesCard(
                     Text(
                         "配色 · ${shown.paletteId.wire}",
                         style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF777777),
+                        color = ink.textTertiary, // 原 0xFF777777
                     )
                     Text(
                         "动效 · ${if (shown.motionLevel == AvatarMotion.STANDARD) "标准" else "关闭"}",
                         style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF777777),
+                        color = ink.textTertiary, // 原 0xFF777777
                     )
                     if (randomDraft != null) {
                         // 随机预览标：明示当前预览未落档，确认才生效
                         Text(
                             "预览中 · 未保存",
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFFB45309),
+                            color = ink.warningText, // 原 0xFFB45309
                         )
                     }
                 }
@@ -571,7 +582,9 @@ private fun AvatarPreferencesCard(
                             Text(
                                 preset.zhName,
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (selected) Color(0xFF2B6CB0) else Color(0xFF777777),
+                                // 选中强调（原 0xFF2B6CB0）→ accent（对齐 iOS 形象设置选中语义）/
+                                // 弱化灰（原 0xFF777777）→ textTertiary（DSK-1）
+                                color = if (selected) ink.accent else ink.textTertiary,
                             )
                         }
                     }
@@ -589,7 +602,7 @@ private fun AvatarPreferencesCard(
                     Text(
                         "预览中 · 未保存",
                         style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFFB45309),
+                        color = ink.warningText, // 原 0xFFB45309
                         modifier = Modifier.weight(1f),
                     )
                     Button(
@@ -615,10 +628,15 @@ private fun AvatarPreferencesCard(
                         modifier = Modifier
                             .size(26.dp)
                             .clip(CircleShape)
-                            .background(Color(AgentTint.of(p).strongArgb(false)))
+                            // 2026-11-22 DSK-1：strongArgb(dark) 随应用主题明暗取表（原钉死
+                            // strongArgb(false)——暗色下选色圆点与角色脸异色；根装配翻面后
+                            // isSystemInDarkTheme 与 BotCharacter 取值同源恒一致）
+                            .background(Color(AgentTint.of(p).strongArgb(dark)))
                             .border(
                                 width = if (selected) 2.5.dp else 1.dp,
-                                color = if (selected) Color(0xFF2B6CB0) else Color(0xFFCCCCCC),
+                                // 选中强调（原 0xFF2B6CB0）→ accent / 未选描边（原 0xFFCCCCCC）
+                                // → borderSecondary 最近描边令牌（DSK-1 散写收敛）
+                                color = if (selected) ink.accent else ink.borderSecondary,
                                 shape = CircleShape,
                             )
                             .clickable {
@@ -644,7 +662,8 @@ private fun AvatarPreferencesCard(
                             onSelect(AvatarProfile(profile.faceFactors, profile.paletteId, motion, profile.updatedAt))
                         },
                         colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
-                            contentColor = if (selected) Color(0xFF2B6CB0) else Color(0xFF777777),
+                            // 选中强调（原 0xFF2B6CB0）→ accent / 弱化灰（原 0xFF777777）→ textTertiary（DSK-1）
+                            contentColor = if (selected) ink.accent else ink.textTertiary,
                         ),
                         border = androidx.compose.material3.ButtonDefaults.outlinedButtonBorder.takeIf { !selected },
                     ) {
@@ -678,6 +697,7 @@ private fun AvatarPreferencesCard(
  */
 @Composable
 private fun BotStateWalkthroughCard() {
+    val ink = LocalDesktopInk.current
     val states = listOf(
         BOT_STATE_IDLE to "IDLE 待机",
         BOT_STATE_RUNNING to "RUNNING 执行",
@@ -693,7 +713,7 @@ private fun BotStateWalkthroughCard() {
             Text(
                 "六态 × 24/32/36/40/96dp 逐档自查：每态至少一个 ≥2px@24pt 的形状/缩放/旋转主信号 + 嘴形差异。",
                 style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFF777777),
+                color = ink.textTertiary, // 原 0xFF777777
             )
             states.forEach { (state, label) ->
                 Row(
@@ -730,6 +750,7 @@ private fun NotificationPreferencesCard(
     conversations: List<UiConversation>,
     onUnmute: (conversationId: String) -> Unit,
 ) {
+    val ink = LocalDesktopInk.current
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -737,7 +758,8 @@ private fun NotificationPreferencesCard(
                 Text(
                     if (notificationsEnabled) "已开启" else "已关闭",
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (notificationsEnabled) Color(0xFF2E9E44) else Color(0xFF999999),
+                    // 状态绿（原 0xFF2E9E44）→ successText / 弱化灰（原 0xFF999999）→ textTertiary（DSK-1）
+                    color = if (notificationsEnabled) ink.successText else ink.textTertiary,
                 )
                 Spacer(Modifier.width(8.dp))
                 Switch(checked = notificationsEnabled, onCheckedChange = onNotificationsEnabled)
@@ -746,18 +768,18 @@ private fun NotificationPreferencesCard(
                 "关闭后本机不再弹出任何本地通知（含审批提醒）。按会话静音在会话列表右键设置：" +
                     "静音的会话不再提醒新回复与运行终态，审批提醒不受静音影响。",
                 style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFF777777),
+                color = ink.textTertiary, // 原 0xFF777777
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("已静音会话", style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.width(8.dp))
-                if (mutedIds.isNotEmpty()) TagChip("${mutedIds.size} 个", Color(0xFF777777))
+                if (mutedIds.isNotEmpty()) TagChip("${mutedIds.size} 个", ink.textTertiary) // 原 0xFF777777
             }
             if (mutedIds.isEmpty()) {
                 Text(
                     "无静音会话（右键会话卡片可静音）",
                     style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF999999),
+                    color = ink.textTertiary, // 原 0xFF999999
                 )
             } else {
                 mutedIds.forEach { id ->
@@ -801,6 +823,8 @@ private fun GatewayOverviewCard(
     val fetchedAt = remember { mutableMapOf<String, Long>() }
     val inFlight = remember { mutableSetOf<String>() }
     val scope = rememberCoroutineScope()
+    // DSK-1 散写收敛：墨水令牌单点读取（在线/离线点与状态文字）
+    val ink = LocalDesktopInk.current
 
     LaunchedEffect(gateways) {
         while (true) {
@@ -831,7 +855,7 @@ private fun GatewayOverviewCard(
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("网关与 Agent", style = MaterialTheme.typography.titleSmall)
             if (gateways.isEmpty()) {
-                Text("未接入", style = MaterialTheme.typography.bodySmall, color = Color(0xFF999999))
+                Text("未接入", style = MaterialTheme.typography.bodySmall, color = ink.textTertiary) // 原 0xFF999999
             }
             gateways.forEach { gw ->
                 Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -840,7 +864,8 @@ private fun GatewayOverviewCard(
                             modifier = Modifier
                                 .size(8.dp)
                                 .background(
-                                    if (gw.online) Color(0xFF2E9E44) else Color(0xFF999999),
+                                    // 在线/离线点（原 0xFF2E9E44/0xFF999999）→ successText/textTertiary（DSK-1）
+                                    if (gw.online) ink.successText else ink.textTertiary,
                                     CircleShape,
                                 ),
                         )
@@ -853,16 +878,16 @@ private fun GatewayOverviewCard(
                         Text(
                             if (gw.online) "在线" else "离线",
                             style = MaterialTheme.typography.bodySmall,
-                            color = if (gw.online) Color(0xFF2E9E44) else Color(0xFF999999),
+                            color = if (gw.online) ink.successText else ink.textTertiary, // 原同上两色
                         )
                     }
                     // 最近活跃：lastSeenAt = 快照字段或 gateway.online/offline 事件 ts（信封
                     // ISO-8601），formatTs 尽力本地化、失败原样透出（GatewayCard 同式）。
                     gw.lastSeenAt?.takeIf { it.isNotBlank() }?.let { seen ->
-                        Text("最近活跃 ${formatTs(seen)}", fontSize = 11.sp, color = Color(0xFF888888))
+                        Text("最近活跃 ${formatTs(seen)}", fontSize = 11.sp, color = ink.textTertiary) // 原 0xFF888888
                     }
                     if (gw.agents.isEmpty()) {
-                        Text("该网关暂无 active Agent", fontSize = 12.sp, color = Color(0xFFAAAAAA))
+                        Text("该网关暂无 active Agent", fontSize = 12.sp, color = ink.textTertiary) // 原 0xFFAAAAAA
                     } else {
                         gw.agents.forEach { agent ->
                             // 无缓存（未拉到/拉取失败）不渲染点——「拉不到就不显示点」纪律。
@@ -873,7 +898,8 @@ private fun GatewayOverviewCard(
                                         modifier = Modifier
                                             .size(7.dp)
                                             .background(
-                                                if (status.gatewayOnline) Color(0xFF2E9E44) else Color(0xFF999999),
+                                                // 在线/离线点（原 0xFF2E9E44/0xFF999999）→ successText/textTertiary（DSK-1）
+                                                if (status.gatewayOnline) ink.successText else ink.textTertiary,
                                                 CircleShape,
                                             ),
                                     )
@@ -881,7 +907,7 @@ private fun GatewayOverviewCard(
                                 }
                                 Column(Modifier.weight(1f)) {
                                     Text(agent.label.ifBlank { agent.agentId }, fontSize = 13.sp)
-                                    Text(agent.agentId, fontSize = 10.sp, color = Color(0xFF999999), maxLines = 1)
+                                    Text(agent.agentId, fontSize = 10.sp, color = ink.textTertiary, maxLines = 1) // 原 0xFF999999
                                 }
                             }
                         }

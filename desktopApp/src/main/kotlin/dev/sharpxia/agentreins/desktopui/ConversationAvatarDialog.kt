@@ -3,6 +3,7 @@ package dev.sharpxia.agentreins.desktopui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -112,6 +113,10 @@ internal fun ConversationAvatarDialog(
     var clearing by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
+    // DSK-1 散写收敛：墨水令牌单点读取；dark = 应用主题同源（isSystemInDarkTheme，
+    // 2026-11-22 根装配翻面后与 BotCharacter 明暗表恒一致）
+    val ink = LocalDesktopInk.current
+    val dark = isSystemInDarkTheme()
 
     // 覆盖档在途变更清草稿（设置页 LaunchedEffect(profile) 同口径）：PUT 响应回填/推送帧/
     // #34 水合三路都体现为覆盖档新值——防陈旧草稿遮蔽权威档（服务端 LWW 守卫兜底）
@@ -166,7 +171,7 @@ internal fun ConversationAvatarDialog(
                 Text(
                     "形象仅作用于本会话（跨设备同步）；动效档跟随全局形象档设置。",
                     fontSize = 11.sp,
-                    color = Color(0xFF888888),
+                    color = ink.textTertiary, // 原 0xFF888888
                 )
 
                 // 96dp 实时预览：seed 照传（眼形/姿态/眨音仍由会话身份派生），造型/配色随
@@ -189,23 +194,23 @@ internal fun ConversationAvatarDialog(
                         Text(
                             "配色 · ${shown.paletteId.wire}",
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFF777777),
+                            color = ink.textTertiary, // 原 0xFF777777
                         )
                         when {
                             randomDraft != null -> Text(
                                 "预览中 · 未保存",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = Color(0xFFB45309),
+                                color = ink.warningText, // 原 0xFFB45309 警示橙
                             )
                             overrideProfile != null -> Text(
                                 "当前 · 会话覆盖档",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = Color(0xFF777777),
+                                color = ink.textTertiary, // 原 0xFF777777
                             )
                             else -> Text(
                                 "当前 · 默认派生",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = Color(0xFF777777),
+                                color = ink.textTertiary, // 原 0xFF777777
                             )
                         }
                     }
@@ -258,7 +263,8 @@ internal fun ConversationAvatarDialog(
                                 Text(
                                     preset.zhName,
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = if (selected) Color(0xFF2B6CB0) else Color(0xFF777777),
+                                    // 选中强调（原 0xFF2B6CB0）→ accent / 弱化灰（原 0xFF777777）→ textTertiary（DSK-1）
+                                    color = if (selected) ink.accent else ink.textTertiary,
                                 )
                             }
                         }
@@ -275,10 +281,15 @@ internal fun ConversationAvatarDialog(
                             modifier = Modifier
                                 .size(26.dp)
                                 .clip(CircleShape)
-                                .background(Color(AgentTint.of(p).strongArgb(false)))
+                                // 2026-11-22 DSK-1：strongArgb(dark) 随应用主题明暗取表（原钉死
+                                // strongArgb(false)——暗色下选色圆点与角色脸异色；根装配翻面后
+                                // isSystemInDarkTheme 与 BotCharacter 取值同源恒一致）
+                                .background(Color(AgentTint.of(p).strongArgb(dark)))
                                 .border(
                                     width = if (selected) 2.5.dp else 1.dp,
-                                    color = if (selected) Color(0xFF2B6CB0) else Color(0xFFCCCCCC),
+                                    // 选中强调（原 0xFF2B6CB0）→ accent / 未选描边（原 0xFFCCCCCC）
+                                    // → borderSecondary 最近描边令牌（DSK-1 散写收敛）
+                                    color = if (selected) ink.accent else ink.borderSecondary,
                                     shape = CircleShape,
                                 )
                                 .clickable(enabled = !busy) {
@@ -299,7 +310,7 @@ internal fun ConversationAvatarDialog(
                         Text(
                             "预览中 · 未保存",
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFFB45309),
+                            color = ink.warningText, // 原 0xFFB45309
                             modifier = Modifier.weight(1f),
                         )
                         TextButton(onClick = { randomDraft = null }, enabled = !busy) { Text("放弃") }
@@ -313,7 +324,7 @@ internal fun ConversationAvatarDialog(
                 // 底行：恢复默认（#33 DELETE；无覆盖点击亦无害——204 幂等终态）
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     TextButton(onClick = ::resetToDefault, enabled = !busy) {
-                        Text(if (clearing) "清除中…" else "恢复默认", color = Color(0xFFB45309))
+                        Text(if (clearing) "清除中…" else "恢复默认", color = ink.warningText) // 原 0xFFB45309
                     }
                     Spacer(Modifier.weight(1f))
                     TextButton(onClick = onDismiss) { Text("关闭") }

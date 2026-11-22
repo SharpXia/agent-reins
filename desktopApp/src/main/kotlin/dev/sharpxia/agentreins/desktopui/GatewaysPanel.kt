@@ -38,7 +38,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
@@ -136,6 +135,8 @@ internal fun GatewaysPanel(
     var rotateTarget by remember { mutableStateOf<UiGateway?>(null) }
     var revokeTarget by remember { mutableStateOf<UiGateway?>(null) }
     var sessionsManagerTarget by remember { mutableStateOf<AgentSessionsTarget?>(null) }
+    // DSK-1 散写收敛：墨水令牌单点读取
+    val ink = LocalDesktopInk.current
 
     if (gateways.isEmpty()) {
         Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -169,7 +170,8 @@ internal fun GatewaysPanel(
             // 提交失败显式降级横幅（ConversationListPanel 同纪律：点击即清可重试）
             createError?.let { err ->
                 Surface(
-                    color = Color(0xFFB45309).copy(alpha = 0.12f),
+                    // 警示薄底（原 0xFFB45309 @ 12%）→ warningSubtle 令牌（DSK-1 散写收敛）
+                    color = ink.warningSubtle,
                     shape = RoundedCornerShape(8.dp),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
@@ -179,9 +181,9 @@ internal fun GatewaysPanel(
                             .clickable { createError = null }
                             .padding(horizontal = 12.dp, vertical = 6.dp),
                     ) {
-                        Text("⚠", color = Color(0xFFB45309), fontSize = 11.sp)
+                        Text("⚠", color = ink.warningText, fontSize = 11.sp) // 原 0xFFB45309 警示橙
                         Spacer(Modifier.width(6.dp))
-                        Text(err, color = Color(0xFFB45309), fontSize = 11.sp, modifier = Modifier.weight(1f))
+                        Text(err, color = ink.warningText, fontSize = 11.sp, modifier = Modifier.weight(1f))
                     }
                 }
             }
@@ -214,13 +216,13 @@ internal fun GatewaysPanel(
                                 TextButton(
                                     onClick = { agentGroups.dissolveGroup(group.id) },
                                     contentPadding = DefaultTextButtonPadding,
-                                ) { Text("解散", fontSize = 12.sp, color = Color(0xFFB45309)) }
+                                ) { Text("解散", fontSize = 12.sp, color = ink.warningText) } // 原 0xFFB45309 警示橙
                             }
                             if (rows.isEmpty()) {
                                 Text(
                                     "该组暂无目录内 Agent（已下线的成员不渲染，不编造）",
                                     fontSize = 12.sp,
-                                    color = Color(0xFFAAAAAA),
+                                    color = ink.textTertiary, // 原 0xFFAAAAAA
                                 )
                             } else {
                                 rows.forEach { row ->
@@ -402,7 +404,7 @@ private fun OneTimeValueRow(label: String, value: String) {
     val clipboard = LocalClipboardManager.current
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(label, fontSize = 11.sp, color = Color(0xFF888888), modifier = Modifier.weight(1f))
+            Text(label, fontSize = 11.sp, color = LocalDesktopInk.current.textTertiary, modifier = Modifier.weight(1f)) // 原 0xFF888888（DSK-1 散写收敛）
             TextButton(
                 onClick = {
                     clipboard.setText(AnnotatedString(value))
@@ -417,14 +419,14 @@ private fun OneTimeValueRow(label: String, value: String) {
                 Text(if (copied) "已复制" else "复制", fontSize = 11.sp)
             }
         }
-        MonoText(value, color = Color(0xFF444444))
+        MonoText(value, color = LocalDesktopInk.current.textSecondary) // 原 0xFF444444 中强灰（DSK-1 散写收敛）
     }
 }
 
 /** 管理动作失败降级行（添加/轮换/撤销三对话框共用：显式呈现可重试，不静默）。 */
 @Composable
 private fun MgmtErrorRow(message: String) {
-    Text(message, color = Color(0xFFB45309), fontSize = 12.sp)
+    Text(message, color = LocalDesktopInk.current.warningText, fontSize = 12.sp) // 原 0xFFB45309 警示橙
 }
 
 /**
@@ -444,6 +446,8 @@ private fun AddGatewayDialog(
     // 一次性凭据（nil = 表单态；仅会话内存，对话框关闭即释放）
     var created by remember { mutableStateOf<GatewayCreatedResponse?>(null) }
     val scope = rememberCoroutineScope()
+    // DSK-1 散写收敛：墨水令牌单点读取
+    val ink = LocalDesktopInk.current
 
     Dialog(onDismissRequest = { if (!submitting) onDismiss() }) {
         Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surface) {
@@ -460,12 +464,12 @@ private fun AddGatewayDialog(
                     Text(
                         "把以上两项写入目标设备 Bridge env（连同 BRIDGE_HUB_URL）并启动进程；网关拨出后即出现在清单。",
                         fontSize = 11.sp,
-                        color = Color(0xFF888888),
+                        color = ink.textTertiary, // 原 0xFF888888
                     )
                     Text(
                         "一次性明文：关闭后不可再看，服务端只存摘要。请先复制，再关闭本页。",
                         fontSize = 12.sp,
-                        color = Color(0xFFB45309),
+                        color = ink.warningText, // 原 0xFFB45309 警示橙
                     )
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                         TextButton(onClick = onDismiss) { Text("完成") }
@@ -484,7 +488,7 @@ private fun AddGatewayDialog(
                     Text(
                         "名称不判重：重复提交会产生多个网关各持独立 Token。创建后把 Bridge Token 配到目标设备 Bridge env 并启动进程。",
                         fontSize = 11.sp,
-                        color = Color(0xFF888888),
+                        color = ink.textTertiary, // 原 0xFF888888
                     )
                     error?.let { MgmtErrorRow(it) }
                     Row(
@@ -537,6 +541,8 @@ private fun RotateGatewayDialog(
     // 新签发明文（nil = 确认态；仅会话内存，对话框关闭即释放——不持久化纪律同 #25）
     var issuedToken by remember { mutableStateOf<BridgeTokenIssuedResponse?>(null) }
     val scope = rememberCoroutineScope()
+    // DSK-1 散写收敛：墨水令牌单点读取
+    val ink = LocalDesktopInk.current
 
     Dialog(onDismissRequest = { if (!submitting) onDismiss() }) {
         Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surface) {
@@ -552,12 +558,12 @@ private fun RotateGatewayDialog(
                     Text(
                         "把新 Token 写入目标设备 Bridge env 并重启进程即完成换装；旧 Token 宽限 24 小时后失效。",
                         fontSize = 11.sp,
-                        color = Color(0xFF888888),
+                        color = ink.textTertiary, // 原 0xFF888888
                     )
                     Text(
                         "一次性明文：关闭后不可再看，服务端只存摘要。请先复制，再关闭本页。",
                         fontSize = 12.sp,
-                        color = Color(0xFFB45309),
+                        color = ink.warningText, // 原 0xFFB45309 警示橙
                     )
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                         TextButton(onClick = onDismiss) { Text("完成") }
@@ -566,11 +572,11 @@ private fun RotateGatewayDialog(
                     // 确认页
                     Text("轮换 Bridge Token", style = MaterialTheme.typography.titleMedium)
                     Text(gateway.name.ifBlank { "网关" }, fontSize = 13.sp)
-                    MonoText(gateway.gatewayId, color = Color(0xFF999999))
+                    MonoText(gateway.gatewayId, color = ink.textTertiary) // 原 0xFF999999
                     Text(
                         "签发新明文 Token（一次性展示）；旧 Token 24 小时宽限期内新旧双活，并发轮换以最后一次签发为准。",
                         fontSize = 11.sp,
-                        color = Color(0xFF888888),
+                        color = ink.textTertiary, // 原 0xFF888888
                     )
                     error?.let { MgmtErrorRow(it) }
                     Row(
@@ -621,6 +627,8 @@ private fun RevokeGatewayDialog(
     var submitting by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
+    // DSK-1 散写收敛：墨水令牌单点读取
+    val ink = LocalDesktopInk.current
 
     Dialog(onDismissRequest = { if (!submitting) onDismiss() }) {
         Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surface) {
@@ -630,11 +638,11 @@ private fun RevokeGatewayDialog(
             ) {
                 Text("撤销网关", style = MaterialTheme.typography.titleMedium)
                 Text(gateway.name.ifBlank { "网关" }, fontSize = 13.sp)
-                MonoText(gateway.gatewayId, color = Color(0xFF999999))
+                MonoText(gateway.gatewayId, color = ink.textTertiary) // 原 0xFF999999
                 Text(
                     "撤销后该网关连接即时收口、命令不再下发；历史会话保留（只读）。此操作为终态，重复撤销无副作用。",
                     fontSize = 12.sp,
-                    color = Color(0xFFB45309),
+                    color = ink.warningText, // 原 0xFFB45309 警示橙
                 )
                 error?.let { MgmtErrorRow(it) }
                 Row(
@@ -697,7 +705,7 @@ private fun AgentRefRow(
     )
     ContextMenuArea(items = { menuItems }) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("👤", fontSize = 11.sp, color = Color(0xFF888888))
+            Text("👤", fontSize = 11.sp, color = LocalDesktopInk.current.textTertiary) // 原 0xFF888888（DSK-1 散写收敛）
             Spacer(Modifier.width(6.dp))
             Column(Modifier.weight(1f)) {
                 Text(
@@ -705,7 +713,7 @@ private fun AgentRefRow(
                     fontSize = 13.sp,
                 )
                 if (showGatewayName && gatewayName.isNotBlank()) {
-                    Text(gatewayName, fontSize = 10.sp, color = Color(0xFF999999), maxLines = 1)
+                    Text(gatewayName, fontSize = 10.sp, color = LocalDesktopInk.current.textTertiary, maxLines = 1) // 原 0xFF999999
                 }
             }
             if (rowState == NewConversationRowState.CREATING) {
@@ -742,7 +750,7 @@ private fun SectionHint(text: String) {
     Text(
         text,
         fontSize = 12.sp,
-        color = Color(0xFFAAAAAA),
+        color = LocalDesktopInk.current.textTertiary, // 原 0xFFAAAAAA（DSK-1 散写收敛）
         modifier = Modifier.padding(vertical = 2.dp),
     )
 }
@@ -768,6 +776,8 @@ private fun GatewayCard(
     onRevoke: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // DSK-1 散写收敛：墨水令牌单点读取
+    val ink = LocalDesktopInk.current
     ContextMenuArea(
         items = {
             listOf(
@@ -788,29 +798,30 @@ private fun GatewayCard(
                     )
                     // 复植轮：provider 徽标（桥自报供给方标识透传；空串 = 无徽标）
                     if (gw.provider.isNotBlank()) {
-                        TagChip(gw.provider, Color(0xFF777777))
+                        TagChip(gw.provider, ink.textTertiary) // 原 0xFF777777
                         Spacer(Modifier.width(6.dp))
                     }
                     TagChip(
                         if (gw.online) "在线" else "离线",
-                        if (gw.online) Color(0xFF2E9E44) else Color(0xFF999999),
+                        // 状态绿（原 0xFF2E9E44）→ successText / 弱化灰（原 0xFF999999）→ textTertiary（DSK-1）
+                        if (gw.online) ink.successText else ink.textTertiary,
                     )
                 }
-                MonoText(gw.gatewayId, color = Color(0xFF999999))
+                MonoText(gw.gatewayId, color = ink.textTertiary) // 原 0xFF999999
                 // 最近活跃：lastSeenAt = 快照字段或 gateway.online/offline 事件 ts（信封 ISO-8601），
                 // 尽力格式化为本地时间、失败原样透出（formatTs 三形态兼容）
                 gw.lastSeenAt?.takeIf { it.isNotBlank() }?.let { seen ->
                     Text(
                         "最近活跃 ${formatTs(seen)}",
                         fontSize = 11.sp,
-                        color = Color(0xFF888888),
+                        color = ink.textTertiary, // 原 0xFF888888
                     )
                 }
                 if (gw.agents.isEmpty()) {
                     Text(
                         "该网关暂无 active Agent",
                         fontSize = 12.sp,
-                        color = Color(0xFFAAAAAA),
+                        color = ink.textTertiary, // 原 0xFFAAAAAA
                     )
                 } else {
                     gw.agents.forEach { agent ->
@@ -837,11 +848,13 @@ private fun GatewayCard(
 /** 在线态圆点（iOS Circle().fill(gw.online ? green : secondary) 同语义）。 */
 @Composable
 private fun OnlineDot(online: Boolean) {
+    // 在线/离线点（原 0xFF2E9E44/0xFF999999）→ successText/textTertiary（DSK-1 散写收敛）
+    val ink = LocalDesktopInk.current
     Box(
         modifier = Modifier
             .size(8.dp)
             .background(
-                if (online) Color(0xFF2E9E44) else Color(0xFF999999),
+                if (online) ink.successText else ink.textTertiary,
                 CircleShape,
             ),
     )
@@ -860,6 +873,8 @@ private fun GroupPickerDialog(
     onCreateNew: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    // DSK-1 散写收敛：墨水令牌单点读取
+    val ink = LocalDesktopInk.current
     Dialog(onDismissRequest = onDismiss) {
         Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surface) {
             Column(
@@ -870,10 +885,10 @@ private fun GroupPickerDialog(
                 Text(
                     "将「$agentLabel」加入：",
                     fontSize = 12.sp,
-                    color = Color(0xFF888888),
+                    color = ink.textTertiary, // 原 0xFF888888
                 )
                 if (groups.isEmpty()) {
-                    Text("暂无分组", fontSize = 13.sp, color = Color(0xFFAAAAAA), modifier = Modifier.padding(vertical = 8.dp))
+                    Text("暂无分组", fontSize = 13.sp, color = ink.textTertiary, modifier = Modifier.padding(vertical = 8.dp)) // 原 0xFFAAAAAA
                 } else {
                     Column(Modifier.verticalScroll(rememberScrollState())) {
                         groups.forEach { g ->
@@ -888,7 +903,7 @@ private fun GroupPickerDialog(
                                 Spacer(Modifier.width(6.dp))
                                 Text(g.name, fontSize = 13.sp, modifier = Modifier.weight(1f))
                                 if (g.id == currentGroupId) {
-                                    Text("当前", fontSize = 11.sp, color = Color(0xFF2E9E44))
+                                    Text("当前", fontSize = 11.sp, color = ink.successText) // 原 0xFF2E9E44 状态绿
                                 }
                             }
                         }
@@ -967,17 +982,18 @@ internal fun GatewaysEntryCard(
         ) {
             Text("网关与 Agent", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
             if (gateways.isEmpty()) {
-                Text("未接入", fontSize = 11.sp, color = Color(0xFF999999))
+                Text("未接入", fontSize = 11.sp, color = LocalDesktopInk.current.textTertiary) // 原 0xFF999999（DSK-1）
             } else {
                 val onlineCount = gateways.count { it.online }
                 Text(
                     "$onlineCount/${gateways.size} 在线",
                     fontSize = 11.sp,
-                    color = if (onlineCount > 0) Color(0xFF2E9E44) else Color(0xFF999999),
+                    // 状态绿（原 0xFF2E9E44）→ successText / 弱化灰（原 0xFF999999）→ textTertiary（DSK-1）
+                    color = if (onlineCount > 0) LocalDesktopInk.current.successText else LocalDesktopInk.current.textTertiary,
                 )
             }
             Spacer(Modifier.width(8.dp))
-            Text("›", fontSize = 14.sp, color = Color(0xFF999999))
+            Text("›", fontSize = 14.sp, color = LocalDesktopInk.current.textTertiary) // 原 0xFF999999
         }
     }
 }

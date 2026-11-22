@@ -20,6 +20,7 @@ import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import dev.sharpxia.agentreins.desktopui.DesktopHubApp
+import dev.sharpxia.agentreins.desktopui.DesktopTrayBrandBlue
 import dev.sharpxia.agentreins.desktopui.DesktopWindowFrameStore
 import dev.sharpxia.agentreins.desktopui.DesktopWindowPreferences
 import dev.sharpxia.agentreins.hub.HubConfig
@@ -186,8 +187,9 @@ private object HubTrayIcon : Painter() {
     override val intrinsicSize: Size = Size(22f, 22f)
 
     override fun DrawScope.onDraw() {
+        // 品牌蓝字面量收口进令牌层 DesktopTrayBrandBlue（DSK-1 散写收敛；组合外渲染不随主题）
         drawRoundRect(
-            color = Color(0xFF2B6CB0),
+            color = DesktopTrayBrandBlue,
             cornerRadius = CornerRadius(size.minDimension * 0.23f, size.minDimension * 0.23f),
         )
         val center = Offset(size.width / 2f, size.height / 2f)

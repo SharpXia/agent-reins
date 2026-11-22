@@ -48,9 +48,12 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
-/** 代码底色/行内代码底色：消息气泡（surfaceVariant）之上的浅灰叠层，主题无关（本面既有灰阶惯例）。 */
-private val CodeTint = Color(0x14888888)
-private val ListMarkerInk = Color(0xFF777777)
+/**
+ * 代码底色/行内代码底色（原 CodeTint 字面量 0x14888888 散写，DSK-1 收敛）= surfaceTertiary
+ * 薄底令牌：消息气泡（surfaceVariant）之上的浅灰叠层，随主题翻面。
+ * 列表标记/弱化小字（原 ListMarkerInk 字面量 0xFF777777 散写）= textTertiary 令牌。
+ * 两值经 [LocalDesktopInk] 组合域读取，不再持有静态字面量。
+ */
 
 /**
  * wp-18：桌面助手行轻量 Markdown 渲染器（iOS Chat/MarkdownView 的起步同位）。
@@ -99,14 +102,16 @@ internal fun MarkdownText(
 
 @Composable
 private fun MarkdownBlockView(block: MdBlock) {
+    // DSK-1 散写收敛：墨水令牌单点读取（代码薄底/列表标记）
+    val ink = LocalDesktopInk.current
     when (block) {
         is MdBlock.Heading -> Text(
-            text = block.spans.toAnnotatedString(),
+            text = block.spans.toAnnotatedString(ink.surfaceTertiary),
             style = headingStyle(block.level),
             modifier = Modifier.fillMaxWidth(),
         )
         is MdBlock.Paragraph -> Text(
-            text = block.lines.toParagraphString(),
+            text = block.lines.toParagraphString(ink.surfaceTertiary),
             modifier = Modifier.fillMaxWidth(),
         )
         is MdBlock.CodeBlock -> {
@@ -120,7 +125,7 @@ private fun MarkdownBlockView(block: MdBlock) {
             } else {
                 Surface(
                     shape = RoundedCornerShape(6.dp),
-                    color = CodeTint,
+                    color = ink.surfaceTertiary, // 原 CodeTint 0x14888888
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     // 自动折行（iOS 版同取舍：代码块无横向滚动）
@@ -140,12 +145,12 @@ private fun MarkdownBlockView(block: MdBlock) {
                         text = item.marker,
                         fontSize = 13.sp,
                         fontFamily = FontFamily.Monospace,
-                        color = ListMarkerInk,
+                        color = ink.textTertiary, // 原 ListMarkerInk 0xFF777777
                         modifier = Modifier.widthIn(min = 16.dp),
                     )
                     Spacer(Modifier.padding(end = 6.dp))
                     Text(
-                        text = item.spans.toAnnotatedString(),
+                        text = item.spans.toAnnotatedString(ink.surfaceTertiary),
                         modifier = Modifier.weight(1f),
                     )
                 }
@@ -183,6 +188,7 @@ private fun MarkdownImageBlock(block: MdBlock.Image) {
 
 @Composable
 private fun MarkdownHttpsImage(url: String, alt: String) {
+    val ink = LocalDesktopInk.current
     var load by remember(url) { mutableStateOf<MdImageLoad>(MdImageLoad.Loading) }
     // 取数挂 IO 调度器（网络 + Skia 解码均不上主线程）；会话切换/行离屏即取消（LaunchedEffect
     // 生命周期即作用域），失败降级链接 chip——不炸消息行、不空块。
@@ -206,7 +212,7 @@ private fun MarkdownHttpsImage(url: String, alt: String) {
         is MdImageLoad.Loading -> Text(
             "图片加载中…",
             fontSize = 11.sp,
-            color = ListMarkerInk,
+            color = ink.textTertiary, // 原 ListMarkerInk 0xFF777777
             modifier = Modifier.padding(vertical = 2.dp),
         )
         is MdImageLoad.Failed -> MarkdownImageLinkChip(url = url, alt = alt, stale = true)
@@ -219,7 +225,8 @@ private fun MarkdownHttpsImage(url: String, alt: String) {
  */
 @Composable
 private fun MarkdownImageLinkChip(url: String, alt: String, stale: Boolean) {
-    Surface(shape = RoundedCornerShape(8.dp), color = CodeTint, modifier = Modifier.fillMaxWidth()) {
+    val ink = LocalDesktopInk.current
+    Surface(shape = RoundedCornerShape(8.dp), color = ink.surfaceTertiary, modifier = Modifier.fillMaxWidth()) { // 原 CodeTint
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp)) {
             Text(
                 text = if (stale) {
@@ -233,7 +240,7 @@ private fun MarkdownImageLinkChip(url: String, alt: String, stale: Boolean) {
                 text = url,
                 fontSize = 10.sp,
                 fontFamily = FontFamily.Monospace,
-                color = ListMarkerInk,
+                color = ink.textTertiary, // 原 ListMarkerInk 0xFF777777
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -248,8 +255,8 @@ private fun headingStyle(level: Int) = when (level) {
     else -> MaterialTheme.typography.titleSmall
 }.copy(fontWeight = FontWeight.Bold)
 
-/** 行内 span → AnnotatedString（平铺样式：粗 / 斜 / 粗斜 / 等宽代码底色）。 */
-private fun List<MdSpan>.toAnnotatedString(): AnnotatedString = buildAnnotatedString {
+/** 行内 span → AnnotatedString（平铺样式：粗 / 斜 / 粗斜 / 等宽代码底色；codeTint = surfaceTertiary 令牌）。 */
+private fun List<MdSpan>.toAnnotatedString(codeTint: Color): AnnotatedString = buildAnnotatedString {
     forEach { span ->
         when (span) {
             is MdSpan.Text -> append(span.text)
@@ -259,14 +266,14 @@ private fun List<MdSpan>.toAnnotatedString(): AnnotatedString = buildAnnotatedSt
                 SpanStyle(fontWeight = FontWeight.Bold, fontStyle = FontStyle.Italic),
             ) { append(span.text) }
             is MdSpan.Code -> withStyle(
-                SpanStyle(fontFamily = FontFamily.Monospace, background = CodeTint),
+                SpanStyle(fontFamily = FontFamily.Monospace, background = codeTint),
             ) { append(span.text) }
         }
     }
 }
 
-/** 段落多行合并为单个 Text（作者换行保留）。 */
-private fun List<List<MdSpan>>.toParagraphString(): AnnotatedString = buildAnnotatedString {
+/** 段落多行合并为单个 Text（作者换行保留；codeTint = surfaceTertiary 令牌）。 */
+private fun List<List<MdSpan>>.toParagraphString(codeTint: Color): AnnotatedString = buildAnnotatedString {
     forEachIndexed { idx, line ->
         if (idx > 0) append("\n")
         line.forEach { span ->
@@ -278,7 +285,7 @@ private fun List<List<MdSpan>>.toParagraphString(): AnnotatedString = buildAnnot
                     SpanStyle(fontWeight = FontWeight.Bold, fontStyle = FontStyle.Italic),
                 ) { append(span.text) }
                 is MdSpan.Code -> withStyle(
-                    SpanStyle(fontFamily = FontFamily.Monospace, background = CodeTint),
+                    SpanStyle(fontFamily = FontFamily.Monospace, background = codeTint),
                 ) { append(span.text) }
             }
         }
@@ -380,10 +387,10 @@ private fun JsonElement.sortedForDisplay(): JsonElement = when (this) {
     else -> this
 }
 
-/** JSON 卡容器：与既有代码块同底色同圆角（CodeTint + 6dp），卡内两形态各自排版。 */
+/** JSON 卡容器：与既有代码块同底色同圆角（surfaceTertiary 薄底 + 6dp，原 CodeTint 散写已收敛），卡内两形态各自排版。 */
 @Composable
 private fun JsonCardView(payload: JsonCardPayload, modifier: Modifier = Modifier) {
-    Surface(shape = RoundedCornerShape(6.dp), color = CodeTint, modifier = modifier.fillMaxWidth()) {
+    Surface(shape = RoundedCornerShape(6.dp), color = LocalDesktopInk.current.surfaceTertiary, modifier = modifier.fillMaxWidth()) {
         when (payload) {
             is JsonCardPayload.ToolList -> ToolListCardBody(payload.entries)
             is JsonCardPayload.Generic -> GenericCardBody(payload.prettyText)
@@ -428,6 +435,7 @@ private fun GenericCardBody(prettyText: String) {
 @Composable
 private fun ToolListCardBody(entries: List<JsonToolEntry>) {
     val clipboard = LocalClipboardManager.current
+    val ink = LocalDesktopInk.current
     var expandedIndex by remember(entries) { mutableStateOf<Int?>(null) }
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp)) {
         entries.forEachIndexed { index, entry ->
@@ -451,7 +459,7 @@ private fun ToolListCardBody(entries: List<JsonToolEntry>) {
                             text = entry.id,
                             fontSize = 10.sp,
                             fontFamily = FontFamily.Monospace,
-                            color = ListMarkerInk,
+                            color = ink.textTertiary, // 原 ListMarkerInk 0xFF777777
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )

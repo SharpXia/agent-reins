@@ -76,9 +76,11 @@ internal fun TagChip(text: String, color: Color, modifier: Modifier = Modifier) 
  */
 @Composable
 internal fun AttachmentChipsRow(attachments: List<UiAttachment>, modifier: Modifier = Modifier) {
+    // DSK-1 散写收敛：墨水令牌单点读取（chip 薄底面 + 弱化小字）
+    val ink = LocalDesktopInk.current
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
         attachments.forEach { a ->
-            Surface(color = Color(0x14888888), shape = RoundedCornerShape(8.dp)) {
+            Surface(color = ink.surfaceTertiary, shape = RoundedCornerShape(8.dp)) { // 原 0x14888888 薄灰底
                 Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
                     val label = a.fileName
                         ?: a.mediaId?.let { "…${it.takeLast(8)}" }
@@ -92,7 +94,7 @@ internal fun AttachmentChipsRow(attachments: List<UiAttachment>, modifier: Modif
                             text = url,
                             fontSize = 10.sp,
                             fontFamily = FontFamily.Monospace,
-                            color = Color(0xFF777777),
+                            color = ink.textTertiary, // 原 0xFF777777
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -106,18 +108,20 @@ internal fun AttachmentChipsRow(attachments: List<UiAttachment>, modifier: Modif
 /** 分隔条（role="" 的 compaction/reset 合成行，06 §3.1.2；渲染为系统分隔条不占消息位）。 */
 @Composable
 internal fun CompactionSeparator() {
+    // DSK-1 散写收敛：分隔线（原 0x33888888 ≈ 12% 合成灰）→ borderPrimary、弱化小字 → textTertiary
+    val ink = LocalDesktopInk.current
     Column(
         modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0x33888888)))
+        Box(Modifier.fillMaxWidth().height(1.dp).background(ink.borderPrimary))
         Text(
             "会话已压缩 / 重置",
             fontSize = 11.sp,
-            color = Color(0xFF8A8A8A),
+            color = ink.textTertiary, // 原 0xFF8A8A8A
             modifier = Modifier.padding(vertical = 4.dp),
         )
-        Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0x33888888)))
+        Box(Modifier.fillMaxWidth().height(1.dp).background(ink.borderPrimary))
     }
 }
 
@@ -140,9 +144,9 @@ private fun formatInstant(instant: Instant): String =
         .withZone(displayZone)
         .format(instant)
 
-/** 等宽小字（设备 id、错误码等）。 */
+/** 等宽小字（设备 id、错误码等）。缺省色 = 弱化文字令牌（原 0xFF666666，DSK-1 散写收敛）。 */
 @Composable
-internal fun MonoText(text: String, modifier: Modifier = Modifier, color: Color = Color(0xFF666666)) {
+internal fun MonoText(text: String, modifier: Modifier = Modifier, color: Color = LocalDesktopInk.current.textTertiary) {
     Text(
         text = text,
         fontSize = 11.sp,
@@ -164,7 +168,7 @@ internal fun EmptyHint(title: String, subtitle: String? = null) {
             Text(
                 subtitle,
                 style = MaterialTheme.typography.bodyMedium,
-                color = Color(0xFF888888),
+                color = LocalDesktopInk.current.textTertiary, // 原 0xFF888888（DSK-1 散写收敛）
                 modifier = Modifier.padding(top = 8.dp),
             )
         }

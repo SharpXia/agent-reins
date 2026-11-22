@@ -27,11 +27,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -50,6 +53,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -415,6 +419,11 @@ internal fun ConversationScreen(
     // 与 iOS resetPagingState 随会话期同语义）。判定纯函数见 TimelineScroll.kt。
     var atBottom by remember { mutableStateOf(true) }
     var followAnimating by remember { mutableStateOf(false) }
+    // 程序化滚动旗标（2026-11-23 批次二轮）：包住全部非贴底跟随的程序化滚动出口（回底按钮/
+    // 键盘命令/翻页恢复锚/首签定位）——期间 isUserDrivenScroll 恒 false，防跳转前几帧几何过窗
+    // 误触发 loadEarlier（白付 REST）与恢复锚把视口从跳转半途硬拽回。纪律注释：**新增程序化
+    // 跳转必须入旗标**（贴底跟随动画保持 followAnimating 不动——语义不同：跟随不触发续拉）。
+    var programmaticJumpInFlight by remember { mutableStateOf(false) }
     var earlierExhausted by remember { mutableStateOf(false) }
     var earlierCursor by remember { mutableStateOf<Long?>(null) }
     var loadingEarlier by remember { mutableStateOf(false) }
@@ -451,39 +460,12 @@ internal fun ConversationScreen(
         }
     }
 
-    // wp-5 滚动锚定①：底部锚定态判定（iOS wp-7① onScrollGeometryChange + onScrollPhaseChange
-    // 同型）——锚定态只被用户驱动的滚动帧与滚动结束沿翻转；流式内容增长帧（非用户驱动且无
-    // 滚动沿）不改锚定态，据增长解锚会让跟随永久停摆。几何零值（空列表）不判。
-    LaunchedEffect(listState) {
-        var prevScrolling = false
-        snapshotFlow {
-            val info = listState.layoutInfo
-            val visible = info.visibleItemsInfo
-            val lastInfo = visible.lastOrNull()
-            ScrollSample(
-                scrolling = listState.isScrollInProgress,
-                lastItemVisible = info.totalItemsCount > 0 && lastInfo != null &&
-                    lastInfo.index == info.totalItemsCount - 1,
-                lastItemEnd = lastInfo?.let { it.offset + it.size } ?: 0,
-                viewportEnd = info.viewportEndOffset,
-                contentFullyVisible = info.totalItemsCount > 0 && visible.isNotEmpty() &&
-                    visible.first().index == 0 && visible.last().index == info.totalItemsCount - 1,
-            )
-        }.collect { s ->
-            val justSettled = !s.scrolling && prevScrolling
-            prevScrolling = s.scrolling
-            if (s.lastItemVisible &&
-                shouldRecomputeAnchor(isUserDrivenScroll(s.scrolling, followAnimating), justSettled)
-            ) {
-                atBottom = isAtBottom(s)
-            }
-        }
-    }
-
     // wp-5 滚动锚定②：贴底条件化跟随（iOS wp-7① onChange tailSignature 同型）——尾签变化 且
     // 在底部锚定态才跟随；尾签覆盖行数与尾行身份/状态/内容量（比旧「只看条数」多覆盖流式
-    // 原地增长与占位行收敛）。首签（打开会话/空会话收首批）直接定位到尾（iOS onAppear 同位）；
-    // 翻页 prepend 也变签，但被 atBottom 守卫拦住（翻页时用户在上方读史）。
+    // 原地增长与占位行收敛）。首签（打开会话/空会话收首批）直接定位到尾（iOS onAppear 同位，
+    // 程序化跳转入 programmaticJumpInFlight 旗标——本轮）；翻页 prepend 也变签，但被 atBottom
+    // 守卫拦住（翻页时用户在上方读史）。贴底跟随动画保持 followAnimating 旗标（不并入
+    // programmaticJumpInFlight——跟随语义不同，见纯函数注）。
     LaunchedEffect(listState) {
         var primed = false
         var lastSig: String? = null
@@ -494,7 +476,12 @@ internal fun ConversationScreen(
             lastSig = sig
             if (messages.isEmpty()) return@collect
             if (isFirst || prevSig.isNullOrEmpty()) {
-                listState.scrollToItem(messages.lastIndex + prefixCountNow())
+                programmaticJumpInFlight = true
+                try {
+                    listState.scrollToItem(messages.lastIndex + prefixCountNow())
+                } finally {
+                    programmaticJumpInFlight = false
+                }
                 return@collect
             }
             if (!shouldFollowTail(tailChanged = sig != prevSig, atBottom = atBottom)) return@collect
@@ -521,7 +508,13 @@ internal fun ConversationScreen(
             restoreArmed = false
             restoreAnchorId = null
             if (target != null) {
-                listState.scrollToItem(target + prefixCountNow(), 0)
+                // 恢复后视口仍近顶，不包旗标会在恢复帧再次误触发自动续拉（本轮入旗标）
+                programmaticJumpInFlight = true
+                try {
+                    listState.scrollToItem(target + prefixCountNow(), 0)
+                } finally {
+                    programmaticJumpInFlight = false
+                }
             }
         }
     }
@@ -562,6 +555,57 @@ internal fun ConversationScreen(
                 restoreArmed = true
             }
             loadEarlierError = null
+        }
+    }
+
+    // wp-5 滚动锚定①：底部锚定态判定（iOS wp-7① onScrollGeometryChange + onScrollPhaseChange
+    // 同型）——锚定态只被用户驱动的滚动帧与滚动结束沿翻转；流式内容增长帧（非用户驱动且无
+    // 滚动沿）不改锚定态，据增长解锚会让跟随永久停摆。几何零值（空列表）不判。
+    // 2026-11-23 批次二轮整块搬到 loadEarlier 定义之后：近顶自动续拉需在 collect 内引用
+    // loadEarlier，而 Kotlin 局部声明禁止前向引用（编译错误）；rememberUpdatedState 每次重组
+    // 更新到最新闭包（:loadEarlier 捕获的 canLoadEarlierNow 等随实例新鲜）。三个
+    // LaunchedEffect(listState) 各自独立 collect snapshotFlow、key 相同，顺序搬迁无语义影响。
+    val loadEarlierNow by rememberUpdatedState(::loadEarlier)
+    LaunchedEffect(listState) {
+        var prevScrolling = false
+        snapshotFlow {
+            val info = listState.layoutInfo
+            val visible = info.visibleItemsInfo
+            val lastInfo = visible.lastOrNull()
+            ScrollSample(
+                scrolling = listState.isScrollInProgress,
+                lastItemVisible = info.totalItemsCount > 0 && lastInfo != null &&
+                    lastInfo.index == info.totalItemsCount - 1,
+                lastItemEnd = lastInfo?.let { it.offset + it.size } ?: 0,
+                viewportEnd = info.viewportEndOffset,
+                contentFullyVisible = info.totalItemsCount > 0 && visible.isNotEmpty() &&
+                    visible.first().index == 0 && visible.last().index == info.totalItemsCount - 1,
+                firstVisibleItemIndex = visible.firstOrNull()?.index ?: 0,
+            )
+        }.collect { s ->
+            val justSettled = !s.scrolling && prevScrolling
+            prevScrolling = s.scrolling
+            // 程序化滚动旗标并入相位门（本轮）：跳转/恢复锚在途的几何过窗不算用户驱动
+            val userDriven = isUserDrivenScroll(s.scrolling, followAnimating || programmaticJumpInFlight)
+            if (s.lastItemVisible && shouldRecomputeAnchor(userDriven, justSettled)) {
+                atBottom = isAtBottom(s)
+            }
+            // 近顶自动续拉（本轮，对齐 iOS HubViews userDriven 门）：用户滚动停在顶部近窗且
+            // 入口 Loadable 才触发；loadEarlier 内 loadingEarlier/earlierExhausted/
+            // canLoadEarlierNow 守卫照旧幂等双保险。iOS earlierAutoProximity 为像素、桌面为
+            // 行数近似——parity 口径差异知情（见 TimelineScroll.kt 常量注）。
+            if (shouldAutoLoadEarlier(
+                    firstVisibleItemIndex = s.firstVisibleItemIndex,
+                    loaderState = earlierRowState(
+                        loading = loadingEarlier,
+                        canLoad = canLoadEarlier(earlierExhausted, liveLastSeq, messages.size, messages.isEmpty()),
+                        exhausted = earlierExhausted,
+                    ),
+                    isUserDrivenScroll = userDriven,
+                )
+            ) {
+                loadEarlierNow()
+            }
         }
     }
 
@@ -776,7 +820,40 @@ internal fun ConversationScreen(
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            // 时间线键盘导航（2026-11-23 批次二轮，对齐 iOS ⌘↓ 菜单回底 HubViews:1184-1192）：
+            // preview 相自根下行——composer 聚焦时 Home/End/⌘↓↑ 全放行给文本编辑（聚焦门，
+            // preview 相根级 return true 会抢走 composer 行首/行尾光标键）；时间线导航仅在无
+            // 输入聚焦态生效（iOS ⌘↓ 菜单回底在 composer 聚焦态同样不生效，两平台输入惯例
+            // 差异知情）。命中命令即消费（return true），未命中/KeyUp 放行；resolveEnterKey
+            // 分流在 composer 自身 onPreviewKeyEvent 不受影响。
+            .onPreviewKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                if (composerFocused) return@onPreviewKeyEvent false
+                val command = resolveTimelineScrollKey(
+                    // Key.keyCode→Int 映射在接线处（桌面 keyCode 为 Long，.toInt() 即 AWT VK code，
+                    // 见 TimelineScroll.kt 常量注）
+                    keyCode = event.key.keyCode.toInt(),
+                    isCtrlOrMeta = event.isCtrlPressed || event.isMetaPressed,
+                ) ?: return@onPreviewKeyEvent false
+                if (messages.isEmpty()) return@onPreviewKeyEvent false // 空会话无可滚（animateScrollToItem 越界）
+                scope.launch {
+                    programmaticJumpInFlight = true
+                    try {
+                        when (command) {
+                            TimelineScrollCommand.ScrollToBottom ->
+                                listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
+                            TimelineScrollCommand.ScrollToTop -> listState.animateScrollToItem(0)
+                        }
+                    } finally {
+                        programmaticJumpInFlight = false
+                    }
+                }
+                true
+            },
+    ) {
         // 头部：会话名（投影 label）+ 网关名 caption（多网关轮 §3.2，归属未学习省略）
         Surface(color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)) {
             Row(
@@ -929,12 +1006,24 @@ internal fun ConversationScreen(
                     )
                 }
             }
+            // 滚动条（2026-11-23 批次二轮补齐三件之一）：默认 ScrollbarStyle 不引新令牌；
+            // 铺在回底按钮之下（按钮后绘制在上）
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(listState),
+                modifier = Modifier.align(Alignment.CenterEnd),
+            )
             // 2026-11-07 二轮：回到底部悬浮按钮（iOS HubChatView 同款语义；最后一条不可见即浮现）
+            // 程序化跳转入旗标（本轮）：动画中途 firstVisible 过窗不再误触发自动续拉（白付 REST）
             if (showJumpToBottom) {
                 TextButton(
                     onClick = {
                         scope.launch {
-                            listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
+                            programmaticJumpInFlight = true
+                            try {
+                                listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
+                            } finally {
+                                programmaticJumpInFlight = false
+                            }
                         }
                     },
                     modifier = Modifier
@@ -1249,6 +1338,10 @@ private fun MessageRow(
         m.role.isEmpty() -> CompactionSeparator()
         else -> {
             val clipboard = LocalClipboardManager.current
+            // 行级右键菜单（wp-10 复制全文/重发）与正文 SelectionContainer（本轮）并存的桌面
+            // 惯例：正文右键出选中拷贝菜单（SelectionContainer 自带）、行空白右键出全文/重发
+            // ——菜单合并行为属实机走查项，预案留码：若互相吞菜单，ContextMenuItem 保持行级
+            // 不动、SelectionContainer 只包非交互区（不预先实现）。
             ContextMenuArea(
                 items = {
                     buildList {
@@ -1301,12 +1394,16 @@ private fun UserMessageRow(m: UiMessage) {
             color = MaterialTheme.colorScheme.primaryContainer,
             shape = RoundedCornerShape(12.dp),
         ) {
-            Text(
-                // wp-8③ 空正文防线：空 SENDING 用户行不渲染空气泡，占位「…」+ 状态徽标照常翻转
-                text = if (isEmptyUserBody(m)) "…" else m.content,
-                color = if (isEmptyUserBody(m)) ink.textTertiary else Color.Unspecified, // 原 0xFF999999
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-            )
+            // 正文选中（2026-11-23 批次二轮）：滑动游标选中局部复制（与行级 ContextMenuArea
+            // 右键全文复制并存，见 MessageRow 注）
+            SelectionContainer {
+                Text(
+                    // wp-8③ 空正文防线：空 SENDING 用户行不渲染空气泡，占位「…」+ 状态徽标照常翻转
+                    text = if (isEmptyUserBody(m)) "…" else m.content,
+                    color = if (isEmptyUserBody(m)) ink.textTertiary else Color.Unspecified, // 原 0xFF999999
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                )
+            }
         }
         Row(
             modifier = Modifier.padding(top = 2.dp),
@@ -1503,17 +1600,23 @@ private fun AssistantMessageRow(
                 // 2026-11-21 流式单行归一轮：Progressive 改挂打字机包装（挂载贴齐/前缀增长逐字/
                 // 跳变贴齐，与 iOS StreamingTypewriter 同参数）——投影层行键归一为单行原地追加后，
                 // 桌面增量块不再整块瞬显；final/failed/僵尸行仍整段 Markdown 渲染。
-                else -> if (presentation == StreamingRowPresentation.Progressive) {
-                    StreamingTypewriterText(
-                        content = m.content,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    )
-                } else {
-                    MarkdownText(
-                        content = m.content,
-                        showCursor = false, // Progressive 已上走打字机分支；此处恒非进行中行
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    )
+                // 2026-11-23 批次二轮：正文包 SelectionContainer（滑动游标选中局部复制；流式行
+                // 选择随打字机增长属可接受，回退预案=仅 final 行包）。占位/无文本/交互卡分支
+                // 不包（上方两分支与 interactiveCommand 分支天然在包层外）；MarkdownText 内嵌
+                // JsonCardView 随包层覆盖（拖选无害、卡内展开点击不受影响——知情注释）。
+                else -> SelectionContainer {
+                    if (presentation == StreamingRowPresentation.Progressive) {
+                        StreamingTypewriterText(
+                            content = m.content,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        )
+                    } else {
+                        MarkdownText(
+                            content = m.content,
+                            showCursor = false, // Progressive 已上走打字机分支；此处恒非进行中行
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        )
+                    }
                 }
             }
         }

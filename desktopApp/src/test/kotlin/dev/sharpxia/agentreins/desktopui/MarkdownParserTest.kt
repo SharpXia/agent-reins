@@ -20,7 +20,9 @@ class MarkdownParserTest {
     fun plainTextWithoutMarkdownTokensIsNotMarkdown() {
         assertFalse(looksLikeMarkdown("普通中文回复，没有 markdown。"))
         assertFalse(looksLikeMarkdown("第一行\n第二行\n\n第三行"))
-        assertFalse(looksLikeMarkdown("https://example.com/path?a=1"))
+        // 裸 URL 2026-11-23 批次二轮起放行（链接化：裸 URL 消息必须进解析管线吃链接化，不得
+        // 落纯文本回退——原「不放行」口径随链接化轮翻转；解析产物仍逐字等价）
+        assertTrue(looksLikeMarkdown("https://example.com/path?a=1"))
     }
 
     @Test
@@ -149,8 +151,8 @@ class MarkdownParserTest {
         assertTrue(looksLikeMarkdown("![橙猫](https://example.com/cat.png)"))
         assertTrue(looksLikeMarkdown("  ![a](https://e.com/a.png)  "))
         assertEquals(1, markdownBlocksOrFallback("![a](https://e.com/a.png)", cursor = false)?.size)
-        // 裸 URL（非图片行）不放行——既有口径不回归
-        assertFalse(looksLikeMarkdown("https://example.com/path?a=1"))
+        // 裸 URL（非图片行）随链接化轮（2026-11-23 批次二）放行——进解析管线吃链接化
+        assertTrue(looksLikeMarkdown("https://example.com/path?a=1"))
     }
 
     @Test
@@ -258,6 +260,8 @@ class MarkdownParserTest {
                 is MdSpan.Italic -> it.text
                 is MdSpan.BoldItalic -> it.text
                 is MdSpan.Code -> it.text
+                // Link span 由渲染层 linkifySpans 产出、解析器从不产出——此分支只为穷尽
+                is MdSpan.Link -> it.text
             }
         }
         fun flatten(text: String): String =
@@ -270,6 +274,9 @@ class MarkdownParserTest {
                     // 图片块按语法形态重建（图片是有意渲染语素，不参与「无配对语素逐字等价」
                     // 断言面——本用例输入均为无配对语素，此分支只为穷尽）
                     is MdBlock.Image -> "![${b.alt}](${b.url})"
+                    // 表格按 GFM 形态重建（同上：本用例输入均不成表，此分支只为穷尽）
+                    is MdBlock.Table -> (listOf(b.header) + b.rows)
+                        .joinToString("\n") { row -> row.joinToString("|") { spansText(it) } }
                 }
             }
         // 无配对语素 → 逐字往返等价

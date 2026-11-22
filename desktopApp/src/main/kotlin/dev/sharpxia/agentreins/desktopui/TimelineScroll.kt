@@ -32,6 +32,54 @@ internal fun earlierRowState(loading: Boolean, canLoad: Boolean, exhausted: Bool
     else -> EarlierRowState.Hidden
 }
 
+// ── 2026-11-23 批次二轮：近顶自动续拉 + 时间线键盘命令（补齐与 iOS 的交互缺口） ────────
+
+/**
+ * 近顶自动续拉近窗（行数）：首行下标 ≤ 阈值即「近顶」。iOS earlierAutoProximity 为像素、
+ * 桌面为行数近似——parity 口径差异知情（翻页行自身占一行，8 行 ≈ 近一屏首屏行数）。
+ */
+internal const val AUTO_LOAD_EARLIER_PROXIMITY_ITEMS = 8
+
+/**
+ * 近顶自动续拉触发（iOS HubViews near-top auto requestEarlier 同型）：三条件 AND——
+ * 用户停在近顶窗内（程序化跳转/贴底跟随帧不算）、翻页入口恰为 Loadable。loadEarlier 内
+ * loadingEarlier/earlierExhausted/canLoadEarlierNow 守卫照旧幂等双保险（接线层不重复判）。
+ */
+internal fun shouldAutoLoadEarlier(
+    firstVisibleItemIndex: Int,
+    loaderState: EarlierRowState,
+    isUserDrivenScroll: Boolean,
+    threshold: Int = AUTO_LOAD_EARLIER_PROXIMITY_ITEMS,
+): Boolean =
+    firstVisibleItemIndex <= threshold && loaderState == EarlierRowState.Loadable && isUserDrivenScroll
+
+/** 时间线键盘命令（⌘/Ctrl+↓ / Ctrl+End 回底、⌘/Ctrl+↑ / Ctrl+Home 回顶；iOS ⌘↓ 菜单回底同型）。 */
+internal enum class TimelineScrollCommand { ScrollToBottom, ScrollToTop }
+
+/**
+ * 桌面 Key.keyCode.toInt() 的锚值 = AWT VK code（compose ui-desktop 1.12.2 实证：
+ * Key 由 AWT KeyEvent.getKeyCode() + location 直接构造，keyCode 低 32 位即 VK code——
+ * DirectionUp=38 / DirectionDown=40 / MoveHome(VK_HOME)=36 / MoveEnd(VK_END)=35）。
+ * 纯函数不持 Compose 依赖（Key.keyCode→Int 映射在接线处做 .toInt()）。
+ */
+internal const val KEYCODE_DIRECTION_UP = 38
+internal const val KEYCODE_DIRECTION_DOWN = 40
+internal const val KEYCODE_MOVE_HOME = 36
+internal const val KEYCODE_MOVE_END = 35
+
+/**
+ * 时间线键盘命令解析（闭集映射；无修饰键/未知键恒 null——无修饰的 Home/End 放行系统默认，
+ * composer 聚焦态由接线层聚焦门先行放行文本编辑，两平台输入惯例差异知情）。
+ */
+internal fun resolveTimelineScrollKey(keyCode: Int, isCtrlOrMeta: Boolean): TimelineScrollCommand? {
+    if (!isCtrlOrMeta) return null
+    return when (keyCode) {
+        KEYCODE_DIRECTION_DOWN, KEYCODE_MOVE_END -> TimelineScrollCommand.ScrollToBottom
+        KEYCODE_DIRECTION_UP, KEYCODE_MOVE_HOME -> TimelineScrollCommand.ScrollToTop
+        else -> null
+    }
+}
+
 /**
  * 翻页游标（08 §4.3 keyset）：保存游标倒退（< 当前最老已载行 seq——会话期快照重建
  * HUB-SYNC-001/002 后旧游标低于重建后尾页首行）即弃用，回落当前最老已载行 seq，防以旧游标
@@ -63,6 +111,8 @@ internal data class ScrollSample(
     val viewportEnd: Int,
     /** 全部行都在视口内（内容未超视口——无可滚空间，恒视为在底）。 */
     val contentFullyVisible: Boolean,
+    /** 首个可见行下标（近顶自动续拉的近窗判定用；空列表为 0——2026-11-23 批次二轮增字段）。 */
+    val firstVisibleItemIndex: Int,
 )
 
 /**

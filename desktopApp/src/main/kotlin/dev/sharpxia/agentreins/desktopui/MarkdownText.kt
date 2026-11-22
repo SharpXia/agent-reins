@@ -1,15 +1,20 @@
 package dev.sharpxia.agentreins.desktopui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -26,21 +31,28 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.decodeToImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.LinkInteractionListener
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -60,9 +72,12 @@ import kotlinx.serialization.json.JsonPrimitive
  *
  * 覆盖起步集：标题（#–######）/ 列表（无序 + 有序，一层缩进近似）/ 围栏代码块 /
  * 粗体、斜体、粗斜体 + 行内代码；v1.2.0 多模态轮（设计稿 docs/multimodal-design-20261108.md
- * §2.2/§6 桌面行）增图片块双口径——https 内联渲染、http（含 agent 外发 LAN 地址）与其余
- * scheme 一律降级链接 chip（不发起请求、不做特例，生图输出观测面的唯一渲染通道）。
- * 其余已知取舍与 iOS 版同向：表格、引用、嵌套强调不渲染（原样呈现为段落文本）。
+ * §2.2/§6 桌面行）增图片块双口径——https 内联渲染（2026-11-23 批次二轮起经 MediaCache 二级
+ * 缓存）、http（含 agent 外发 LAN 地址）与其余 scheme 一律降级链接 chip（不发起请求、不做
+ * 特例，生图输出观测面的唯一渲染通道）；2026-11-23 批次二轮增表格渲染（GFM 最小口径，见
+ * MarkdownParser.parseTableBlock——单元格无 maxLines 无 Ellipsis、超宽表横向滚动兜底）与
+ * 链接化（linkifySpans + 打开/复制气泡，正文平铺 Text span 里的 URL 可点）。
+ * 其余已知取舍与 iOS 版同向：引用、嵌套强调不渲染（原样呈现为段落文本）。
  *
  * wp-6 纯文本回退（验收硬要求）：[looksLikeMarkdown] 为 false 或解析抛异常时走纯文本
  * `Text`——与 wp-6 MVP 渲染逐字一致；解析器对未配对定界符逐字保留，纯文本语义不漂移。
@@ -88,30 +103,40 @@ internal fun MarkdownText(
     }
     if (blocks == null) {
         // wp-6 纯文本路径回退：原样 Text（调用方 modifier 携带气泡内边距，样式与 MVP 一致；
-        // 流式行补 ▌ 光标——wp-6 既有行为，回退分支不得忽略 showCursor）
+        // 流式行补 ▌ 光标——wp-6 既有行为，回退分支不得忽略 showCursor）。解析异常回退路径
+        // 不链接化（对齐 iOS parseTextChunk try? 失败也纯文本——知情注释）。
         Text(fallbackPlainText(content, showCursor), modifier = modifier)
         return
     }
-    Column(
-        modifier = modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        blocks.forEach { MarkdownBlockView(it) }
+    // 链接气泡态（2026-11-23 批次二轮）：任意块内 Link 点击记录 (展示文本, 归一 url)，
+    // Popup 呈现「打开/复制」二选一（锚定=消息体底部居中退化行内锚，细节实机走查项）。
+    var pendingLink by remember(content) { mutableStateOf<Pair<String, String>?>(null) }
+    val onLinkTap: (String, String) -> Unit = { display, url -> pendingLink = display to url }
+    Box(modifier = modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            blocks.forEach { MarkdownBlockView(it, onLinkTap) }
+        }
+        pendingLink?.let { (display, url) ->
+            LinkActionPopup(displayUrl = display, normalizedUrl = url, onDismiss = { pendingLink = null })
+        }
     }
 }
 
 @Composable
-private fun MarkdownBlockView(block: MdBlock) {
-    // DSK-1 散写收敛：墨水令牌单点读取（代码薄底/列表标记）
+private fun MarkdownBlockView(block: MdBlock, onLinkTap: (String, String) -> Unit) {
+    // DSK-1 散写收敛：墨水令牌单点读取（代码薄底/列表标记/链接强调色）
     val ink = LocalDesktopInk.current
     when (block) {
         is MdBlock.Heading -> Text(
-            text = block.spans.toAnnotatedString(ink.surfaceTertiary),
+            text = block.spans.toAnnotatedString(ink.surfaceTertiary, ink.accent, onLinkTap),
             style = headingStyle(block.level),
             modifier = Modifier.fillMaxWidth(),
         )
         is MdBlock.Paragraph -> Text(
-            text = block.lines.toParagraphString(ink.surfaceTertiary),
+            text = block.lines.toParagraphString(ink.surfaceTertiary, ink.accent, onLinkTap),
             modifier = Modifier.fillMaxWidth(),
         )
         is MdBlock.CodeBlock -> {
@@ -150,14 +175,92 @@ private fun MarkdownBlockView(block: MdBlock) {
                     )
                     Spacer(Modifier.padding(end = 6.dp))
                     Text(
-                        text = item.spans.toAnnotatedString(ink.surfaceTertiary),
+                        text = item.spans.toAnnotatedString(ink.surfaceTertiary, ink.accent, onLinkTap),
                         modifier = Modifier.weight(1f),
                     )
                 }
             }
         }
         is MdBlock.Image -> MarkdownImageBlock(block)
+        is MdBlock.Table -> MarkdownTable(block, ink.surfaceTertiary, ink.accent, onLinkTap)
     }
+}
+
+// ── 表格渲染（2026-11-23 批次二轮；解析侧 GFM 最小口径见 MarkdownParser.parseTableBlock） ──
+
+/** 单元格宽度（min 保列不塌缩；max=480dp 帽内换行——软断行保长 URL/哈希无「…」完整显示）。 */
+private val MD_TABLE_CELL_MIN_WIDTH = 64.dp
+private val MD_TABLE_CELL_MAX_WIDTH = 480.dp
+
+/**
+ * 表格：表头行 + 分隔线 + 体行，单元格无 maxLines 无 Ellipsis（段落 Text 同款），列对齐
+ * 随 aligns；超宽表由表级横向滚动兜底（Column 全量布局在滚动容器内，纵向仍交给时间线）。
+ * 单元格 span 已于解析期软断行（softBreakSpans）——不可断词 token 每 16 字符可换行。
+ */
+@Composable
+private fun MarkdownTable(
+    table: MdBlock.Table,
+    codeTint: Color,
+    accent: Color,
+    onLinkTap: (String, String) -> Unit,
+) {
+    // 横向滚动容器内的 Column/Row 不 fillMaxWidth（无限宽约束下 wrap 内容，窄表左对齐、
+    // 宽表横向滚出）
+    Box(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+        Column {
+            Row {
+                table.header.forEachIndexed { idx, spans ->
+                    MarkdownTableCell(
+                        spans = spans,
+                        align = table.aligns.getOrNull(idx) ?: MdTableAlign.None,
+                        codeTint = codeTint,
+                        accent = accent,
+                        onLinkTap = onLinkTap,
+                        header = true,
+                    )
+                }
+            }
+            HorizontalDivider()
+            table.rows.forEach { row ->
+                Row {
+                    row.forEachIndexed { idx, spans ->
+                        MarkdownTableCell(
+                            spans = spans,
+                            align = table.aligns.getOrNull(idx) ?: MdTableAlign.None,
+                            codeTint = codeTint,
+                            accent = accent,
+                            onLinkTap = onLinkTap,
+                            header = false,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MarkdownTableCell(
+    spans: List<MdSpan>,
+    align: MdTableAlign,
+    codeTint: Color,
+    accent: Color,
+    onLinkTap: (String, String) -> Unit,
+    header: Boolean,
+) {
+    Text(
+        text = spans.toAnnotatedString(codeTint, accent, onLinkTap),
+        // 表头加粗（视觉分层，iOS LiteTableView 头行同观感）；无 maxLines/Ellipsis——完整显示
+        fontWeight = if (header) FontWeight.Bold else null,
+        textAlign = when (align) {
+            MdTableAlign.Left, MdTableAlign.None -> TextAlign.Start
+            MdTableAlign.Center -> TextAlign.Center
+            MdTableAlign.Right -> TextAlign.End
+        },
+        modifier = Modifier
+            .widthIn(min = MD_TABLE_CELL_MIN_WIDTH, max = MD_TABLE_CELL_MAX_WIDTH)
+            .padding(horizontal = 8.dp, vertical = 5.dp),
+    )
 }
 
 // ── 图片块渲染（v1.2.0 多模态，设计稿 §2.2/§6 桌面行双口径） ─────────────────────
@@ -190,17 +293,15 @@ private fun MarkdownImageBlock(block: MdBlock.Image) {
 private fun MarkdownHttpsImage(url: String, alt: String) {
     val ink = LocalDesktopInk.current
     var load by remember(url) { mutableStateOf<MdImageLoad>(MdImageLoad.Loading) }
-    // 取数挂 IO 调度器（网络 + Skia 解码均不上主线程）；会话切换/行离屏即取消（LaunchedEffect
-    // 生命周期即作用域），失败降级链接 chip——不炸消息行、不空块。
+    // 二级缓存取数（2026-11-23 批次二轮；旧实现 LaunchedEffect 内 openStream 直拉——LazyColumn
+    // 行离屏销毁组合、再进视口即重下，且无超时无解码帽）：内存 LRU（96MB 字节帽）+ 磁盘
+    // （sha256(stableCacheKey) 键、mtime LRU trim、256MB 惰性）+ 解码降采样 2048 帽（与 iOS
+    // decodeForDisplay 同帽——行内显示帽 MD_IMAGE_MAX_HEIGHT=320dp，全分辨率解码无收益）。
+    // 取数/解码在 MediaCache 自有 IO 作用域与在途合流，调用方随行离屏取消不中断写盘；
+    // 桌面无图片查看器（无点击大图入口），「查看大图前不预加载原图」桌面为天然满足。
+    // 失败（网络/解码/缓存不可用）仍降级链接 chip——不炸消息行、不空块。
     LaunchedEffect(url) {
-        load = withContext(Dispatchers.IO) {
-            runCatching {
-                val bytes = java.net.URI(url).toURL().openStream().use { it.readBytes() }
-                // decodeToImageBitmap（compose 桌面 ByteArray 扩展）：Skia 解码 + ImageBitmap
-                // 一体；解码失败（坏字节/非图片）同样走 Failed 降级链接 chip
-                MdImageLoad.Ready(bytes.decodeToImageBitmap())
-            }.getOrElse { MdImageLoad.Failed }
-        }
+        load = MediaCache.load(url)?.let { MdImageLoad.Ready(it) } ?: MdImageLoad.Failed
     }
     when (val l = load) {
         is MdImageLoad.Ready -> Image(
@@ -222,10 +323,13 @@ private fun MarkdownHttpsImage(url: String, alt: String) {
 /**
  * 链接 chip（http/加载失败降级面）：图标行 + URL 小字，URL 原样透出不改写不代理（与
  * MessageAttachment.source=external 客户端纪律同向）；stale = https 加载失败的失败态标注。
+ * URL 小字可点（2026-11-23 批次二轮）：此前纯展示不可点，点按出「打开/复制」气泡，openUri
+ * 同走 normalizeUrl 归一（与正文链接口径一致，知情注释）。
  */
 @Composable
 private fun MarkdownImageLinkChip(url: String, alt: String, stale: Boolean) {
     val ink = LocalDesktopInk.current
+    var bubbleOpen by remember(url) { mutableStateOf(false) }
     Surface(shape = RoundedCornerShape(8.dp), color = ink.surfaceTertiary, modifier = Modifier.fillMaxWidth()) { // 原 CodeTint
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp)) {
             Text(
@@ -243,8 +347,12 @@ private fun MarkdownImageLinkChip(url: String, alt: String, stale: Boolean) {
                 color = ink.textTertiary, // 原 ListMarkerInk 0xFF777777
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.clickable { bubbleOpen = true },
             )
         }
+    }
+    if (bubbleOpen) {
+        LinkActionPopup(displayUrl = url, normalizedUrl = normalizeUrl(url), onDismiss = { bubbleOpen = false })
     }
 }
 
@@ -255,11 +363,139 @@ private fun headingStyle(level: Int) = when (level) {
     else -> MaterialTheme.typography.titleSmall
 }.copy(fontWeight = FontWeight.Bold)
 
+// ── 链接化 + 打开/复制气泡（2026-11-23 批次二轮；桌面从零建，双路径覆盖） ────────────
+
+/**
+ * URL 匹配（http(s) 显式 scheme 或 www. 前缀；空白与 `<>()` 终止）。CJK 不在排除集——
+ * 中英文粘连 URL 会整体成 Link（与 iOS NSDataDetector 宽松匹配同向，知情口径）；句尾
+ * CJK 标点由 [MD_URL_TRAILING_PUNCT] 剥离兜底（标点收尾形态），句中粘连属已知观感面。
+ */
+private val MD_URL_REGEX = Regex("""(https?://[^\s<>()]+|www\.[^\s<>()]+)""")
+
+/** URL 句尾标点剥离集（行文句读紧跟 URL 的常见形态；本体不含 `)`——正则已排除括号）。 */
+private val MD_URL_TRAILING_PUNCT = charArrayOf(
+    '.', ',', ';', ':', '!', '?', '，', '。', '、', '；', '：', '！', '？', '"', '\'', '）', '】', '》', '」', '』',
+)
+
+/**
+ * URL 归一（打开/复制共用；对齐 iOS NSDataDetector match.url 自带 scheme 口径）：http(s)://
+ * 原样；www. 前缀补 https://（桌面 openUri=Desktop.browse 要求绝对 URI，裸 www 串必炸——
+ * 不归一就无法打开）；其余 null 不入 Link span（调用方退回纯文本/禁用「打开」）。
+ */
+internal fun normalizeUrl(raw: String): String? = when {
+    raw.startsWith("http://") || raw.startsWith("https://") -> raw
+    raw.startsWith("www.") -> "https://" + raw
+    else -> null
+}
+
+/**
+ * 平铺 Text span → Text/Link 切分（解析路径链接化的渲染层出口）：只切 Text——Code/Bold/
+ * Italic/BoldItalic 内不切（iOS autolink 跳过行内代码同语义），已切好的 Link 原样保留
+ * （幂等）。句尾标点剥离后留在后续 Text 段（纯文本等价面不丢字符）。
+ */
+internal fun linkifySpans(spans: List<MdSpan>): List<MdSpan> = buildList {
+    spans.forEach { span ->
+        when (span) {
+            is MdSpan.Text -> addAll(linkifyText(span.text))
+            else -> add(span) // Code/Bold/Italic/BoldItalic/Link 原样
+        }
+    }
+}
+
+private fun linkifyText(text: String): List<MdSpan> {
+    val out = mutableListOf<MdSpan>()
+    var lastEnd = 0
+    for (match in MD_URL_REGEX.findAll(text)) {
+        var url = match.value
+        while (url.isNotEmpty() && url.last() in MD_URL_TRAILING_PUNCT) url = url.dropLast(1)
+        if (url.isEmpty()) continue
+        val start = match.range.first
+        val end = start + url.length
+        if (start > lastEnd) out += MdSpan.Text(text.substring(lastEnd, start))
+        val normalized = normalizeUrl(url)
+        if (normalized != null) {
+            out += MdSpan.Link(text = url, url = normalized)
+        } else {
+            out += MdSpan.Text(url)
+        }
+        lastEnd = end
+    }
+    if (lastEnd < text.length) out += MdSpan.Text(text.substring(lastEnd))
+    return out
+}
+
+/**
+ * 链接操作气泡（打开/复制二选一；正文 Link 与 chip URL 同款）：打开走 LocalUriHandler
+ * （桌面=Desktop.browse，不直持 AWT）只用归一 url；复制复制归一完整 URL（对齐 iOS
+ * UIPasteboard 复制完整 URL 口径）——normalizedUrl=null（白名单外 scheme）时「打开」禁用、
+ * 复制退回原样字符串。focusable Popup：气泡外点击/焦点丢失即 onDismissRequest 关闭。
+ * 锚定=挂载点父布局底部居中（首版退化行内锚，视觉细节实机走查项——知情注释）。
+ */
+@Composable
+internal fun LinkActionPopup(displayUrl: String, normalizedUrl: String?, onDismiss: () -> Unit) {
+    val ink = LocalDesktopInk.current
+    val uriHandler = LocalUriHandler.current
+    val clipboard = LocalClipboardManager.current
+    Popup(
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = true),
+        alignment = Alignment.BottomCenter,
+        offset = IntOffset(0, 8),
+    ) {
+        Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant),
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                Text(
+                    text = displayUrl,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = ink.textSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Row {
+                    TextButton(
+                        onClick = {
+                            normalizedUrl?.let { url -> runCatching { uriHandler.openUri(url) } }
+                            onDismiss()
+                        },
+                        enabled = normalizedUrl != null,
+                        contentPadding = PaddingValues(horizontal = 8.dp),
+                    ) { Text("打开", fontSize = 12.sp) }
+                    TextButton(
+                        onClick = {
+                            clipboard.setText(AnnotatedString(normalizedUrl ?: displayUrl))
+                            onDismiss()
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp),
+                    ) { Text("复制", fontSize = 12.sp) }
+                }
+            }
+        }
+    }
+}
+
 /** 行内 span → AnnotatedString（平铺样式：粗 / 斜 / 粗斜 / 等宽代码底色；codeTint = surfaceTertiary 令牌）。 */
-private fun List<MdSpan>.toAnnotatedString(codeTint: Color): AnnotatedString = buildAnnotatedString {
-    forEach { span ->
+private fun List<MdSpan>.toAnnotatedString(
+    codeTint: Color,
+    accent: Color,
+    onLinkTap: (String, String) -> Unit,
+): AnnotatedString = buildAnnotatedString {
+    linkifySpans(this@toAnnotatedString).forEach { span ->
         when (span) {
             is MdSpan.Text -> append(span.text)
+            is MdSpan.Link -> withLink(
+                LinkAnnotation.Url(
+                    span.url,
+                    TextLinkStyles(
+                        SpanStyle(color = accent, textDecoration = TextDecoration.Underline),
+                    ),
+                    LinkInteractionListener { onLinkTap(span.text, span.url) },
+                ),
+            ) { append(span.text) }
             is MdSpan.Bold -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(span.text) }
             is MdSpan.Italic -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(span.text) }
             is MdSpan.BoldItalic -> withStyle(
@@ -273,12 +509,25 @@ private fun List<MdSpan>.toAnnotatedString(codeTint: Color): AnnotatedString = b
 }
 
 /** 段落多行合并为单个 Text（作者换行保留；codeTint = surfaceTertiary 令牌）。 */
-private fun List<List<MdSpan>>.toParagraphString(codeTint: Color): AnnotatedString = buildAnnotatedString {
+private fun List<List<MdSpan>>.toParagraphString(
+    codeTint: Color,
+    accent: Color,
+    onLinkTap: (String, String) -> Unit,
+): AnnotatedString = buildAnnotatedString {
     forEachIndexed { idx, line ->
         if (idx > 0) append("\n")
-        line.forEach { span ->
+        linkifySpans(line).forEach { span ->
             when (span) {
                 is MdSpan.Text -> append(span.text)
+                is MdSpan.Link -> withLink(
+                    LinkAnnotation.Url(
+                        span.url,
+                        TextLinkStyles(
+                            SpanStyle(color = accent, textDecoration = TextDecoration.Underline),
+                        ),
+                        LinkInteractionListener { onLinkTap(span.text, span.url) },
+                    ),
+                ) { append(span.text) }
                 is MdSpan.Bold -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(span.text) }
                 is MdSpan.Italic -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(span.text) }
                 is MdSpan.BoldItalic -> withStyle(

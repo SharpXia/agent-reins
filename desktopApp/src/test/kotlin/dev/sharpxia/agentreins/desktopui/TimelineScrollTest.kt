@@ -34,7 +34,8 @@ class TimelineScrollTest {
         lastItemEnd: Int = 1000,
         viewportEnd: Int = 1000,
         contentFullyVisible: Boolean = false,
-    ) = ScrollSample(scrolling, lastItemVisible, lastItemEnd, viewportEnd, contentFullyVisible)
+        firstVisibleItemIndex: Int = 0,
+    ) = ScrollSample(scrolling, lastItemVisible, lastItemEnd, viewportEnd, contentFullyVisible, firstVisibleItemIndex)
 
     // ── ① 贴底跟随条件：尾签变化 且 在底 ──
 
@@ -164,5 +165,63 @@ class TimelineScrollTest {
         assertEquals(1, timelinePrefixItemCount(loaderVisible = true, errorVisible = false))
         assertEquals(2, timelinePrefixItemCount(loaderVisible = true, errorVisible = true))
         assertEquals(0, timelinePrefixItemCount(loaderVisible = false, errorVisible = false))
+    }
+
+    // ── 2026-11-23 批次二：近顶自动续拉（对齐 iOS HubViews userDriven 门） ──
+
+    @Test
+    fun autoLoadEarlierTriggersOnlyAtProximityLoadableUserDriven() {
+        // 近顶（首行下标 ≤ 阈值）+ Loadable + 用户驱动 → 触发（阈值边界含）
+        assertTrue(
+            shouldAutoLoadEarlier(0, EarlierRowState.Loadable, isUserDrivenScroll = true),
+        )
+        assertTrue(
+            shouldAutoLoadEarlier(
+                AUTO_LOAD_EARLIER_PROXIMITY_ITEMS, EarlierRowState.Loadable, isUserDrivenScroll = true,
+            ),
+        )
+        // 超近窗 → 不触发
+        assertFalse(
+            shouldAutoLoadEarlier(
+                AUTO_LOAD_EARLIER_PROXIMITY_ITEMS + 1, EarlierRowState.Loadable, isUserDrivenScroll = true,
+            ),
+        )
+        // 在途 / 隐藏 / 翻到头 → 不触发（InFlight 防并发翻页、Hidden 无入口、Exhausted 锁存）
+        assertFalse(shouldAutoLoadEarlier(0, EarlierRowState.InFlight, isUserDrivenScroll = true))
+        assertFalse(shouldAutoLoadEarlier(0, EarlierRowState.Hidden, isUserDrivenScroll = true))
+        assertFalse(shouldAutoLoadEarlier(0, EarlierRowState.Exhausted, isUserDrivenScroll = true))
+        // 非用户驱动（程序化跳转/贴底跟随在途）→ 不触发（回底/Ctrl+End 动画中途不白付 REST）
+        assertFalse(shouldAutoLoadEarlier(0, EarlierRowState.Loadable, isUserDrivenScroll = false))
+        // 自定义阈值（接线层可调，默认 AUTO_LOAD_EARLIER_PROXIMITY_ITEMS）
+        assertFalse(shouldAutoLoadEarlier(8, EarlierRowState.Loadable, isUserDrivenScroll = true, threshold = 4))
+        assertTrue(shouldAutoLoadEarlier(4, EarlierRowState.Loadable, isUserDrivenScroll = true, threshold = 4))
+    }
+
+    // ── 2026-11-23 批次二：时间线键盘命令（对齐 iOS ⌘↓ 菜单回底） ──
+
+    @Test
+    fun timelineScrollKeyMapsClosedSet() {
+        // 桌面 Key.keyCode.toInt() = AWT VK code（cmp ui-desktop 1.12.2 实证锚，见常量注）：
+        // DirectionDown=40 / MoveEnd(VK_END)=35 / DirectionUp=38 / MoveHome(VK_HOME)=36
+        assertEquals(TimelineScrollCommand.ScrollToBottom, resolveTimelineScrollKey(KEYCODE_DIRECTION_DOWN, isCtrlOrMeta = true))
+        assertEquals(TimelineScrollCommand.ScrollToBottom, resolveTimelineScrollKey(KEYCODE_MOVE_END, isCtrlOrMeta = true))
+        assertEquals(TimelineScrollCommand.ScrollToTop, resolveTimelineScrollKey(KEYCODE_DIRECTION_UP, isCtrlOrMeta = true))
+        assertEquals(TimelineScrollCommand.ScrollToTop, resolveTimelineScrollKey(KEYCODE_MOVE_HOME, isCtrlOrMeta = true))
+        // 无修饰键 → null（Home/End/↑↓ 放行系统默认与文本编辑）
+        assertNull(resolveTimelineScrollKey(KEYCODE_DIRECTION_DOWN, isCtrlOrMeta = false))
+        assertNull(resolveTimelineScrollKey(KEYCODE_MOVE_HOME, isCtrlOrMeta = false))
+        // 未知键（含修饰）→ null
+        assertNull(resolveTimelineScrollKey(65, isCtrlOrMeta = true))
+    }
+
+    @Test
+    fun programmaticJumpMergesIntoUserDrivenGate() {
+        // 接线层把 programmaticJumpInFlight 与 followAnimating 合并后喂相位门（同函数同语义）：
+        // 程序化跳转在途 = 非用户驱动（回底/Ctrl+End/恢复锚/首签定位期间不解锚、不触发续拉）
+        assertFalse(isUserDrivenScroll(scrolling = true, programmaticFollowInFlight = true))
+        // 贴底跟随动画不受本轮旗标影响（既有语义回归锚——跟随不触发续拉、不阻碍锚定判定豁免）
+        assertTrue(isUserDrivenScroll(scrolling = true, programmaticFollowInFlight = false))
+        // 滚动结束沿补判一次不受旗标影响（惯性停在容差内也算在底）
+        assertTrue(shouldRecomputeAnchor(userDriven = false, scrollJustSettled = true))
     }
 }

@@ -5,8 +5,10 @@ package dev.sharpxia.agentreins.desktopui
  *
  * 与 iOS Chat/MarkdownView.swift（LiteMarkdownParser，cmark-gfm 同源）的起步同位：本解析器
  * 覆盖「标题 / 列表 / 围栏代码块 / 粗斜体 + 行内代码」起步集；v1.2.0 多模态轮（设计稿
- * docs/multimodal-design-20261108.md §6 桌面行）增「整行独占」的图片块——表格、引用、嵌套
- * 强调仍不在本期（iOS 版已知取舍同理：解析不了的块按普通段落原样呈现，不丢文本）。
+ * docs/multimodal-design-20261108.md §6 桌面行）增「整行独占」的图片块；2026-11-23 批次二轮
+ * 增 GFM 最小口径表格（[MdBlock.Table]，列数一致才成表，无分隔行/块级打断落回段落字面量）
+ * 与行内链接 span（[MdSpan.Link]，解析产物由 MarkdownText 渲染层 linkify 产出）——引用、
+ * 嵌套强调仍不在本期（iOS 版已知取舍同理：解析不了的块按普通段落原样呈现，不丢文本）。
  *
  * 回退契约（验收硬要求）：[looksLikeMarkdown] 为 false 或解析抛异常时，调用方必须走 wp-6
  * MVP 纯文本路径原样渲染——解析器永不改变「纯文本等价」语义：任何未闭合/不构成 Markdown
@@ -28,7 +30,23 @@ internal sealed interface MdBlock {
      * http 及其余 scheme 链接 chip（不发起请求）。
      */
     data class Image(val url: String, val alt: String) : MdBlock
+
+    /**
+     * 表格（2026-11-23 批次二轮，GFM 最小口径）：表头行含 `|` 且次行为分隔行形态、列数一致
+     * 才成表——无分隔行 / 块级打断 / 半流中断一律落回段落字面量（wp-6「纯文本等价」契约不破）。
+     * [header]/[rows] 单元格均为行内 span 平铺（短行按表头列数补空、长行截断，GFM 同口径）；
+     * 单元格 span 已在解析期做每 16 字符 U+200B 软断行（[softBreakSpans]，与 iOS cell 渲染期
+     * 注入同法同口径——验收=长 URL/哈希完整显示无「…」），[aligns] 与列一一对应。
+     */
+    data class Table(
+        val header: List<List<MdSpan>>,
+        val rows: List<List<List<MdSpan>>>,
+        val aligns: List<MdTableAlign>,
+    ) : MdBlock
 }
+
+/** 表格列对齐三态 + 无标注（GFM 分隔行 `:---` / `:---:` / `---:` / `---`）。 */
+internal enum class MdTableAlign { Left, Center, Right, None }
 
 internal data class MdListItem(
     /** 字面标记（"-" / "*" / "+" / "1." / "2)"），照原样渲染不做归一（与 iOS item.marker 同口径）。 */
@@ -45,6 +63,15 @@ internal sealed interface MdSpan {
     data class Italic(val text: String) : MdSpan
     data class BoldItalic(val text: String) : MdSpan
     data class Code(val text: String) : MdSpan
+
+    /**
+     * 链接 span（2026-11-23 批次二轮）：不在解析期产出（[parseInlineSpans] 对无配对定界符
+     * 逐字等价），由 MarkdownText.kt 渲染层 linkifySpans 对平铺 Text span 切分产出——
+     * [text] = 原样匹配文本（展示/纯文本等价面），[url] = normalizeUrl 归一产物
+     * （http(s) 原样 / www. 补 https://；打开与复制均用归一 url，桌面 Desktop.browse 要求
+     * 绝对 URI）。
+     */
+    data class Link(val text: String, val url: String) : MdSpan
 }
 
 /** 流式行光标（wp-6 既有形态：内容尾随 ▌）。 */
@@ -67,6 +94,11 @@ private val MD_LIST_ITEM = Regex("""^(\s*)([-*+]|\d{1,9}[.)])\s+(.+)$""")
 private val MD_IMAGE_LINE = Regex("""^!\[([^\]]*)\]\(([^\s)]+)\)$""")
 private const val MD_MAX_LIST_DEPTH = 4
 
+/** GFM 分隔行形态（表格闸门/解析共用）：可选边界竖线 + 每格 `:?-+:?`（至少一个 `-`）。 */
+private val MD_TABLE_DELIM_ROW = Regex("""^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$""")
+/** 分隔行单格形态（列级校验用）。 */
+private val MD_TABLE_DELIM_CELL = Regex("""^\s*:?-+:?\s*$""")
+
 /**
  * 是否含 Markdown 语素（wp-6 回退闸门）：false → 调用方直接走纯文本路径，不进解析器。
  * 判定刻意宽松（单个 `*`/`` ` ``/`_` 即命中）——宽松只会多走一次解析，解析结果对纯文本
@@ -74,13 +106,23 @@ private const val MD_MAX_LIST_DEPTH = 4
  */
 internal fun looksLikeMarkdown(text: String): Boolean {
     if (text.contains('*') || text.contains('`') || text.contains('_')) return true
-    return text.lineSequence().any { line ->
+    val lines = text.split('\n')
+    // 表格语素（2026-11-23 批次二轮）：任一行含 | 且次行为分隔行形态（列数一致性等细则由
+    // 解析器把关，闸门刻意宽松——多走一次解析，非表序列解析产物逐字等价）
+    for (i in 0 until lines.size - 1) {
+        if (lines[i].contains('|') && MD_TABLE_DELIM_ROW.matches(lines[i + 1])) return true
+    }
+    return lines.any { line ->
         val t = line.trimStart()
         t.startsWith("```") || t.startsWith("~~~") ||
             MD_HEADING.matches(t) || MD_LIST_ITEM.matches(t) ||
             // 图片行（v1.2.0 多模态）：`![..](..)` 不含 * ` _ 语素，需显式放行否则纯图片
             // 消息（生图输出常见形态）会误落纯文本回退
-            MD_IMAGE_LINE.matches(t.trim())
+            MD_IMAGE_LINE.matches(t.trim()) ||
+            // URL 语素（2026-11-23 批次二轮链接化）：裸 URL 消息必须进解析管线吃链接化，
+            // 不得落纯文本回退（对齐 iOS isPlain 刻意排除 http/www 的口径 MarkdownView
+            // .swift:510；含 _ 的 URL 已被词边界规则挡住不误判强调，解析产物逐字等价）
+            t.contains("http://") || t.contains("https://") || t.contains("www.")
     }
 }
 
@@ -153,6 +195,9 @@ internal fun parseMarkdownBlocks(text: String, cursor: Boolean = false): List<Md
                 val heading = MD_HEADING.matchEntire(line.trimStart())
                 val item = MD_LIST_ITEM.matchEntire(line)
                 val image = MD_IMAGE_LINE.matchEntire(line.trim())
+                // 表格（2026-11-23 批次二轮）：表头含 | 且次行为分隔行才尝试成表（列数一致
+                // 才成表、块级打断等细则在 parseTableBlock 内把关）；不成立落回段落字面量
+                val table = if (line.contains('|')) parseTableBlock(lines, i) else null
                 when {
                     heading != null -> {
                         flushParagraph(); flushList()
@@ -170,6 +215,13 @@ internal fun parseMarkdownBlocks(text: String, cursor: Boolean = false): List<Md
                             alt = image.groupValues[1],
                         )
                         i++
+                    }
+                    table != null -> {
+                        // 表格块成块：表头前的段落/列表照常收口（表格可打断段落——GFM 最小
+                        // 口径，列数一致即成表；知情注释：cmark-gfm 对段落内表格有更细判定）
+                        flushParagraph(); flushList()
+                        blocks += table.table
+                        i = table.endExclusive
                     }
                     item != null -> {
                         flushParagraph()
@@ -211,10 +263,173 @@ internal fun parseMarkdownBlocks(text: String, cursor: Boolean = false): List<Md
                 // 图片块不承载光标：图片语素是完整行（半流期尾随 ▌ 使其不成块、按段落字面量
                 // + 光标呈现，终态才收敛为 Image——与 JSON 卡「半流行不出卡」同向，无闪变）
                 is MdBlock.Image -> last
+                is MdBlock.Table -> last.copy(
+                    rows = last.rows.mapIndexed { idx, row ->
+                        // 光标接到最后一行末单元格（与 Paragraph/ListBlock 同型）；无表体
+                        // （仅表头+分隔行，流式瞬态）不挂光标——下一帧表体到位即接上
+                        if (idx == last.rows.lastIndex && row.isNotEmpty()) {
+                            row.dropLast(1) + listOf(row.last() + MdSpan.Text(MD_CURSOR))
+                        } else {
+                            row
+                        }
+                    },
+                )
             }
         }
     }
     return blocks
+}
+
+// ── 表格（2026-11-23 批次二轮，GFM 最小口径）+ 单元格软断行 ─────────────────────
+
+/** 表格解析产物：[table] 块 + 消费结束下标（exclusive，供主循环跳行）。 */
+internal data class MdTableParse(val table: MdBlock.Table, val endExclusive: Int)
+
+/**
+ * 表格解析（GFM 最小口径）：[lines[startIndex]] 为表头行（须含 `|` 且本身不是分隔行形态），
+ * [lines[startIndex + 1]] 须为分隔行且列数与表头一致——任一不成立返回 null（调用方落回
+ * 段落字面量，wp-6「纯文本等价」契约不破）。表体行消费至块级打断（空行/围栏/标题/列表/
+ * 图片行）或无 `|` 行；短行按表头列数补空、长行截断（GFM 同口径）。单元格 span 在解析期
+ * 做软断行（[softBreakSpans]，与 iOS cell 渲染期注入同法——验收=完整显示无「…」）。
+ */
+internal fun parseTableBlock(lines: List<String>, startIndex: Int): MdTableParse? {
+    if (startIndex + 1 >= lines.size) return null
+    val headerLine = lines[startIndex]
+    if (!headerLine.contains('|')) return null
+    val headerCells = tableRowCells(headerLine) ?: return null
+    if (headerCells.isEmpty()) return null
+    // 表头本身是分隔行形态 → 不是表（防「--- 行 + --- 行」误判成表头）
+    if (headerCells.all { MD_TABLE_DELIM_CELL.matches(it) }) return null
+    val delimLine = lines[startIndex + 1]
+    if (!MD_TABLE_DELIM_ROW.matches(delimLine)) return null
+    val delimCells = stripBoundaryCells(splitUnescapedPipe(delimLine))
+    if (delimCells.isEmpty() || delimCells.size != headerCells.size) return null
+    if (delimCells.any { !MD_TABLE_DELIM_CELL.matches(it) }) return null
+    val aligns = delimCells.map { cell ->
+        val t = cell.trim()
+        val left = t.startsWith(':')
+        val right = t.endsWith(':')
+        when {
+            left && right -> MdTableAlign.Center
+            right -> MdTableAlign.Right
+            left -> MdTableAlign.Left
+            else -> MdTableAlign.None
+        }
+    }
+    val columnCount = headerCells.size
+    val rows = mutableListOf<List<List<MdSpan>>>()
+    var end = startIndex + 2
+    while (end < lines.size && isTableRowCandidate(lines[end])) {
+        val cells = tableRowCells(lines[end]) ?: break
+        // 短行补空 / 长行截断（GFM：列数以表头为准，多余格忽略）
+        val padded = cells.take(columnCount) + List((columnCount - cells.size).coerceAtLeast(0)) { "" }
+        rows += padded.map { softBreakSpans(parseInlineSpans(it)) }
+        end++
+    }
+    return MdTableParse(
+        table = MdBlock.Table(
+            header = headerCells.map { softBreakSpans(parseInlineSpans(it)) },
+            rows = rows,
+            aligns = aligns,
+        ),
+        endExclusive = end,
+    )
+}
+
+/** 表行 → 单元格（含 `|` 才是行；边界可选竖线剥除、格内 trim；`\|` 转义见 [splitUnescapedPipe]）。 */
+private fun tableRowCells(line: String): List<String>? =
+    if (line.contains('|')) stripBoundaryCells(splitUnescapedPipe(line)) else null
+
+/**
+ * 按「未转义竖线」切格：`\|` 为字面量竖线不切列（GFM 转义同款），切出的格保留原文
+ * （剥边界/trim 在 [stripBoundaryCells] 做）；其余反斜杠不解释——非表行的 `\|` 仍走段落
+ * 字面量路径原样保留（行内转义最小集不含 `|`，两路径口径互不干扰）。
+ */
+internal fun splitUnescapedPipe(line: String): List<String> {
+    val cells = mutableListOf<String>()
+    val current = StringBuilder()
+    var i = 0
+    while (i < line.length) {
+        val c = line[i]
+        if (c == '\\' && i + 1 < line.length && line[i + 1] == '|') {
+            current.append('|'); i += 2
+        } else if (c == '|') {
+            cells += current.toString(); current.clear(); i++
+        } else {
+            current.append(c); i++
+        }
+    }
+    cells += current.toString()
+    return cells
+}
+
+/** 可选边界竖线产生的首/尾空格剥一个（GFM 惯例），余格 trim。 */
+private fun stripBoundaryCells(cells: List<String>): List<String> {
+    var out = cells
+    if (out.size >= 2 && out.first().isBlank()) out = out.drop(1)
+    if (out.size >= 2 && out.last().isBlank()) out = out.dropLast(1)
+    return out.map { it.trim() }
+}
+
+/** 表体行候选：非空、含 `|`，且不是块级打断形态（空行/围栏/标题/列表/图片行结束表格）。 */
+private fun isTableRowCandidate(line: String): Boolean {
+    if (line.isBlank() || !line.contains('|')) return false
+    val trimmed = line.trimStart()
+    if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) return false
+    if (MD_HEADING.matches(trimmed) || MD_IMAGE_LINE.matches(line.trim()) || MD_LIST_ITEM.matches(line)) return false
+    return true
+}
+
+/**
+ * 单元格内不可断词 token 软断行（2026-11-23 批次二轮）：每 [every] 个可见字符插一个
+ * U+200B 零宽空格（[MD_SOFT_BREAK]），Compose Text 拆不开的 URL/哈希长 token 由软断点
+ * 换行——表格验收「完整显示无省略号」的落点。幂等：已有断点不计可见数、且第 16 位下一
+ * 字符已是断点时不再插（重复应用产物逐字节一致）。平台差异知情：iOS 于 cell 渲染期注入、
+ * 桌面于解析期注入（两端同法同参）。
+ */
+internal const val MD_SOFT_BREAK = "\u200B"
+
+internal fun softBreakSpans(spans: List<MdSpan>): List<MdSpan> = spans.map { span ->
+    when (span) {
+        is MdSpan.Text -> span.copy(text = softBreakText(span.text))
+        is MdSpan.Bold -> span.copy(text = softBreakText(span.text))
+        is MdSpan.Italic -> span.copy(text = softBreakText(span.text))
+        is MdSpan.BoldItalic -> span.copy(text = softBreakText(span.text))
+        is MdSpan.Code -> span.copy(text = softBreakText(span.text))
+        is MdSpan.Link -> span.copy(text = softBreakText(span.text))
+    }
+}
+
+/** 软断行正文版（保原字符、只插断点；幂等性见 [softBreakSpans] 注）。 */
+internal fun softBreakText(text: String, every: Int = 16): String {
+    if (text.length <= every) return text
+    val sb = StringBuilder(text.length + text.length / every + 1)
+    var visible = 0
+    var i = 0
+    while (i < text.length) {
+        val c = text[i]
+        if (c == '\u200B') { // 已有断点：原样保留不计可见数（幂等前提）
+            sb.append(c); i++
+            continue
+        }
+        visible++
+        sb.append(c)
+        if (visible == every) {
+            visible = 0
+            val next = i + 1
+            if (next < text.length) {
+                if (text[next] == '\u200B') {
+                    // 断点已就位：跳过既有断点，不重复插
+                    sb.append('\u200B')
+                    i = next + 1
+                    continue
+                }
+                sb.append('\u200B')
+            }
+        }
+        i++
+    }
+    return sb.toString()
 }
 
 /** 行内解析：反引号代码段优先（段内不再解析强调），其余按 `*`/`_` 定界符扫描。 */

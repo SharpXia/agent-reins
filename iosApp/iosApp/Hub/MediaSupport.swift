@@ -151,11 +151,14 @@ final class HubMediaLoader {
                     continuation.resume(returning: data)
                 }
             }
-            // 网络命中路径：原始字节先落盘（MediaDiskCache，键 = mediaId）再解码回填 NSCache；
-            // 查看器/拷贝图片走同一 loader，磁盘层零重复下载。
+            // 网络命中路径（自检轮 R1-9/R1-19）：解码成功才落盘——坏字节（错误体/非图）不进
+            // 256MB 磁盘帽、不触发 trim 全扫，对齐桌面 MediaCache「解码失败不落盘」纪律；
+            // 查看器/拷贝图片走同一 loader，磁盘层零重复下载。HTTP 状态把关在桥内圈
+            //（HubApiImpl.fetchMediaContent ensureSuccess 非 2xx 抛错 → 本层 raw 缺席）。
             let image: UIImage? = await Task.detached(priority: .utility) { () -> UIImage? in
-                if let raw { MediaDiskCache.shared.store(raw, forKey: mediaId) }
-                return raw.flatMap { MediaImageProcessing.decodeForDisplay($0) }
+                guard let raw, let decoded = MediaImageProcessing.decodeForDisplay(raw) else { return nil }
+                MediaDiskCache.shared.store(raw, forKey: mediaId)
+                return decoded
             }.value
             if let image { self.cache.setObject(image, forKey: mediaId as NSString) }
             self.inflight[mediaId] = nil
@@ -204,10 +207,17 @@ final class RemoteImageLoader {
             }
             let fetched = try? await URLSession.shared.data(from: url)
             let raw = fetched?.0
-            // 网络命中路径：原始字节先落盘（键 = stableCacheKey）再解码回填 NSCache。
+            // 网络命中路径（自检轮 R1-9/R1-19，对齐桌面 MediaCache 同轮纪律）：URLSession 对
+            // 4xx/5xx 不抛错（错误页字节照回）——非 2xx 不解码不落盘；2xx 先解码、成功才落盘
+            //（键 = stableCacheKey）。坏字节不占 256MB 磁盘帽、不触发 trim 全扫，签名过期
+            // 死链重物化不再「网络重下+重写盘」循环。
             let image: UIImage? = await Task.detached(priority: .utility) { () -> UIImage? in
-                if let raw { MediaDiskCache.shared.store(raw, forKey: diskKey) }
-                return raw.flatMap { MediaImageProcessing.decodeForDisplay($0) }
+                guard let raw,
+                      let status = (fetched?.1 as? HTTPURLResponse)?.statusCode,
+                      (200..<300).contains(status),
+                      let decoded = MediaImageProcessing.decodeForDisplay(raw) else { return nil }
+                MediaDiskCache.shared.store(raw, forKey: diskKey)
+                return decoded
             }.value
             if let image { self.cache.setObject(image, forKey: key as NSString) }
             self.inflight[key] = nil

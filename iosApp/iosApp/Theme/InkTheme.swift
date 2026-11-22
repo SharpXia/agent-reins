@@ -88,6 +88,12 @@ struct InkColors {
     let onControlFace: Color
     /// 圆钮面上弱化图形（预留成对令牌）。light 5.10:1 / dark 6.04:1。
     let onControlFaceMuted: Color
+    // ── 悬浮层投影（非墨水面对象）──
+    /// 悬浮卡（LinkActionBubble 等 overlay 胶囊）投影色：阴影属投影着色，不参与文字/底
+    /// 对比度口径（豁免注释落码，自检轮 R1-22——首个 shadow 用法入令牌，防后续 shadow
+    /// 各自散写裸色）。alpha 0x26≈0.15 与修前渲染逐值等价；dark 同值（黑基投影在近黑
+    /// 纸面仅作悬浮边缘分离，不做暗色提档）。
+    let shadowInk: Color
 
     static func light() -> InkColors {
         InkColors(
@@ -130,7 +136,8 @@ struct InkColors {
             onSelectionMuted: Color(hex: 0xB3B3B3),    //  8.13:1 on selectionFill
             controlFace: Color(hex: 0xFFFFFF),
             onControlFace: Color(hex: 0x1C1C1C),       // 17.04:1 on controlFace
-            onControlFaceMuted: Color(hex: 0x6E6E6E)   //  5.10:1 on controlFace
+            onControlFaceMuted: Color(hex: 0x6E6E6E),  //  5.10:1 on controlFace
+            shadowInk: Color(hex: 0x000000, alpha: 0x26) // 悬浮层投影（非墨水面对象，见字段注）
         )
     }
 
@@ -175,7 +182,8 @@ struct InkColors {
             onSelectionMuted: Color(hex: 0x666666),    //  5.27:1 on selectionFill
             controlFace: Color(hex: 0x2A2A2A),
             onControlFace: Color(hex: 0xEDEDED),       // 12.26:1 on controlFace
-            onControlFaceMuted: Color(hex: 0xA8A8A8)   //  6.04:1 on controlFace
+            onControlFaceMuted: Color(hex: 0xA8A8A8),  //  6.04:1 on controlFace
+            shadowInk: Color(hex: 0x000000, alpha: 0x26) // 悬浮层投影（非墨水面对象，见字段注）
         )
     }
 }

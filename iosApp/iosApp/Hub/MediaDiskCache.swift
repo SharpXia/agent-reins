@@ -15,6 +15,10 @@ import Foundation
 /// 未知签名方案退化为「不命中」而非「错命中」（错误方向安全）。仓内 shared/AgentReinService
 /// 全量 grep 无 presign 生成（2026-11-23 批次一复核轮结论）——今天无签名 URL；但外链内容
 /// 不受仓内控制，按白名单实施。
+/// 双端对锁（自检轮 R1-2/R1-10/R1-20）：白名单闭集与桌面 MediaCache.kt STRIP_QUERY_PARAMS
+/// 逐项一致——2026-11-23 起取并集对齐（本侧补 oss-expires_at；桌面差集 x-amz-security-token/
+/// oss-access-key-id/oss-security-token 由桌面侧同轮补齐）。单端增删必须双端同步改，
+/// 否则同 URL 两端归一键漂移。
 private let volatileQueryKeys: Set<String> = [
     // 时效参数（各拼写变体）
     "expires", "expire", "expiry", "expires_at", "expiresat",
@@ -23,8 +27,8 @@ private let volatileQueryKeys: Set<String> = [
     "x-amz-algorithm", "x-amz-signedheaders", "x-amz-security-token",
     // 通用签名 / 令牌
     "signature", "sig", "token", "access_token",
-    // 阿里云 OSS 签名家族
-    "oss-expires", "oss-signature", "oss-access-key-id", "oss-security-token",
+    // 阿里云 OSS 签名家族（oss-expires_at = 对锁桌面侧独有拼写，2026-11-23 并集对齐）
+    "oss-expires", "oss-expires_at", "oss-signature", "oss-access-key-id", "oss-security-token",
 ]
 
 /// 剥离时效/签名 query 参数后的归一 URL 串。无 query 或无参数命中白名单时原样返回
@@ -43,6 +47,17 @@ final class MediaDiskCache {
 
     /// 惰性清理阈值：目录总字节超帽 → 按 modificationDate 升序（最久未用先删）删回帽内。
     private static let capacityBytes = 256 * 1024 * 1024
+
+    /// trim 扫描节流双门（自检轮 R1-15：此前每次写盘都全目录枚举+求和+排序，大量小缩略图
+    /// 时写路径 O(n) 扫描常开）——距上次全扫累计 ≥32 次写或净增 ≥16MB 才扫一次。超帽清理
+    /// 至多延迟到下一门开（临时超帽 ≤16MB 量级，LRU 语义不变）。重写同键按净增上界计
+    /// （文件替换不做差量账），触发略偏保守无害。桌面 MediaCache.kt trimDiskIfOverCap
+    /// 同轮对齐，双端参数须一致。
+    private static let trimScanWriteInterval = 32
+    private static let trimScanBytesDelta = 16 * 1024 * 1024
+    /// 双门计数器：只在串行 utility 队列闭包内读写（data 读路径不触），无需加锁。
+    private var writesSinceTrimScan = 0
+    private var bytesAddedSinceTrimScan = 0
 
     private let queue = DispatchQueue(label: "hub.media.diskcache", qos: .utility)
     private let directory: URL
@@ -65,12 +80,20 @@ final class MediaDiskCache {
     }
 
     /// 磁盘写入原始字节（异步、原子写；失败静默——缓存层缺页只退化为重下，不向调用方报错）。
+    /// trim 按双门节流触发（见 trimScanWriteInterval 注），非每次写都全目录扫描。
     func store(_ data: Data, forKey key: String) {
         queue.async { [directory] in
             let url = Self.fileURL(forKey: key, in: directory)
             do {
                 try data.write(to: url, options: .atomic)
-                Self.trimIfNeeded(in: directory)
+                self.writesSinceTrimScan += 1
+                self.bytesAddedSinceTrimScan += data.count
+                if self.writesSinceTrimScan >= Self.trimScanWriteInterval
+                    || self.bytesAddedSinceTrimScan >= Self.trimScanBytesDelta {
+                    self.writesSinceTrimScan = 0
+                    self.bytesAddedSinceTrimScan = 0
+                    Self.trimIfNeeded(in: directory)
+                }
             } catch {
                 // 写失败（磁盘满/目录被系统回收）静默：下次取数走网络重下。
             }
@@ -84,7 +107,8 @@ final class MediaDiskCache {
         return directory.appendingPathComponent(hex)
     }
 
-    /// mtime LRU 惰性清理（写路径顺手触发）：目录总字节超帽 → modificationDate 升序删至帽内。
+    /// mtime LRU 惰性清理（写路径双门节流触发，见 trimScanWriteInterval 注）：目录总字节
+    /// 超帽 → modificationDate 升序删至帽内。
     private static func trimIfNeeded(in directory: URL) {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(

@@ -657,6 +657,11 @@ struct HubChatView: View {
     /// v1.4.0 追补（2026-11-16 用户反馈「没看到删除入口」）：#29 会话删除从管理 sheet 提到
     /// 会话详情页 ellipsis 菜单——终态确认挂本态。
     @State private var deletingConversation = false
+    /// 需求3（2026-11-23 批次一）+ 自检轮 R1-6：会话级在途链接气泡互斥单例——同一时刻
+    /// 至多一行挂 LinkActionBubble。行级置 pendingLink 即上抛本行 messageId 占坑；他行
+    /// 占坑时旧行 bubbleActive 翻 false 气泡随行收；行出视口随 LazyVStack 重建后行态
+    /// pendingLink 已复位，本态残指旧行无呈现面（幂等无害，下次占坑即覆写）。
+    @State private var linkBubbleMessageId: String?
     /// 角色系统批次4：标题栏交互角色的眼神触发面——composer 输入聚焦下视（@FocusState）、
     /// 标题区指针注视（onContinuousHover，Catalyst/Mac；触摸设备无 hover 自然只走后三路）、
     /// 新消息一次性下瞥 400ms。gaze 合成优先级：注视 > 聚焦下视 > 下瞥窗 > nil。
@@ -1062,7 +1067,10 @@ struct HubChatView: View {
                             m: m,
                             cardHit: interactiveCard?.messageId == m.messageId ? interactiveCard : nil,
                             onDelete: { pendingDeleteMessage = m },
-                            onOpenImages: { pages, idx in openViewer(pages, index: idx) }
+                            onOpenImages: { pages, idx in openViewer(pages, index: idx) },
+                            // 自检轮 R1-6：跨行互斥坑位与上抛写入面（见 linkBubbleMessageId 注）。
+                            bubbleActive: linkBubbleMessageId == m.messageId,
+                            onLinkBubbleActiveChange: { id in linkBubbleMessageId = id }
                         ).id(m.messageId)
                             // b8：末行视口位置探针（用户口径「last visible 是最底下的 item」——
                             // 判定基准=最后一条消息行，不是垫行）。全部行挂观察、仅末行写入
@@ -2849,10 +2857,17 @@ private final class ScrollProbeBox {
     /// v1.4 查看器打开回调（会话页 imageViewer binding 承担）：页集 + 被点页序。入口 a/b
     /// 共用——附件图片块（含 Markdown 图块）点按上抛，查看器本体在 ImageViewer.swift。
     let onOpenImages: ([ImageViewerPage], Int) -> Void
+    /// 自检轮 R1-6：跨行互斥——会话级在途气泡唯一（HubChatView 持 linkBubbleMessageId
+    /// 单例态）。本行置 pendingLink 即上抛本行 messageId 占坑；他行占坑时本行 bubbleActive
+    /// 翻 false，气泡随行收。呈现与否仍以行级 pendingLink 为准（父态仅作互斥门）。
+    var bubbleActive: Bool = false
+    /// 气泡活跃态上抛（开=本行 messageId、收=nil）：父级单例态唯一写入面。
+    var onLinkBubbleActiveChange: ((String?) -> Void)? = nil
     @State private var hub = HubStore.shared
     /// 需求3（2026-11-23 批次一）：在途链接动作气泡——正文 Text 的 .link run 与 Link 视图
     /// 点击经 openURL 环境拦截置此（不再直开浏览器），气泡呈「打开/复制」两动作；点行内
-    /// 空白（关闭层）置 nil 收起。行级 @State，行随 LazyVStack 物化重建即回 nil。
+    /// 空白（关闭层）或点胶囊空白（自检轮 R1-6 onDismiss）置 nil 收起。行级 @State，行随
+    /// LazyVStack 物化重建即回 nil。
     @State private var pendingLink: URL?
     @Environment(\.inkColors) private var ink
 
@@ -3029,7 +3044,7 @@ private final class ScrollProbeBox {
                     if pendingLink != nil {
                         Color.clear
                             .contentShape(Rectangle())
-                            .onTapGesture { pendingLink = nil }
+                            .onTapGesture { dismissLinkBubble() }
                     }
                 }
                 // 需求3：链接点击拦截——openURL 环境覆盖正文全部链接面（Text 的 .link run =
@@ -3038,25 +3053,38 @@ private final class ScrollProbeBox {
                 // 设置页等非消息面在本作用域外不受影响。
                 .environment(\.openURL, OpenURLAction { url in
                     pendingLink = url
+                    onLinkBubbleActiveChange?(m.messageId)
                     return .handled
                 })
                 // 需求3：动作气泡锚行内脚注侧（助手行左下/用户行右下）——overlay 不裁剪，
-                // 窄内容行气泡外溢悬浮（胶囊自带描边阴影）。
+                // 窄内容行气泡外溢悬浮（胶囊自带描边阴影）。自检轮 R1-6：呈现还需本行持有
+                // 会话级互斥坑位（bubbleActive），他行占坑即随行收；动画值随之取两条件与。
                 .overlay(alignment: m.role == "user" ? .bottomTrailing : .bottomLeading) {
-                    if let url = pendingLink {
-                        LinkActionBubble(url: url)
+                    if let url = pendingLink, bubbleActive {
+                        LinkActionBubble(url: url, onDismiss: dismissLinkBubble)
                     }
                 }
-                .animation(.easeInOut(duration: 0.15), value: pendingLink)
+                .animation(.easeInOut(duration: 0.15), value: pendingLink != nil && bubbleActive)
                 if m.role != "user" { Spacer(minLength: 40) }
             }
         }
     }
 
+    /// 自检轮 R1-6：收起本行气泡——行内空白关闭层与胶囊空白点按共用：清行态并上抛清除
+    /// 会话级活跃 id（跨行互斥随行释放）。
+    private func dismissLinkBubble() {
+        pendingLink = nil
+        onLinkBubbleActiveChange?(nil)
+    }
+
     // ── wp-8①：行菜单（拷贝全文 / 失败行重发）——挂载点分叉见上方正文 #if 与行脚注
     //（需求2 批次一：Catalyst=正文右键、触屏=长按行脚注；菜单本体不变） ──
 
-    /// 消息时间标签（formatMessageTimeISO 解析失败/缺省 → 空视图，不占位）。
+    /// 消息时间标签（formatMessageTimeISO 解析失败/缺省 → 原先空视图零尺寸）。自检轮
+    /// R1-5/R1-11：触屏侧行菜单挂本标签（助手行直挂/用户行 [标签+徽标] 同行挂）——ts
+    /// 缺失/不可解析时零视图使菜单无宿主彻底不可达（用户行时间+徽标皆空时同理），空分支
+    /// 改渲染透明兜底命中宿主：minWidth 保底 + Color.clear 贪宽成整行脚注命中条（不占
+    /// 视觉位；常态有值路径零变化）。
     @ViewBuilder
     private var messageTimeLabel: some View {
         let t = formatMessageTimeISO(m.ts)
@@ -3064,6 +3092,10 @@ private final class ScrollProbeBox {
             Text(t)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+        } else {
+            Color.clear
+                .frame(minWidth: 120, minHeight: 16)
+                .contentShape(Rectangle())
         }
     }
 
@@ -3149,9 +3181,12 @@ private final class ScrollProbeBox {
 /// 需求3（2026-11-23 批次一）：链接动作气泡——消息内链接点击经 openURL 环境拦截（不再直开
 /// 浏览器），就地出小胶囊卡：URL 单行 middle 截断预览 +「打开」「复制」两动作。呈现跟随
 /// HubMessageRow 行脚注侧（助手 bottomLeading/用户 bottomTrailing）；收起 = 点行内空白
-/// （关闭层置 pendingLink = nil）或点另一链接换目标。
+/// （关闭层）或点胶囊空白（自检轮 R1-6 onDismiss 上抛，两动作按钮子手势优先不受影响），
+/// 他行开新气泡时随行收（跨行互斥见 HubChatView.linkBubbleMessageId）。
 private struct LinkActionBubble: View {
     let url: URL
+    /// 点胶囊空白（URL 预览/动作条间隙）= 收起回调——宿主行清 pendingLink 并释放互斥坑位。
+    var onDismiss: () -> Void = {}
     @Environment(\.inkColors) private var c
     /// 复制动作瞬时回执（按钮标签翻转一拍，不做自动复位计时——行随物化重建即回默认态）。
     @State private var copied = false
@@ -3198,7 +3233,10 @@ private struct LinkActionBubble: View {
         .frame(minWidth: 200, maxWidth: 300, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 10).fill(c.surfaceTertiary))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(c.borderPrimary, lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
+        // 自检轮 R1-6：点胶囊空白 = 收起（打开/复制按钮子手势优先，不受本 tap 影响）。
+        .contentShape(RoundedRectangle(cornerRadius: 10))
+        .onTapGesture { onDismiss() }
+        .shadow(color: c.shadowInk, radius: 4, y: 2)
         .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .bottom)))
         .accessibilityElement(children: .contain)
     }

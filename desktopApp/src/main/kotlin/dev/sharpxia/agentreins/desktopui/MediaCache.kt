@@ -4,7 +4,9 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asComposeImageBitmap
 import java.io.File
 import java.net.HttpURLConnection
+import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.math.roundToInt
@@ -36,7 +38,16 @@ import org.jetbrains.skia.SamplingMode
  * - 磁盘：文件名 = sha256hex([stableCacheKey])；命中 touch mtime；trim 按
  *   Files.getLastModifiedTime 升序删（Windows 卷可能关 atime，时间戳口径统一 mtime）；
  *   容量帽 [DEFAULT_DISK_CAP_BYTES]=256MB 写后惰性触发，双门节流（32 次写或净增 16MB 才
- *   全目录扫一次——自检轮 R1-15 对锁 iOS MediaDiskCache 同参数）；
+ *   全目录扫一次——自检轮 R1-15 对锁 iOS MediaDiskCache 同参数）；写盘走 tmp 完整落盘 +
+ *   Files.move 原子替换（自检轮 4 R4-6 对齐 iOS MediaDiskCache.store 的 .atomic 写——旧
+ *   writeBytes 直写目标被 kill/崩溃中断留截断坏文件），load 磁盘解码失败顺手删坏文件自愈；
+ * - 失败负缓存（自检轮 4 R4-9，iOS RemoteImageLoader 同轮同参互锚——基准 TTL
+ *   [MEDIA_FAILURE_TTL_MS] / 退避帽 [MEDIA_FAILURE_BACKOFF_CAP_MS] 单端改值双端同步）：
+ *   键 →（上次失败时刻, 连续失败数）内存级记录，退避窗 = 基准 TTL × 连续失败数（帽封顶）；
+ *   窗内取数直回 null 不查盘不启网络——死链外链图行滚动往返不再重发注定失败的请求（8s
+ *   连接超时量级的白付 IO）；TTL 到期自动重开窗口、连续失败数驱动退避生长，成功取数即清。
+ *   知情差异：桌面失败态降级链接 chip 无「点击重试图片」入口，iOS force 显式重试通道
+ *   （MediaSupport.swift RemoteImageLoader）桌面无对位；
  * - 网络：HttpURLConnection connectTimeout 8s / readTimeout 15s + UA 头（修旧 openStream
  *   无超时无 UA）+ 响应体体量帽 32MB（自检轮 2 R2-11：逐块限界读 [readBounded]，超帽 null
  *   降级链接 chip——下载阶段内存帽，解码帽只管已读字节）；同 key 在途 [MediaCacheStore.load]
@@ -53,6 +64,8 @@ internal class MediaCacheStore(
     private val memoryCapBytes: Long = DEFAULT_MEMORY_CAP_BYTES,
     private val capBytes: Long = DEFAULT_DISK_CAP_BYTES,
     private val scope: CoroutineScope,
+    /** 失败记账时钟注入（自检轮 4 R4-9；默认系统毫秒钟，单测假钟驱动退避窗不真等 TTL）。 */
+    private val nowMillis: () -> Long = { System.currentTimeMillis() },
     /** 取数通道注入（默认真实网络；单测桩计数在途合流/失败回落）。 */
     private val fetchBytes: suspend (String) -> ByteArray? = ::fetchFromNetwork,
 ) {
@@ -65,13 +78,43 @@ internal class MediaCacheStore(
     private val writeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
-     * 取图：内存 → 磁盘（命中 touch mtime 后回填内存）→ 网络（在途合流；成功回填内存 +
-     * 异步写盘）。任何一层失败降级 null（调用方落链接 chip）。CancellationException 照抛
-     * （调用方作用域取消即放弃等待；底层取数在 [scope] 继续完成并落缓存）。
+     * 失败负缓存（自检轮 4 R4-9，iOS RemoteImageLoader.image(for:) 同位同参互锚——基准 TTL
+     * × 连续失败数、帽 [MEDIA_FAILURE_BACKOFF_CAP_MS]）：键 →（上次失败时刻, 连续失败数），
+     * 取数/解码失败记账续增、成功即清。仅进程内存级（重启即清），退避窗语义见
+     * [failureGateOpen]。
+     */
+    private class FailureRecord(val atMillis: Long, val consecutive: Int)
+
+    private val failures = java.util.concurrent.ConcurrentHashMap<String, FailureRecord>()
+
+    /**
+     * 失败门是否放行（R4-9）：无记录放行；有记录未过退避窗（基准 TTL × 连续失败数，帽
+     * [MEDIA_FAILURE_BACKOFF_CAP_MS]）拦截——生长来自 TTL 到期重开的自动重试再失败。
+     */
+    private fun failureGateOpen(key: String): Boolean {
+        val record = failures[key] ?: return true
+        val windowMs = minOf(MEDIA_FAILURE_TTL_MS * record.consecutive, MEDIA_FAILURE_BACKOFF_CAP_MS)
+        return nowMillis() - record.atMillis >= windowMs
+    }
+
+    private fun recordFailure(key: String) {
+        val prior = failures[key]?.consecutive ?: 0
+        failures[key] = FailureRecord(atMillis = nowMillis(), consecutive = prior + 1)
+    }
+
+    /**
+     * 取图：内存 → 失败负缓存门 → 磁盘（命中 touch mtime 后回填内存；解码失败删坏文件
+     * 自愈）→ 网络（在途合流；成功回填内存 + 异步写盘）。任何一层失败降级 null（调用方落
+     * 链接 chip）。CancellationException 照抛（调用方作用域取消即放弃等待；底层取数在
+     * [scope] 继续完成并落缓存）。
      */
     suspend fun load(url: String): ImageBitmap? {
         val key = stableCacheKey(url)
         synchronized(memLock) { mem[key] }?.let { return it }
+        // 失败负缓存门（R4-9）：窗内直回 null——不查盘不启网络，死链行物化即现失败态
+        // （chip 不再「加载中…→加载失败」闪跳）。桌面无 force 显式重试通道，TTL 到期自动
+        // 重开即重试（iOS force 清记录强拉为 iOS 侧独有，知情差异见类注）。
+        if (!failureGateOpen(key)) return null
         val file = fileFor(key)
         if (file.isFile) {
             val diskBitmap = withContext(Dispatchers.IO) {
@@ -82,6 +125,10 @@ internal class MediaCacheStore(
                 putMemory(key, diskBitmap)
                 return diskBitmap
             }
+            // 磁盘自愈（自检轮 4 R4-6）：坏字节文件（历史非原子写中断残留等）解码失败即删
+            // ——不删则原 URL 失效（签名过期 refetch 恒 4xx）时坏条目永久驻留，每次进视口
+            // 白付 readBytes+解码；删除即让出磁盘帽，下次取数网络重下。
+            runCatching { file.delete() }
         }
         val deferred = inflight.computeIfAbsent(key) {
             scope.async { fetchDecodePersist(url, key) }
@@ -96,19 +143,59 @@ internal class MediaCacheStore(
         }
     }
 
-    /** 网络 → 解码 → 内存 + 异步写盘（解码失败不落盘——坏字节不占磁盘帽）。 */
+    /**
+     * 网络 → 解码 → 内存 + 异步写盘（解码失败不落盘——坏字节不占磁盘帽）；取数/解码失败
+     * 记账驱动失败负缓存退避（R4-9，见 [failures] 注），成功清记录。
+     */
     private suspend fun fetchDecodePersist(url: String, key: String): ImageBitmap? {
-        val bytes = fetchBytes(url) ?: return null
-        val bitmap = decodeForDisplay(bytes) ?: return null
+        val bytes = fetchBytes(url)
+        if (bytes == null) {
+            recordFailure(key)
+            return null
+        }
+        val bitmap = decodeForDisplay(bytes)
+        if (bitmap == null) {
+            recordFailure(key) // 坏字节解码失败与取数失败同记（错误方向安全：不显示不落盘）
+            return null
+        }
+        failures.remove(key) // 成功清记录（下次失败从基准 TTL 重新起算）
         putMemory(key, bitmap)
         writeScope.launch {
             runCatching {
                 dir.mkdirs()
-                fileFor(key).writeBytes(bytes)
+                atomicWrite(fileFor(key), bytes)
                 trimDiskIfOverCapThrottled(bytes.size.toLong())
             }
         }
         return bitmap
+    }
+
+    /**
+     * 原子落盘（自检轮 4 R4-6，对齐 iOS MediaDiskCache.store 的 .atomic 写）：tmp 完整
+     * 落盘后 move 到目标——直写目标文件（旧 writeBytes）被 kill/崩溃中断留截断坏文件，load
+     * 解码失败自愈删除（R4-6 前不清）之前坏条目每次进视口白付 IO+解码。中断最坏留 tmp
+     * 残片（.tmp 不在 sha256hex 命名空间、不进命中路径，trim 全扫按容量回收）或旧目标完整
+     * 文件。REPLACE_EXISTING + ATOMIC_MOVE 双旗标（JDK 21/macOS rename 实证原子替换既有
+     * 目标）；ATOMIC_MOVE 不被卷支持（跨文件系统等）退普通替换——tmp 已完整落盘，非原子
+     * 窗口收窄到替换一瞬。
+     */
+    private fun atomicWrite(target: File, bytes: ByteArray) {
+        val tmp = File.createTempFile(target.nameWithoutExtension, ".tmp", dir)
+        try {
+            tmp.writeBytes(bytes)
+            try {
+                Files.move(
+                    tmp.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.ATOMIC_MOVE,
+                )
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            }
+        } finally {
+            tmp.delete() // move 失败残留清理（成功后不存在，delete 幂等）
+        }
     }
 
     fun putMemory(key: String, bitmap: ImageBitmap) {
@@ -213,6 +300,15 @@ internal const val TRIM_SCAN_BYTES_DELTA: Long = 16L * 1024 * 1024
 
 /** 解码降采样帽（与 iOS MediaSupport.decodeForDisplay 2048 同值对锁）。 */
 internal const val DEFAULT_MAX_PIXEL: Int = 2048
+
+/**
+ * 失败负缓存基准 TTL（自检轮 4 R4-9，与 iOS RemoteImageLoader.failureTTLSeconds=60s 同值
+ * 对锁——退避窗 = 本值 × 连续失败数，单端改值双端同步）。
+ */
+internal const val MEDIA_FAILURE_TTL_MS: Long = 60_000
+
+/** 失败退避窗帽（与 iOS RemoteImageLoader.failureBackoffCapSeconds=300s 同值对锁）。 */
+internal const val MEDIA_FAILURE_BACKOFF_CAP_MS: Long = 300_000
 
 /** 网络超时（修旧 openStream 无超时：行内图卡死时间线取数协程的风险面）。 */
 internal const val MEDIA_CONNECT_TIMEOUT_MS: Int = 8_000

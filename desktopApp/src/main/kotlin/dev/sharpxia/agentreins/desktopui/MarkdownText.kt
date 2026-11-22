@@ -3,6 +3,7 @@ package dev.sharpxia.agentreins.desktopui
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -26,12 +27,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -139,14 +142,22 @@ internal fun MarkdownText(
             blocks.forEach { MarkdownBlockView(it, onLinkTap) }
         }
         pendingLink?.takeIf { linkBubble.active === bubbleToken }?.let { (display, url) ->
-            LinkActionPopup(
-                displayUrl = display,
-                normalizedUrl = url,
-                onDismiss = {
-                    if (linkBubble.active === bubbleToken) linkBubble.active = null
-                    pendingLink = null
-                },
-            )
+            // 自检轮 4 R4-1/R4-4/R4-11（对齐 iOS R2-7）：换链强制重建气泡——挂载点固定，
+            // 同一行内先点链接 A（复制→「已复制」驻留）再点链接 B 时，外点 dismiss 与链接
+            // 点击若同帧合流（active=null 的离场帧未及组合即换新参），Popup 组合节点不离开、
+            // remember 按位置保态，copied/openFailed 回执残留在 B 的气泡上（剪贴板仍是 A）。
+            // key(url) 换链即换身份，回执态随 url 归零（HubViews.swift:3073-3077 `.id(url)`
+            // 同语义互锚；chip 两挂载点单 URL 坑位、令牌失配即整体离场重建，无需 key）。
+            key(url) {
+                LinkActionPopup(
+                    displayUrl = display,
+                    normalizedUrl = url,
+                    onDismiss = {
+                        if (linkBubble.active === bubbleToken) linkBubble.active = null
+                        pendingLink = null
+                    },
+                )
+            }
         }
     }
 }
@@ -219,12 +230,16 @@ private val MD_TABLE_CELL_MIN_WIDTH = 64.dp
 private val MD_TABLE_CELL_MAX_WIDTH = 480.dp
 
 /**
- * 表格：描边圆角盒 + 表头底色 + 体行分隔线三件视觉锚（自检轮 2 R2-6 对齐 iOS LiteTableView
- * ——外层描边+clipShape MarkdownView.swift:392-393、表头行 surfaceTertiary 底 :381、体行前
- * borderPrimary 1pt 分隔 :383-384；桌面此前无框无边，暗色/宽表边界感弱）。单元格无 maxLines
- * 无 Ellipsis（段落 Text 同款），列对齐随 aligns；超宽表由表级横向滚动兜底（全量布局在
- * 滚动容器内，纵向仍交给时间线）。单元格 span 已于解析期软断行（softBreakSpans）——
- * 连续无空白且不含 CJK 的长 token 每 16 字符可换行（自检轮 2 R2-2 口径，见解析器注）。
+ * 表格：描边圆角盒 + 表头底色 + 体行分隔线三件视觉锚（自检轮 2 R2-6 对齐 iOS——表头行
+ * surfaceTertiary 底 MarkdownView.swift:381、体行前 borderPrimary 1pt 分隔 :383-384；桌面
+ * 此前无框无边，暗色/宽表边界感弱）。描边+圆角承载层（自检轮 4 R4-2 对齐 iOS 基线）：
+ * 挂 [TableGrid] 内容侧随表整体移动——宽表横滑时边框/圆角随内容滚出视口（iOS
+ * Grid.overlay(stroke).clipShape MarkdownView.swift:392-393，基线注释「边框/圆角随内容移动」
+ * 同口径）；旧版描边画在视口边缘（Surface 框定滚动视口、内容在固定框下滑动）与 iOS 语义
+ * 相反，已对齐防后续轮当 bug 误修。单元格无 maxLines 无 Ellipsis（段落 Text 同款），列对齐
+ * 随 aligns；超宽表由表级横向滚动兜底（全量布局在滚动容器内，纵向仍交给时间线）。单元格
+ * span 已于解析期软断行（softBreakSpans）——连续无空白且不含 CJK 的长 token 每 16 字符
+ * 可换行（自检轮 2 R2-2 口径，见解析器注）。
  * 列轨对齐（自检轮 3 R3-1 重写布局：R2-6 版各行独立测宽、同列跨行边界漂移且表头底/分隔
  * 线满幅放大错位；旧「IntrinsicSize.Max 取最宽行、对齐 iOS Grid 内容宽描边」只对齐外宽
  * 未对齐列轨，该表述撤回）：[TableGrid] 镜像 iOS Grid 列轨语义（MarkdownView.swift:374
@@ -244,21 +259,20 @@ private fun MarkdownTable(
 ) {
     // 视觉锚取墨水令牌（R2-6；与 iOS c.borderPrimary / c.surfaceTertiary 同源语义，DSK-1 层）
     val ink = LocalDesktopInk.current
-    // 外层 Surface 承担描边+圆角 clip（表头底色不溢出圆角）；横向滚动容器内不 fillMaxWidth
-    // （宽表横向滚出），窄表贴内容左对齐（iOS .leading 同口径）
-    Surface(
-        shape = RoundedCornerShape(8.dp),
-        color = Color.Transparent,
-        border = BorderStroke(1.dp, ink.borderPrimary),
-    ) {
-        Box(modifier = Modifier.horizontalScroll(rememberScrollState())) {
-            TableGrid(
-                table = table,
-                codeTint = codeTint,
-                accent = accent,
-                onLinkTap = onLinkTap,
-            )
-        }
+    // 描边+圆角 clip 挂 TableGrid 内容侧（R4-2，见上函数注：随表整体移动对齐 iOS）；外层
+    // 只承担横向滚动——容器内不 fillMaxWidth（宽表横向滚出），窄表贴内容左对齐（iOS
+    // .leading 同口径）。clip 在 border 外层（镜像 iOS overlay(stroke) 后 clipShape：描边
+    // 外半随内容裁进圆角，表头底色不溢出圆角）
+    Box(modifier = Modifier.horizontalScroll(rememberScrollState())) {
+        TableGrid(
+            table = table,
+            codeTint = codeTint,
+            accent = accent,
+            onLinkTap = onLinkTap,
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .border(BorderStroke(1.dp, ink.borderPrimary), RoundedCornerShape(8.dp)),
+        )
     }
 }
 
@@ -268,7 +282,8 @@ private fun MarkdownTable(
  * 钳 [MD_TABLE_CELL_MIN_WIDTH, MD_TABLE_CELL_MAX_WIDTH]——镜像 iOS cell frame min/max）
  * 按列取跨行 max 得列轨宽；第二趟每格固定宽=所在列轨宽重测排布——textAlign 需格宽=轨宽
  * 才能对准列界，R3-1 病根即各行独立测宽做不到这一点。表头底色盒/体行分隔线子组合后按
- * 表宽（列轨和）满幅测度铺放，每 measurable 恰测度一次。
+ * 表宽（列轨和）满幅测度铺放，每 measurable 恰测度一次。[modifier] 透传 SubcomposeLayout
+ * 容器（唯一调用点挂描边+圆角 clip，R4-2 描边承载层随内容移动）。
  */
 @Composable
 private fun TableGrid(
@@ -276,9 +291,10 @@ private fun TableGrid(
     codeTint: Color,
     accent: Color,
     onLinkTap: (String, String) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val ink = LocalDesktopInk.current
-    SubcomposeLayout {
+    SubcomposeLayout(modifier = modifier) {
         val columnCount = maxOf(table.header.size, table.rows.maxOfOrNull { it.size } ?: 0)
         if (columnCount == 0) return@SubcomposeLayout layout(0, 0) {}
         // 全部单元格一次子组合（表头在前、体行按行主序随后——下方两趟索引与此发射序一致）
@@ -611,7 +627,13 @@ internal val LocalLinkBubbleOwner = staticCompositionLocalOf { LinkBubbleOwner()
  * 复制 → 标签翻「已复制」且气泡驻留；打开失败（browse 抛异常=系统无可达 handler）→ 行内
  * 「无法打开」降级文案驻留——此前两动作后立即 onDismiss 且 openUri 异常被吞（打开失败
  * 静默），反馈口径与 iOS 不一致；打开成功 iOS open completion true 同为无回执面，气泡
- * 驻留待关闭动作。回执态与 Popup 同生命周期（离组合即回默认，iOS 行重建同向）。
+ * 驻留待关闭动作。回执态与 Popup 同生命周期（离组合即回默认，iOS 行重建同向）；同一坑位
+ * 内换链接由调用点 key(url) 强制重建（正文挂载点，自检轮 4 R4-1/R4-4/R4-11 对齐 iOS
+ * `.id(url)` HubViews.swift:3077——chip 挂载点令牌失配即整体离场，无需重建键）。
+ * 预览行口径（自检轮 4 R4-3）：恒展示 [normalizedUrl]（归一完整 URL，与 iOS
+ * Text(url.absoluteString) HubViews.swift:3219 同串），[displayUrl]（原样匹配文本）只在
+ * 归一缺席时兜底——预览串与复制/打开目标同串不变式。
+ * 关闭面双端知情差异（自检轮 3 R3-3/R3-10，与 HubViews.swift:3048-3051 互锚注释）：
  * 关闭面双端知情差异（自检轮 3 R3-3/R3-10，与 HubViews.swift:3048-3051 互锚注释）：
  * 桌面=Popup 外点即关（点他行/composer/任意窗外点都收）；iOS=行域三路收起（行内空白
  * 关闭层/胶囊空白/换链接重建），他行点按、收键盘 tap 与滚动不收——既定行域设计不对齐，
@@ -638,7 +660,12 @@ internal fun LinkActionPopup(displayUrl: String, normalizedUrl: String?, onDismi
         ) {
             Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                 Text(
-                    text = displayUrl,
+                    // 预览行口径（自检轮 4 R4-3，与 iOS LinkActionBubble Text(url.absoluteString)
+                    // HubViews.swift:3219 同串对齐）：恒展示归一完整 URL（www 裸链带 https scheme
+                    // ——iOS openURL 截获的即归一 url 同形态）；displayUrl=原样匹配文本（www 无
+                    // scheme、表格软断行插入的 U+200B 视觉不可见但 Ellipsis 截断位偏移）不进预览，
+                    // 只作 normalizedUrl=null（白名单外 scheme）时的兜底（此时与复制/打开目标同串）。
+                    text = normalizedUrl ?: displayUrl,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
                     color = ink.textSecondary,

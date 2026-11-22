@@ -551,6 +551,11 @@ internal fun ConversationScreen(
     // 武装并消费恢复锚（HubStore.swift:1806/:1833——SwiftUI LazyVStack 无 keyed 锚定需显式
     // 滚回）；桌面 LazyColumn keyed 锚定天然保位，恢复锚只服务手动路径——口径差异同步写进
     // TimelineScroll.kt 头注与 CODE-INDEX §2.5，两端各自有意。
+    // 失败分支清锚双端差异（自检轮 4 R4-10 知情落档，与上段锚武装差异并列）：REST 失败时
+    // 桌面仅在 armRestore（手动路径）清旗标锚位——auto 失败不动已武装的手动恢复锚（R2-18
+    // 语义）；iOS 无条件清 restoreAnchorMessageId/restoreArmed（Store/HubStore.swift:1815-1818，
+    // auto 失败连带作废在途手动锚）——iOS 本轮零改动属既有行为，差异面由桌面 R2-18 修复
+    // 直接引入，后续轮若对齐 iOS 再给 iOS 补同型 armRestore 门。
     // 自检轮 2 R2-18：自动路径对已武装的手动锚零触碰——触发段/失败段仅在 armRestore 时
     // 清旗标锚位，成功分支 restoreArmed = armRestore || restoreArmed 保已武装位；手动回执
     // 已到、恢复锚待消费的一两帧窗口内被自动续拉插队，不再静默作废手动阅读位置恢复。
@@ -572,6 +577,8 @@ internal fun ConversationScreen(
             val page = client.loadEarlierMessages(conversationId, before)
             loadingEarlier = false
             if (page == null) {
+                // 失败清锚双端差异（R4-10，见上函数注）：armRestore 门保手动锚——auto 失败
+                // 不作废在途手动恢复锚；iOS 同分支无条件清（HubStore.swift:1815-1818）
                 if (armRestore) {
                     restoreAnchorId = null
                     restoreArmed = false

@@ -145,13 +145,14 @@ class MediaCacheTest {
         // 同 key 合流：只取数一次，四路同图
         assertEquals(1, fetchCount.get())
         assertTrue(results.all { it != null })
-        // 磁盘往返：文件按 sha256(stableCacheKey) 命名落盘（写盘独立作用域异步完成）
+        // 磁盘往返：文件按 sha256(stableCacheKey) 命名落盘（写盘独立作用域异步完成；R4-6
+        // 原子写 tmp→move 有瞬时 .tmp 文件，断言只认落定的 .img 产物）
         withTimeout(5_000) {
-            while (dir.listFiles().isNullOrEmpty()) delay(10)
+            while (dir.listFiles()!!.none { it.name.endsWith(".img") }) delay(10)
         }
-        assertEquals(1, dir.listFiles()!!.size)
+        assertEquals(1, dir.listFiles()!!.count { it.name.endsWith(".img") })
         // 文件名 = sha256hex(stableCacheKey(url))（64 位 hex）
-        assertEquals(64, dir.listFiles()!!.single().nameWithoutExtension.length)
+        assertEquals(64, dir.listFiles()!!.single { it.name.endsWith(".img") }.nameWithoutExtension.length)
     }
 
     @Test
@@ -272,6 +273,91 @@ class MediaCacheTest {
         withTimeout(20_000) { while (stale.exists() || dir.listFiles()!!.isNotEmpty()) delay(10) }
         assertFalse(stale.exists())
         assertTrue(dir.listFiles()!!.isEmpty())
+    }
+
+    // ── 失败负缓存退避（自检轮 4 R4-9，iOS RemoteImageLoader 同参互锚：TTL 60s/帽 300s） ──
+
+    @Test
+    fun failureNegativeCacheBackoffGrowsAndCaps(): Unit = runBlocking {
+        var now = 0L
+        val fetchCount = AtomicInteger(0)
+        val store = MediaCacheStore(
+            dir = tempDir(),
+            scope = CoroutineScope(Dispatchers.IO),
+            nowMillis = { now },
+        ) {
+            fetchCount.incrementAndGet()
+            null
+        }
+        val url = "https://e.com/dead.png"
+        // 退避窗随连续失败数生长：60/120/180/240/300（=帽）——每轮「窗满放行取数失败 →
+        // 窗内一瞬拦截不启网络 → 再窗满」推进；帽语义由循环后第 7 次失败（无帽应 420s）钉死
+        val windows = longArrayOf(60_000L, 120_000L, 180_000L, 240_000L, 300_000L, 300_000L)
+        for ((i, window) in windows.withIndex()) {
+            assertNull(store.load(url)) // 无记录/窗已过 → 放行（第 i+1 次失败记账）
+            assertEquals(i + 1, fetchCount.get())
+            now += window - 1 // 退避窗内最后一瞬：直回 null 不查盘不启网络
+            assertNull(store.load(url))
+            assertEquals(i + 1, fetchCount.get())
+            now += 1
+        }
+        assertEquals(6, fetchCount.get())
+        // 第 7 次失败：循环推进已过第 6 次失败的窗满沿；连续数=7 无帽窗=420s > 帽——
+        // 帽封顶 300s 即放行（帽语义钉死，无帽实现此断言必红）
+        assertNull(store.load(url))
+        assertEquals(7, fetchCount.get())
+        now += MEDIA_FAILURE_BACKOFF_CAP_MS - 1
+        assertNull(store.load(url)) // 帽封顶：300s 内不放行
+        assertEquals(7, fetchCount.get())
+        now += 1
+        assertNull(store.load(url)) // 窗满重开（死链自动重试面）
+        assertEquals(8, fetchCount.get())
+    }
+
+    // ── 磁盘坏文件自愈 + 原子写（自检轮 4 R4-6，对齐 iOS MediaDiskCache .atomic 写） ──
+
+    @Test
+    fun corruptDiskEntrySelfHealsOnDecodeFailure(): Unit = runBlocking {
+        val dir = tempDir()
+        var now = 0L
+        var dead = false
+        val fetchCount = AtomicInteger(0)
+        val store = MediaCacheStore(
+            dir = dir,
+            memoryCapBytes = 1L, // 单条超帽仍保最新（evictOrder 最近一条恒保留）：第二键把首键挤出内存
+            scope = CoroutineScope(Dispatchers.IO),
+            nowMillis = { now },
+        ) { url ->
+            fetchCount.incrementAndGet()
+            when {
+                url.contains("other.png") -> widePngBytes() // 挤内存用的第二键（成功）
+                dead -> null
+                else -> tinyPngBytes()
+            }
+        }
+        val url = "https://e.com/corrupt.png"
+        // 首载成功落盘（异步写盘等落定；R4-6 原子写瞬时 .tmp 不认，只等 .img 产物）
+        assertNotNull(store.load(url))
+        val diskFile = withTimeout(5_000) {
+            while (dir.listFiles()!!.none { it.name.endsWith(".img") }) delay(10)
+            dir.listFiles()!!.single { it.name.endsWith(".img") }
+        }
+        assertEquals(64, diskFile.nameWithoutExtension.length) // sha256hex 命名
+        // 覆写为坏字节并把位图逐出内存（第二键挤掉第一条）
+        diskFile.writeBytes(byteArrayOf(0x00, 0x01, 0x02))
+        assertNotNull(store.load("https://e.com/other.png"))
+        // 再载目标键：内存必失 → 磁盘命中但解码失败 → 坏文件自愈删除 → 网络取数失败记账
+        dead = true
+        assertNull(store.load(url))
+        assertEquals(3, fetchCount.get()) // 取数#1=首载、#2=第二键挤内存、#3=本次失败
+        assertFalse(diskFile.exists()) // 坏条目已删（不占磁盘帽、不再每次进视口白付 IO+解码）
+        // 退避窗满后重取成功：原子写重落合法字节
+        dead = false
+        now += MEDIA_FAILURE_TTL_MS
+        assertNotNull(store.load(url))
+        assertEquals(4, fetchCount.get())
+        withTimeout(5_000) { while (!diskFile.exists()) delay(10) }
+        assertNotNull(store.decodeForDisplay(diskFile.readBytes())) // 重写的是可解码字节
     }
 
     /** ≥16MB 随机噪点 PNG（字节门单写触发样张；随机数据不可压缩，PNG 体积≈原始字节，实测 19.68MB）。 */

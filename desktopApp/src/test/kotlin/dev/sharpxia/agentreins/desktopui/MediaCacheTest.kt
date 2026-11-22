@@ -1,12 +1,14 @@
 package dev.sharpxia.agentreins.desktopui
 
 import java.awt.image.BufferedImage
+import java.awt.image.DataBufferInt
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 import javax.imageio.ImageIO
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -232,5 +234,54 @@ class MediaCacheTest {
         store.trimDiskIfOverCap()
         assertFalse(a.exists())
         assertTrue(b.exists() && c.exists())
+    }
+
+    // ── trimDiskIfOverCapThrottled：双门节流（自检轮 3 R3-7） ──
+
+    @Test
+    fun trimThrottleDefersFullScanUntilWriteCountGateOpens(): Unit = runBlocking {
+        val dir = tempDir()
+        // 预置超帽目录（帽 1MB、stale 1.1MB）：门未开写路径零全扫——stale 与全部新文件共存
+        val stale = File(dir, "stale.img").apply { writeBytes(ByteArray(1_100_000)); setLastModified(1_000L) }
+        val store = MediaCacheStore(dir = dir, capBytes = 1_000_000L, scope = CoroutineScope(Dispatchers.IO)) {
+            tinyPngBytes() // 小样张：写数门（32 次）开前字节门（16MB）远不可及
+        }
+        // 前 31 次写（< TRIM_SCAN_WRITE_INTERVAL）：目录原样，无任何删除
+        repeat(31) { i ->
+            assertNotNull(store.load("https://e.com/throttle-$i.png"))
+            withTimeout(5_000) { while (dir.listFiles()!!.size < i + 2) delay(10) } // 等异步写盘落定（+stale）
+            assertTrue(stale.exists())
+        }
+        assertEquals(32, dir.listFiles()!!.size)
+        // 第 32 次写：写数门开 → 全扫 → 超帽删 mtime 最旧的 stale，32 个新文件全保
+        assertNotNull(store.load("https://e.com/throttle-31.png"))
+        withTimeout(5_000) { while (stale.exists()) delay(10) }
+        assertFalse(stale.exists())
+        assertEquals(32, dir.listFiles()!!.size)
+    }
+
+    @Test
+    fun trimThrottleBytesGateOpensOnSingleOversizedWrite(): Unit = runBlocking {
+        val dir = tempDir()
+        val stale = File(dir, "stale.img").apply { writeBytes(ByteArray(1_100_000)); setLastModified(1_000L) }
+        val store = MediaCacheStore(dir = dir, capBytes = 1_000_000L, scope = CoroutineScope(Dispatchers.IO)) {
+            noisePngBytesOver16MB() // 单写 ≥ TRIM_SCAN_BYTES_DELTA：字节门首写即开
+        }
+        assertNotNull(store.load("https://e.com/oversize.png"))
+        // 门开 → 全扫 → 超帽逐个删 mtime 最旧至帽内：stale（1.1MB）与大图（≈19.7MB）均删
+        withTimeout(20_000) { while (stale.exists() || dir.listFiles()!!.isNotEmpty()) delay(10) }
+        assertFalse(stale.exists())
+        assertTrue(dir.listFiles()!!.isEmpty())
+    }
+
+    /** ≥16MB 随机噪点 PNG（字节门单写触发样张；随机数据不可压缩，PNG 体积≈原始字节，实测 19.68MB）。 */
+    private fun noisePngBytesOver16MB(): ByteArray {
+        val image = BufferedImage(2560, 2560, BufferedImage.TYPE_INT_RGB)
+        val data = (image.raster.dataBuffer as DataBufferInt).data
+        val random = Random(42)
+        for (i in data.indices) data[i] = random.nextInt()
+        val out = ByteArrayOutputStream()
+        ImageIO.write(image, "png", out)
+        return out.toByteArray()
     }
 }

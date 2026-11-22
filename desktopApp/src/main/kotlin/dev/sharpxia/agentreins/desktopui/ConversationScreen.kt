@@ -543,7 +543,8 @@ internal fun ConversationScreen(
     //   手动按钮重试成功回执解锁（iOS HubStore autoEarlierBlocked 同型同参，双端对锁）——
     //   否则用户停在近顶窗内的每个滚动帧都会重发失败请求、横幅反复闪灭。
     // 落点机制实况（自检轮 2 R2-14 纠注，原「锚定 firstVisibleIndex」描述失实）：时间线
-    // items 按 messageId keyed（:998），prepend 后 LazyColumn 按首可见行 key 保持视口——
+    // items 按 messageId keyed（key=messageId，名称引用防行号再漂），prepend 后 LazyColumn
+    // 按首可见行 key 保持视口——
     // 翻页行首可见时新页自其下展开（视口落新页，正是拖顶用户要的落点），消息行首可见时
     // 视口停在原行、新页在上方不可见。
     // 与 iOS 的 parity 差异（自检轮 2 R2-13 知情落档，非对齐遗漏）：iOS 对自动/手动两路都

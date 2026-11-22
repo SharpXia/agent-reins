@@ -8,14 +8,12 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -37,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.SubcomposeLayout
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
@@ -53,6 +52,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -118,7 +118,13 @@ internal fun MarkdownText(
     // 自检轮 2 R2-4：气泡呈现经会话级坑位归属门控（LocalLinkBubbleOwner）——被其他气泡
     // （他行链接/他 chip）夺坑后本气泡随行收，同屏至多一个；onDismiss 仅在仍持坑时清坑
     // （不误清他方）。pendingLink 与坑位同生命周期：夺坑后既不渲染也不再清除他行。
-    var pendingLink by remember(content) { mutableStateOf<Pair<String, String>?>(null) }
+    // 自检轮 3 R3-4：不键 content（与行同寿命）——流式行经打字机每个揭示 tick content
+    // 参数变化，键 content 会把气泡态随打字复位即收（iOS pendingLink=HubMessageRow 行级
+    // @State HubViews.swift，打字机推进不动它、气泡驻留）。本组件挂载点=时间线 items
+    // （key=messageId）行内唯一位置，组合位置即行身份；已知残余面：流式行收敛 final 时
+    // 外层分支切回整段 MarkdownText、组合节点离场气泡随之收（iOS 无此切换）——点开态
+    // (display,url) 不随前缀增长失效是本轮修复面。
+    var pendingLink by remember { mutableStateOf<Pair<String, String>?>(null) }
     val linkBubble = LocalLinkBubbleOwner.current
     val bubbleToken = remember { Any() }
     val onLinkTap: (String, String) -> Unit = { display, url ->
@@ -216,16 +222,18 @@ private val MD_TABLE_CELL_MAX_WIDTH = 480.dp
  * 表格：描边圆角盒 + 表头底色 + 体行分隔线三件视觉锚（自检轮 2 R2-6 对齐 iOS LiteTableView
  * ——外层描边+clipShape MarkdownView.swift:392-393、表头行 surfaceTertiary 底 :381、体行前
  * borderPrimary 1pt 分隔 :383-384；桌面此前无框无边，暗色/宽表边界感弱）。单元格无 maxLines
- * 无 Ellipsis（段落 Text 同款），列对齐随 aligns；超宽表由表级横向滚动兜底（Column 全量
- * 布局在滚动容器内，纵向仍交给时间线）。单元格 span 已于解析期软断行（softBreakSpans）——
+ * 无 Ellipsis（段落 Text 同款），列对齐随 aligns；超宽表由表级横向滚动兜底（全量布局在
+ * 滚动容器内，纵向仍交给时间线）。单元格 span 已于解析期软断行（softBreakSpans）——
  * 连续无空白且不含 CJK 的长 token 每 16 字符可换行（自检轮 2 R2-2 口径，见解析器注）。
- * 列宽测度：Surface/Column 用 IntrinsicSize.Max 取「最宽行」为表宽（窄表贴内容、宽表滚出，
- * 对齐 iOS Grid 内容宽描边），表头底色/分隔线 fillMaxWidth 随表宽满幅——普通 fillMaxWidth
- * 在 wrap 容器内会撑到气泡帽，IntrinsicSize 收口为表内容宽。
- * 成本知情（自检轮 R1-16）：表级 Column/Row 全量组合（非 lazy，iOS LiteTableView 同为非懒
- * 布局既有结构），数百行大表一次性组合全部单元格进 LazyColumn 单行，首现物化可能掉帧
- * （IntrinsicSize 预量测一过性代价同量级）——行内显示与横滑兜底正确性优先，行数帽/懒加载
- * 留待后续轮。
+ * 列轨对齐（自检轮 3 R3-1 重写布局：R2-6 版各行独立测宽、同列跨行边界漂移且表头底/分隔
+ * 线满幅放大错位；旧「IntrinsicSize.Max 取最宽行、对齐 iOS Grid 内容宽描边」只对齐外宽
+ * 未对齐列轨，该表述撤回）：[TableGrid] 镜像 iOS Grid 列轨语义（MarkdownView.swift:374
+ * 列轨宽=跨行最大、cell frame minWidth 64/maxWidth 480 :406）——列轨宽=列内单元格自然宽
+ * 取 max，表头底色盒/分隔线按列轨和满幅铺放。窄表贴内容左对齐（iOS .leading 同口径），
+ * 宽表横向滚出（唯一挂载点 horizontalScroll 恒无界宽，子组合按无界测度）。
+ * 成本知情（自检轮 R1-16）：表级全量组合（非 lazy，iOS LiteTableView 同为非懒布局既有
+ * 结构），数百行大表一次性组合全部单元格进 LazyColumn 单行，首现物化可能掉帧（列轨预量
+ * 测一过性代价同量级）——行内显示与横滑兜底正确性优先，行数帽/懒加载留待后续轮。
  */
 @Composable
 private fun MarkdownTable(
@@ -236,43 +244,130 @@ private fun MarkdownTable(
 ) {
     // 视觉锚取墨水令牌（R2-6；与 iOS c.borderPrimary / c.surfaceTertiary 同源语义，DSK-1 层）
     val ink = LocalDesktopInk.current
-    // 外层 Surface 承担描边+圆角 clip（表头底色不溢出圆角）；横向滚动容器内的 Column/Row
-    // 不 fillMaxWidth（宽表横向滚出），窄表贴内容左对齐（iOS .leading 同口径）
+    // 外层 Surface 承担描边+圆角 clip（表头底色不溢出圆角）；横向滚动容器内不 fillMaxWidth
+    // （宽表横向滚出），窄表贴内容左对齐（iOS .leading 同口径）
     Surface(
         shape = RoundedCornerShape(8.dp),
         color = Color.Transparent,
         border = BorderStroke(1.dp, ink.borderPrimary),
     ) {
         Box(modifier = Modifier.horizontalScroll(rememberScrollState())) {
-            Column(modifier = Modifier.width(IntrinsicSize.Max)) {
-                Row(modifier = Modifier.fillMaxWidth().background(ink.surfaceTertiary)) {
-                    table.header.forEachIndexed { idx, spans ->
-                        MarkdownTableCell(
-                            spans = spans,
-                            align = table.aligns.getOrNull(idx) ?: MdTableAlign.None,
-                            codeTint = codeTint,
-                            accent = accent,
-                            onLinkTap = onLinkTap,
-                            header = true,
-                        )
-                    }
+            TableGrid(
+                table = table,
+                codeTint = codeTint,
+                accent = accent,
+                onLinkTap = onLinkTap,
+            )
+        }
+    }
+}
+
+/**
+ * 列轨对齐表格布局（自检轮 3 R3-1，SubcomposeLayout 两趟测度；唯一挂载点=横向滚动容器，
+ * 恒无界宽测度）：第一趟逐格取无折行自然宽（maxIntrinsicWidth 内含格 padding、不动约束，
+ * 钳 [MD_TABLE_CELL_MIN_WIDTH, MD_TABLE_CELL_MAX_WIDTH]——镜像 iOS cell frame min/max）
+ * 按列取跨行 max 得列轨宽；第二趟每格固定宽=所在列轨宽重测排布——textAlign 需格宽=轨宽
+ * 才能对准列界，R3-1 病根即各行独立测宽做不到这一点。表头底色盒/体行分隔线子组合后按
+ * 表宽（列轨和）满幅测度铺放，每 measurable 恰测度一次。
+ */
+@Composable
+private fun TableGrid(
+    table: MdBlock.Table,
+    codeTint: Color,
+    accent: Color,
+    onLinkTap: (String, String) -> Unit,
+) {
+    val ink = LocalDesktopInk.current
+    SubcomposeLayout {
+        val columnCount = maxOf(table.header.size, table.rows.maxOfOrNull { it.size } ?: 0)
+        if (columnCount == 0) return@SubcomposeLayout layout(0, 0) {}
+        // 全部单元格一次子组合（表头在前、体行按行主序随后——下方两趟索引与此发射序一致）
+        val cells = subcompose("table-cells") {
+            table.header.forEachIndexed { col, spans ->
+                MarkdownTableCell(
+                    spans = spans,
+                    align = table.aligns.getOrNull(col) ?: MdTableAlign.None,
+                    codeTint = codeTint,
+                    accent = accent,
+                    onLinkTap = onLinkTap,
+                    header = true,
+                )
+            }
+            table.rows.forEach { row ->
+                row.forEachIndexed { col, spans ->
+                    MarkdownTableCell(
+                        spans = spans,
+                        align = table.aligns.getOrNull(col) ?: MdTableAlign.None,
+                        codeTint = codeTint,
+                        accent = accent,
+                        onLinkTap = onLinkTap,
+                        header = false,
+                    )
                 }
-                table.rows.forEach { row ->
-                    // 体行前 1pt 分隔线（iOS :383-384 同锚；首条即表头/表体界线）
-                    HorizontalDivider(color = ink.borderPrimary)
-                    Row {
-                        row.forEachIndexed { idx, spans ->
-                            MarkdownTableCell(
-                                spans = spans,
-                                align = table.aligns.getOrNull(idx) ?: MdTableAlign.None,
-                                codeTint = codeTint,
-                                accent = accent,
-                                onLinkTap = onLinkTap,
-                                header = false,
-                            )
-                        }
-                    }
-                }
+            }
+        }
+        // 第一趟列轨测宽：空列兜底最小宽，防畸形表 0 宽轨吞格
+        val minWidthPx = MD_TABLE_CELL_MIN_WIDTH.roundToPx()
+        val maxWidthPx = MD_TABLE_CELL_MAX_WIDTH.roundToPx()
+        val columnWidths = IntArray(columnCount)
+        var idx = 0
+        table.header.forEachIndexed { col, _ ->
+            columnWidths[col] = maxOf(
+                columnWidths[col],
+                cells[idx].maxIntrinsicWidth(0).coerceIn(minWidthPx, maxWidthPx),
+            )
+            idx++
+        }
+        table.rows.forEach { row ->
+            row.forEachIndexed { col, _ ->
+                columnWidths[col] = maxOf(
+                    columnWidths[col],
+                    cells[idx].maxIntrinsicWidth(0).coerceIn(minWidthPx, maxWidthPx),
+                )
+                idx++
+            }
+        }
+        for (col in 0 until columnCount) if (columnWidths[col] == 0) columnWidths[col] = minWidthPx
+        val columnX = IntArray(columnCount)
+        var x = 0
+        for (col in 0 until columnCount) {
+            columnX[col] = x
+            x += columnWidths[col]
+        }
+        val tableWidth = x
+        // 第二趟定轨重测：每格固定宽=所在列轨宽（textAlign 对准列界）；行高=行内格最大高
+        fun track(col: Int) = Constraints(minWidth = columnWidths[col], maxWidth = columnWidths[col])
+        val headerPlaceables = table.header.mapIndexed { col, _ -> cells[col].measure(track(col)) }
+        val headerRowHeight = headerPlaceables.maxOfOrNull { it.height } ?: 0
+        // 表头底色盒：表宽 × 表头行高满幅（R2-6 底色随列轨和收口，不撑气泡帽）
+        val headerBackground = subcompose("table-header-bg") { Box(Modifier.background(ink.surfaceTertiary)) }
+            .single()
+            .measure(Constraints.fixed(tableWidth, headerRowHeight))
+        // 体行前 1pt 分隔线（iOS :383-384 同锚；首条即表头/表体界线）按表宽满幅
+        val dividers = table.rows.mapIndexed { r, _ ->
+            subcompose("table-divider-$r") { HorizontalDivider(color = ink.borderPrimary) }
+                .single()
+                .measure(Constraints.fixedWidth(tableWidth))
+        }
+        var cursor = table.header.size
+        val bodyRows = table.rows.map { row ->
+            val rowCells = Array(row.size) { col -> cells[cursor + col].measure(track(col)) }
+            cursor += row.size
+            rowCells
+        }
+        var totalHeight = headerRowHeight
+        bodyRows.forEachIndexed { r, rowCells ->
+            totalHeight += dividers[r].height + (rowCells.maxOfOrNull { it.height } ?: 0)
+        }
+        return@SubcomposeLayout layout(tableWidth, totalHeight) {
+            headerBackground.placeRelative(0, 0)
+            headerPlaceables.forEachIndexed { col, placeable -> placeable.placeRelative(columnX[col], 0) }
+            var y = headerRowHeight
+            bodyRows.forEachIndexed { r, rowCells ->
+                dividers[r].placeRelative(0, y)
+                y += dividers[r].height
+                rowCells.forEachIndexed { col, placeable -> placeable.placeRelative(columnX[col], y) }
+                y += rowCells.maxOfOrNull { it.height } ?: 0
             }
         }
     }
@@ -512,12 +607,24 @@ internal val LocalLinkBubbleOwner = staticCompositionLocalOf { LinkBubbleOwner()
  * 反而打开即抢键盘焦点——composer 输入中点链接会失焦、后续键入落入气泡窗口、气泡在途期间
  * 根级时间线键盘导航收不到键，故关掉（气泡内无键盘交互面，两按钮纯点击）。
  * 锚定=挂载点父布局底部居中（首版退化行内锚，视觉细节实机走查项——知情注释）。
+ * 动作回执（自检轮 3 R3-2 对齐 iOS LinkActionBubble HubViews.swift:3213-3215/:3225-3249）：
+ * 复制 → 标签翻「已复制」且气泡驻留；打开失败（browse 抛异常=系统无可达 handler）→ 行内
+ * 「无法打开」降级文案驻留——此前两动作后立即 onDismiss 且 openUri 异常被吞（打开失败
+ * 静默），反馈口径与 iOS 不一致；打开成功 iOS open completion true 同为无回执面，气泡
+ * 驻留待关闭动作。回执态与 Popup 同生命周期（离组合即回默认，iOS 行重建同向）。
+ * 关闭面双端知情差异（自检轮 3 R3-3/R3-10，与 HubViews.swift:3048-3051 互锚注释）：
+ * 桌面=Popup 外点即关（点他行/composer/任意窗外点都收）；iOS=行域三路收起（行内空白
+ * 关闭层/胶囊空白/换链接重建），他行点按、收键盘 tap 与滚动不收——既定行域设计不对齐，
+ * 防后续轮当 bug 误修。
  */
 @Composable
 internal fun LinkActionPopup(displayUrl: String, normalizedUrl: String?, onDismiss: () -> Unit) {
     val ink = LocalDesktopInk.current
     val uriHandler = LocalUriHandler.current
     val clipboard = LocalClipboardManager.current
+    // 动作回执态（R3-2）：点按后气泡驻留不闪收，复制/打开失败皆有行内落点
+    var copied by remember { mutableStateOf(false) }
+    var openFailed by remember { mutableStateOf(false) }
     Popup(
         onDismissRequest = onDismiss,
         properties = PopupProperties(focusable = false),
@@ -541,8 +648,10 @@ internal fun LinkActionPopup(displayUrl: String, normalizedUrl: String?, onDismi
                 Row {
                     TextButton(
                         onClick = {
-                            normalizedUrl?.let { url -> runCatching { uriHandler.openUri(url) } }
-                            onDismiss()
+                            // 打开失败不再静默（R3-2）：browse 异常=系统无可达 handler，行内降级文案
+                            normalizedUrl?.let { url ->
+                                runCatching { uriHandler.openUri(url) }.onFailure { openFailed = true }
+                            }
                         },
                         enabled = normalizedUrl != null,
                         contentPadding = PaddingValues(horizontal = 8.dp),
@@ -550,10 +659,18 @@ internal fun LinkActionPopup(displayUrl: String, normalizedUrl: String?, onDismi
                     TextButton(
                         onClick = {
                             clipboard.setText(AnnotatedString(normalizedUrl ?: displayUrl))
-                            onDismiss()
+                            copied = true
                         },
                         contentPadding = PaddingValues(horizontal = 8.dp),
-                    ) { Text("复制", fontSize = 12.sp) }
+                    ) { Text(if (copied) "已复制" else "复制", fontSize = 12.sp) }
+                    if (openFailed) {
+                        Text(
+                            "无法打开",
+                            fontSize = 11.sp,
+                            color = ink.dangerText,
+                            modifier = Modifier.padding(start = 4.dp),
+                        )
+                    }
                 }
             }
         }

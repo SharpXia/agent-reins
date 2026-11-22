@@ -32,7 +32,8 @@ private let volatileQueryKeys: Set<String> = [
 ]
 
 /// 剥离时效/签名 query 参数后的归一 URL 串。无 query 或无参数命中白名单时原样返回
-///（不重排——保持与旧内存键一致性，读侧零成本）。解析失败原样返回（退化不命中）。
+///（不重排——无参数被剥离时键不变，既有缓存条目零失效；自检轮 R3-8 起内存键亦同此键，
+/// 原「内存键=原串」口径已撤）。解析失败原样返回（退化不命中）。
 func stableCacheKey(_ raw: String) -> String {
     guard var comps = URLComponents(string: raw),
           let queryItems = comps.queryItems, !queryItems.isEmpty else { return raw }

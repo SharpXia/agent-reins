@@ -1921,12 +1921,13 @@ struct HubChatView: View {
 
 /// pending 附件预览区（v1.3 发送链，TG 同款输入框上方缩略图行）：预览缩略图 + 状态角标
 ///（上传中 spinner / 失败 ⚠ 可点重试 / ✕ 撤除）。点缩略图（非失败态）= openPendingPreview
-/// 查看器接入点（HubChatView TODO 标注）。草稿槽本体在 HubStore 会话草稿层，本行只读渲染。
+/// 查看器接入点（HubChatView 挂载点经 onOpenPreview 上抛）。草稿槽本体在 HubStore 会话
+/// 草稿层，本行只读渲染。
 private struct DraftAttachmentChipsRow: View {
     let drafts: [DraftAttachment]
     let onRemove: (UUID) -> Void
     let onRetry: (UUID) -> Void
-    /// 点缩略图回调（参数 = 草稿序 index；查看器接线 TODO 在 HubChatView.openPendingPreview）。
+    /// 点缩略图回调（参数 = 草稿序 index；宿主实现 = HubChatView.openPendingPreview）。
     let onOpenPreview: (Int) -> Void
     @Environment(\.inkColors) private var ink
 
@@ -3044,6 +3045,10 @@ private final class ScrollProbeBox {
                 // HubChatView 时间线收键盘 tap（同一 tap 单消费者）。自检轮 R2-1/R2-15：门与
                 // 互斥坑位对齐——被他行夺坑的行（bubbleActive=false）不再挂本层，残行 tap
                 // 落回时间线（收键盘）而不会误清当前活跃行的坑位。
+                // 关闭面双端知情差异（自检轮 R3-3/R3-10，既定行域设计不对齐）：iOS 收起仅
+                // 行域三路（本关闭层/胶囊空白/换链接重建），他行点按、收键盘 tap 与滚动不收，
+                // 行出视口随 LazyVStack 重建而消；桌面为 Popup 外点即关（MarkdownText.kt
+                // onDismissRequest）。桌面侧同轮互锚注释，防后续轮当 bug 误修。
                 .background {
                     if pendingLink != nil, bubbleActive {
                         Color.clear

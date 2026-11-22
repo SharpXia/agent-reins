@@ -2353,13 +2353,13 @@ private struct ComposerTextView: UIViewRepresentable {
                 )
             case .upArrow:
                 guard panelVisible else { return false } // 面板隐藏放行默认（光标上移）
-                ComposerKeyRouter.routeArrowTab(
+                _ = ComposerKeyRouter.routeArrowTab(
                     .up, onMoveHighlight: onMoveHighlight, onTabComplete: onTabComplete
                 )
                 return true
             case .downArrow:
                 guard panelVisible else { return false } // 面板隐藏放行默认（光标下移）
-                ComposerKeyRouter.routeArrowTab(
+                _ = ComposerKeyRouter.routeArrowTab(
                     .down, onMoveHighlight: onMoveHighlight, onTabComplete: onTabComplete
                 )
                 return true
@@ -2381,8 +2381,13 @@ private struct ComposerTextView: UIViewRepresentable {
         init(_ parent: ComposerTextView) { self.parent = parent }
 
         func textViewDidChange(_ textView: UITextView) {
-            parent.text.wrappedValue = textView.text
+            // IME 组合期（marked text 未上屏）不同步草稿：未确认拼音不进会话草稿层、不点亮
+            // 发送键，与键位路由的 markedTextRange 门同一让行口径（2026-11-22 复核 low 清账）。
+            // 高度照刷——组合文本同样占版面；提交/取消组合后会再回调一次（届时 marked 为
+            // 空），终值不丢。
             (textView as? ComposerTextViewBase)?.refreshHeight()
+            guard textView.markedTextRange == nil else { return }
+            parent.text.wrappedValue = textView.text
         }
 
         func textViewDidBeginEditing(_ textView: UITextView) {

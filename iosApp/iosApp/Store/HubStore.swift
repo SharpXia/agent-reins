@@ -673,7 +673,8 @@ final class HubStore {
     /// 自动水合，已水合的调用点一律不拉，2026-11-22 修复轮消除陈旧快照竞速触发源，见
     /// ConversationAvatarSheet.onAppear 注）。失败 os_log 留痕不落表（整体替换语义下把
     /// null 落表会把已水合镜像整体退回未水合——错误路径宁保现值，下个 sync.ready 自愈）；
-    /// 成功响应已整体替换落 shared 流，订阅侧自动收帧，本回调不另带数据。
+    /// 成功时回调交付的是 shared 流收敛后的现值（#32/#33 写水位守卫后逐键合并），此处
+    /// apply 与订阅推帧同值幂等，只作未水合→已水合切换瞬间的兜底落表，不引入回滚。
     func refreshConversationAvatarProfiles() {
         bridge.hubGetConversationAvatarProfiles { [weak self] mapJson, error in
             guard let self else { return }

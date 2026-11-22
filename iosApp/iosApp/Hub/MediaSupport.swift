@@ -111,11 +111,13 @@ enum MediaIdCheck {
     }
 }
 
-// ── hub 媒体加载器（端点 #24 Bearer 分支；NSCache + 在途去重） ──
+// ── hub 媒体加载器（端点 #24 Bearer 分支；内存 NSCache + 磁盘 MediaDiskCache + 在途去重） ──
 
-/// 消息行图片内存加载器：唯一取数通道 = HubStore.shared.fetchMedia（KMP withBearer 内圈，
-/// Swift 层零凭据）。字节仅在解码窗口内存持有（设计稿 §6/§2.4：不落盘持久化，NSCache 只存
-/// 解码后 UIImage，进程级自然回收）；同 mediaId 并发去重（LazyVStack 多行物化同时触发）。
+/// 消息行图片加载器：网络取数唯一通道 = HubStore.shared.fetchMedia（KMP withBearer 内圈，
+/// Swift 层零凭据）。缓存三级（需求4 2026-11-23 批次一）：内存 NSCache（解码后 UIImage，
+/// countLimit 96 进程级自然回收）+ 磁盘原始字节缓存（MediaDiskCache，键 = mediaId——服务端
+/// ULID 句柄稳定；NSCache 驱逐/进程重启后行内不再重下原图）+ #24 网络；同 mediaId 并发去重
+///（LazyVStack 多行物化同时触发）。
 @MainActor
 final class HubMediaLoader {
     static let shared = HubMediaLoader()
@@ -132,12 +134,29 @@ final class HubMediaLoader {
         if let running = inflight[mediaId] { return await running.value }
         let task = Task<UIImage?, Never> { [weak self] () -> UIImage? in
             guard let self, MediaIdCheck.isUlid(mediaId) else { return nil }
-            let image: UIImage? = await withCheckedContinuation { continuation in
+            // 磁盘命中路径：磁盘 IO 与解码下放 utility detached（本任务体继承 @MainActor，
+            // 重活显式离主线程）——命中即回填 NSCache，与网络路径共享同一解码口径（2048 帽）。
+            let diskImage: UIImage? = await Task.detached(priority: .utility) { () -> UIImage? in
+                guard let raw = MediaDiskCache.shared.data(forKey: mediaId) else { return nil }
+                return MediaImageProcessing.decodeForDisplay(raw)
+            }.value
+            if let diskImage {
+                self.cache.setObject(diskImage, forKey: mediaId as NSString)
+                self.inflight[mediaId] = nil
+                return diskImage
+            }
+            let raw: Data? = await withCheckedContinuation { continuation in
                 HubStore.shared.fetchMedia(mediaId: mediaId) { data, _ in
                     // 失败（error 非 nil）与 nil 数据同归 nil——调用方只分「有图/失败」两态
-                    continuation.resume(returning: data.flatMap { MediaImageProcessing.decodeForDisplay($0) })
+                    continuation.resume(returning: data)
                 }
             }
+            // 网络命中路径：原始字节先落盘（MediaDiskCache，键 = mediaId）再解码回填 NSCache；
+            // 查看器/拷贝图片走同一 loader，磁盘层零重复下载。
+            let image: UIImage? = await Task.detached(priority: .utility) { () -> UIImage? in
+                if let raw { MediaDiskCache.shared.store(raw, forKey: mediaId) }
+                return raw.flatMap { MediaImageProcessing.decodeForDisplay($0) }
+            }.value
             if let image { self.cache.setObject(image, forKey: mediaId as NSString) }
             self.inflight[mediaId] = nil
             return image
@@ -150,6 +169,8 @@ final class HubMediaLoader {
 
 // ── 外部 URL 图片加载器（source=external https；无鉴权头，ATS 默认拦 http——http 由视图降级 chip） ──
 
+/// 外链图片加载器：URLSession 直拉（无鉴权头）；缓存三级同 HubMediaLoader 口径
+///（需求4 2026-11-23 批次一），磁盘键 = stableCacheKey(URL)、内存键 = 原始 URL 串。
 @MainActor
 final class RemoteImageLoader {
     static let shared = RemoteImageLoader()
@@ -162,13 +183,32 @@ final class RemoteImageLoader {
     }
 
     func image(for url: URL) async -> UIImage? {
+        // 需求4（2026-11-23 批次一，复核 B6 对锁）：磁盘缓存键 = stableCacheKey——剥离已知
+        // 时效/签名 query 参数并重排序归一，签名窗轮转不换键；白名单外参数全保留（未知签名
+        // 退化为不命中而非错命中）。内存缓存键沿用原串（进程内无需跨签名归一）。
         let key = url.absoluteString
+        let diskKey = stableCacheKey(key)
         if let hit = cache.object(forKey: key as NSString) { return hit }
         if let running = inflight[key] { return await running.value }
         let task = Task<UIImage?, Never> { [weak self] () -> UIImage? in
             guard let self else { return nil }
+            // 磁盘命中路径（磁盘 IO 与解码 utility detached 离主线程，同 HubMediaLoader 口径）。
+            let diskImage: UIImage? = await Task.detached(priority: .utility) { () -> UIImage? in
+                guard let raw = MediaDiskCache.shared.data(forKey: diskKey) else { return nil }
+                return MediaImageProcessing.decodeForDisplay(raw)
+            }.value
+            if let diskImage {
+                self.cache.setObject(diskImage, forKey: key as NSString)
+                self.inflight[key] = nil
+                return diskImage
+            }
             let fetched = try? await URLSession.shared.data(from: url)
-            let image = (fetched?.0).flatMap { MediaImageProcessing.decodeForDisplay($0) }
+            let raw = fetched?.0
+            // 网络命中路径：原始字节先落盘（键 = stableCacheKey）再解码回填 NSCache。
+            let image: UIImage? = await Task.detached(priority: .utility) { () -> UIImage? in
+                if let raw { MediaDiskCache.shared.store(raw, forKey: diskKey) }
+                return raw.flatMap { MediaImageProcessing.decodeForDisplay($0) }
+            }.value
             if let image { self.cache.setObject(image, forKey: key as NSString) }
             self.inflight[key] = nil
             return image
@@ -194,9 +234,9 @@ struct MessageAttachmentView: View {
         if attachment.source == "hub", let mediaId = attachment.mediaId {
             HubMediaThumbnail(mediaId: mediaId, fileName: attachment.fileName)
                 .contextMenu {
-                    // UxPlan item4（评审修正⑦(b)）：拷贝图片——走 HubMediaLoader（NSCache 命中
-                    // 或 #24 重取后解码，MediaSupport.swift:119-149），不是压缩管线
-                    //（:32-74 为上传前 MediaImageProcessing，不持展示位图）。
+                    // UxPlan item4（评审修正⑦(b)）：拷贝图片——走 HubMediaLoader（NSCache/磁盘
+                    // 命中或 #24 重取后解码，MediaSupport.swift:116-167），不是压缩管线
+                    //（:44-102 为上传前 MediaImageProcessing，不持展示位图）。
                     // 双平台生效：iOS 长按同款，作为有意接受的 iOS 增益（与会话行右键同决策）。
                     Button {
                         Task { @MainActor in

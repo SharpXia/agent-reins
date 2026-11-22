@@ -2850,6 +2850,10 @@ private final class ScrollProbeBox {
     /// 共用——附件图片块（含 Markdown 图块）点按上抛，查看器本体在 ImageViewer.swift。
     let onOpenImages: ([ImageViewerPage], Int) -> Void
     @State private var hub = HubStore.shared
+    /// 需求3（2026-11-23 批次一）：在途链接动作气泡——正文 Text 的 .link run 与 Link 视图
+    /// 点击经 openURL 环境拦截置此（不再直开浏览器），气泡呈「打开/复制」两动作；点行内
+    /// 空白（关闭层）置 nil 收起。行级 @State，行随 LazyVStack 物化重建即回 nil。
+    @State private var pendingLink: URL?
     @Environment(\.inkColors) private var ink
 
     /// 会话活跃 run 现值（liveSelected 列表现值，同 Stop 态 wp-8② 口径）：僵尸流式行门控共用
@@ -2911,7 +2915,10 @@ private final class ScrollProbeBox {
                             // v1.2.0 多模态：空正文 + 有附件（纯图消息）不再落「…」占位——媒体
                             // 由下方 attachmentsRow 渲染，文本段整段省略。
                             if !m.content.isEmpty {
+                                // 需求2（2026-11-23 批次一）：用户气泡正文可选中——长按出系统
+                                // 选择游标局部复制（触屏侧行菜单已迁行脚注，无长按手势竞争）。
                                 Text(m.content)
+                                    .textSelection(.enabled)
                             } else if m.attachments.isEmpty {
                                 Text("…")
                                     .foregroundStyle(Color.secondary)
@@ -2984,8 +2991,18 @@ private final class ScrollProbeBox {
                             messageTimeLabel
                             statusBadge
                         }
+                        // 需求2（2026-11-23 批次一）：行菜单触屏侧迁挂行脚注时间戳行——正文
+                        // textSelection 长按选择与 contextMenu 长按同手势竞争，长按正文让位
+                        // 系统选择菜单（含原生局部拷贝），长按行脚注出行菜单（拷贝全文/重发/
+                        // 删除本地消息）。Catalyst 正文右键菜单保留（下方 #if），此处不重复挂。
+                        #if !targetEnvironment(macCatalyst)
+                        .contextMenu { messageContextMenu }
+                        #endif
                     } else {
                         messageTimeLabel
+                            #if !targetEnvironment(macCatalyst)
+                            .contextMenu { messageContextMenu }
+                            #endif
                     }
                     if let reason = failedReasonLabel {
                         // wp-8③：失败原因（wp-5 双路径共列 reason：事件路径 message.failed.reason =
@@ -2997,17 +3014,47 @@ private final class ScrollProbeBox {
                 }
                 // 评审补充项（原清单遗漏）：宽窗气泡/正文 maxWidth 帽——Mac 全屏 ~1500pt+
                 // 下长回复一行拉满全宽是首屏即撞的观感坑。640pt 帽 Catalyst-only（iPad 布局
-                // 不动，硬边界）；alignment 保住用户行右贴/助手行左贴的原有落位。
+                // 不动，硬边界）；alignment 保住用户行右贴/助手行左贴的原有落位。行菜单
+                // Catalyst 保留在正文（右键与鼠标拖拽选择无手势竞争）；触屏侧迁行脚注（上方）。
                 #if targetEnvironment(macCatalyst)
                 .frame(maxWidth: 640, alignment: m.role == "user" ? .trailing : .leading)
-                #endif
                 .contextMenu { messageContextMenu }
+                #endif
+                // 需求3（2026-11-23 批次一）关闭层（铺在内容层之下）：气泡在途时点行内空白 =
+                // 关闭气泡——background 层只命中主内容未吃掉的 tap（行内空白区），不遮正文：
+                // 链接 tap 由 openURL 环境在内容层先接管、图块开查看器 onTapGesture 内容层先
+                // 命中、textSelection 长按与 tap 不同手势均不受干扰。知情：该 tap 不再上传
+                // HubChatView 时间线收键盘 tap（同一 tap 单消费者）。
+                .background {
+                    if pendingLink != nil {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .onTapGesture { pendingLink = nil }
+                    }
+                }
+                // 需求3：链接点击拦截——openURL 环境覆盖正文全部链接面（Text 的 .link run =
+                // Foundation 解析 + autolink 两路、ExternalLinkChip 与卡内 Link 视图）：
+                // 点击不再直开浏览器，置 pendingLink 出动作气泡（LinkActionBubble）。登录/
+                // 设置页等非消息面在本作用域外不受影响。
+                .environment(\.openURL, OpenURLAction { url in
+                    pendingLink = url
+                    return .handled
+                })
+                // 需求3：动作气泡锚行内脚注侧（助手行左下/用户行右下）——overlay 不裁剪，
+                // 窄内容行气泡外溢悬浮（胶囊自带描边阴影）。
+                .overlay(alignment: m.role == "user" ? .bottomTrailing : .bottomLeading) {
+                    if let url = pendingLink {
+                        LinkActionBubble(url: url)
+                    }
+                }
+                .animation(.easeInOut(duration: 0.15), value: pendingLink)
                 if m.role != "user" { Spacer(minLength: 40) }
             }
         }
     }
 
-    // ── wp-8①：长按菜单（拷贝全文 / 失败行重发） ──
+    // ── wp-8①：行菜单（拷贝全文 / 失败行重发）——挂载点分叉见上方正文 #if 与行脚注
+    //（需求2 批次一：Catalyst=正文右键、触屏=长按行脚注；菜单本体不变） ──
 
     /// 消息时间标签（formatMessageTimeISO 解析失败/缺省 → 空视图，不占位）。
     @ViewBuilder
@@ -3096,6 +3143,64 @@ private final class ScrollProbeBox {
             }
         }
         .foregroundStyle(.secondary)
+    }
+}
+
+/// 需求3（2026-11-23 批次一）：链接动作气泡——消息内链接点击经 openURL 环境拦截（不再直开
+/// 浏览器），就地出小胶囊卡：URL 单行 middle 截断预览 +「打开」「复制」两动作。呈现跟随
+/// HubMessageRow 行脚注侧（助手 bottomLeading/用户 bottomTrailing）；收起 = 点行内空白
+/// （关闭层置 pendingLink = nil）或点另一链接换目标。
+private struct LinkActionBubble: View {
+    let url: URL
+    @Environment(\.inkColors) private var c
+    /// 复制动作瞬时回执（按钮标签翻转一拍，不做自动复位计时——行随物化重建即回默认态）。
+    @State private var copied = false
+    /// UIApplication.open completion false = 系统无可达 handler（无法打开），气泡内小字降级。
+    @State private var openFailed = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(url.absoluteString)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            HStack(spacing: 12) {
+                Button {
+                    UIApplication.shared.open(url) { ok in
+                        if !ok { openFailed = true }
+                    }
+                } label: {
+                    Label("打开", systemImage: "arrow.up.right")
+                        .font(.caption)
+                        .foregroundStyle(c.accent)
+                }
+                .buttonStyle(.plain)
+                Button {
+                    UIPasteboard.general.string = url.absoluteString
+                    copied = true
+                } label: {
+                    Label(copied ? "已复制" : "复制", systemImage: copied ? "checkmark" : "doc.on.doc")
+                        .font(.caption)
+                        .foregroundStyle(copied ? c.textSecondary : c.accent)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("复制链接")
+                if openFailed {
+                    Text("无法打开")
+                        .font(.caption2)
+                        .foregroundStyle(c.dangerText)
+                }
+            }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        // 宽度帽：预览单行 middle 截断的合理区间（窄内容行 overlay 提案小，minWidth 保底可读）。
+        .frame(minWidth: 200, maxWidth: 300, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(c.surfaceTertiary))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(c.borderPrimary, lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
+        .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .bottom)))
+        .accessibilityElement(children: .contain)
     }
 }
 

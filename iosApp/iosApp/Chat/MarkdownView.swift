@@ -282,6 +282,12 @@ private struct LiteMarkdownBody: View, Equatable {
         // 失去链接区分度——本作用域钉 accent 令牌恢复区分度（明暗实测对比度见
         // InkColors.accent 注释；外层 .foregroundColor 不改 .link run 的着色来源）。
         .tint(c.accent)
+        // 需求2（2026-11-23 批次一）：正文可选中——环境传播一处覆盖本 Group 全部 Text 宿主
+        //（快路径 Text(verbatim:)/单段落/列表项/quote/表格 cell/JSON 卡文本；流式行经
+        // StreamingTypewriter 内部 MarkdownView 同达）。长按出系统选择游标、局部复制走系统
+        // 菜单；行级 contextMenu 在触屏侧已迁行脚注时间戳（HubMessageRow 注）避免长按手势
+        // 竞争，Catalyst 正文右键菜单保留。用户气泡 Text(m.content)（HubMessageRow）单独挂。
+        .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
@@ -352,9 +358,13 @@ private struct LiteTableView: View {
     let header: [AttributedString]
     let rows: [[AttributedString]]
 
-    /// #5（2026-11-07 UX 轮）：单元格最大宽度——超出即换行，超长不可断词（URL/哈希）不截断
-    /// （横向滚动兜底可见），替代原 maxWidth:.infinity 均分列宽导致的「…」截断。
-    private static let maxCellWidth: CGFloat = 280
+    /// #5（2026-11-07 UX 轮）+ 需求1（2026-11-23 批次一）：单元格最大宽度。280 时代注释自称
+    /// 「超长不可断词（URL/哈希）不截断（横向滚动兜底可见）」与实情相悖——列宽被 280pt 钳死，
+    /// SwiftUI Text 对无空白不可断词 token（URL/哈希）拆不出断点，只能尾部「…」截断（需求方
+    /// 复现的缩略形态；只读核实代码内唯一宽度约束即本帽）。现口径 = 双保险：帽内换行 + 零宽
+    /// 空格软断行（softBreakLongTokens，cell 渲染期转换）永不产生省略号；超气泡表仍由外层
+    /// 横向 ScrollView（body 内）兜底横滑看全。
+    private static let maxCellWidth: CGFloat = 480
 
     var body: some View {
         let columns = max(header.count, rows.map(\.count).max() ?? 0)
@@ -386,7 +396,10 @@ private struct LiteTableView: View {
     }
 
     private func cell(_ s: AttributedString, bold: Bool) -> some View {
-        Text(s)
+        // 需求1（2026-11-23 批次一）：渲染期软断行——超长不可断词 token（URL/哈希）插零宽
+        // 空格给 Text 可断点，帽内换行完整呈现；只作用表格 cell，不进 LiteMarkdownCache
+        // 解析产物（正文快路径/块 Text/Equatable 隔离层均不受影响）。
+        Text(LiteMarkdownParser.softBreakLongTokens(s))
             .font(.system(size: 14, weight: bold ? .semibold : .regular))
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
@@ -548,6 +561,58 @@ enum LiteMarkdownParser {
         }
         for range in codeRanges {
             out[range][AttributeScopes.SwiftUIAttributes.BackgroundColorAttribute.self] = Color.primary.opacity(0.08)
+        }
+        return out
+    }
+
+    /// 需求1（2026-11-23 批次一）表格单元格软断行：连续无空白、无 U+200B 的超长 token
+    /// （URL/哈希/ULID——SwiftUI Text 拆不出词内断点，帽内放不下即尾部「…」）每 16 字符插
+    /// 一个 U+200B 零宽空格给出换行断点，视觉不可见、Text 可在断点折行，单元格「帽内换行 +
+    /// 外层横滑兜底」永不产生省略号。只作用表格 cell 渲染期（LiteTableView.cell），不进
+    /// LiteMarkdownCache 解析产物。知情取舍：textSelection 选中复制会带上零宽字符（批次一
+    /// 风险④ 接受）。阈值 24（更短 token 折行伤观感）、步距 16（帽 480pt 内的安全断距）。
+    static func softBreakLongTokens(_ s: AttributedString) -> AttributedString {
+        let threshold = 24
+        let stride = 16
+        let zwsp: Character = "\u{200B}"
+        let chars = Array(s.characters)
+        // 第一遍：字符级扫 token（空白/换行/ZWSP 视作断点重置），token 超阈值时记下
+        // 每 16 字符处的全局插入位（token 末位除外，不在词尾留断点）。
+        var insertAt = Set<Int>()
+        var tokenStart: Int?
+        for (i, ch) in chars.enumerated() {
+            if ch.isWhitespace || ch == zwsp {
+                if let start = tokenStart {
+                    var p = start + stride
+                    while p < i {
+                        if i - start > threshold { insertAt.insert(p) }
+                        p += stride
+                    }
+                }
+                tokenStart = nil
+            } else if tokenStart == nil {
+                tokenStart = i
+            }
+        }
+        if let start = tokenStart, chars.count - start > threshold {
+            var p = start + stride
+            while p < chars.count { insertAt.insert(p); p += stride }
+        }
+        guard !insertAt.isEmpty else { return s }
+        // 第二遍：逐 run 重建（插入位属性随所在 run 保留——attributes 取自 Run，文本取自
+        // s[run.range] 切片），跨 run 的 token 由全局下标对齐插入位。幂等：ZWSP 本身是断点，
+        // 重入不再叠加插入。
+        var out = AttributedString()
+        var offset = 0
+        for run in s.runs {
+            let slice = s[run.range]
+            var piece = ""
+            for ch in slice.characters {
+                if insertAt.contains(offset) { piece.append(zwsp) }
+                piece.append(ch)
+                offset += 1
+            }
+            out += AttributedString(piece, attributes: run.attributes)
         }
         return out
     }

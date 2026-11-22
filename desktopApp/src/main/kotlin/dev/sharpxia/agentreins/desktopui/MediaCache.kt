@@ -35,11 +35,13 @@ import org.jetbrains.skia.SamplingMode
  *   drawImageRect 缩放（行内显示帽 MD_IMAGE_MAX_HEIGHT=320dp，全分辨率解码无收益）；
  * - 磁盘：文件名 = sha256hex([stableCacheKey])；命中 touch mtime；trim 按
  *   Files.getLastModifiedTime 升序删（Windows 卷可能关 atime，时间戳口径统一 mtime）；
- *   容量帽 [DEFAULT_DISK_CAP_BYTES]=256MB 写后惰性触发；
+ *   容量帽 [DEFAULT_DISK_CAP_BYTES]=256MB 写后惰性触发，双门节流（32 次写或净增 16MB 才
+ *   全目录扫一次——自检轮 R1-15 对锁 iOS MediaDiskCache 同参数）；
  * - 网络：HttpURLConnection connectTimeout 8s / readTimeout 15s + UA 头（修旧 openStream
  *   无超时无 UA）；同 key 在途 [MediaCacheStore.load] Deferred 合流（LazyColumn 重挂载
  *   风暴同 URL 只发一次请求）；
- * - 键归一（复核 B6 对锁）：[stableCacheKey] 与 iOS MediaDiskCache 同一时效/签名参数闭集
+ * - 键归一（复核 B6 对锁；2026-11-23 自检轮 R1-2/R1-10/R1-20 取并集对齐 iOS，见
+ *   [STRIP_QUERY_PARAMS] 注）：[stableCacheKey] 与 iOS MediaDiskCache 同一时效/签名参数闭集
  *   白名单剥离 + query 重排序——同 URL 带刷新签名参数命中同一文件；白名单外参数全保留
  *   （未知签名参数退化为不命中而非错命中，单端增删白名单必须双端同步）；
  * - 写盘走自带 SupervisorJob+Dispatchers.IO 独立作用域：调用方（LaunchedEffect）随行离屏
@@ -102,7 +104,7 @@ internal class MediaCacheStore(
             runCatching {
                 dir.mkdirs()
                 fileFor(key).writeBytes(bytes)
-                trimDiskIfOverCap()
+                trimDiskIfOverCapThrottled(bytes.size.toLong())
             }
         }
         return bitmap
@@ -148,7 +150,34 @@ internal class MediaCacheStore(
         bitmap.asComposeImageBitmap()
     }.getOrNull()
 
-    /** 磁盘惰性 trim：总量超 [capBytes] 才触发，mtime 升序删至回帽内。 */
+    /** trim 双门计数器（写盘路径专用；diskLock 内读写——writeScope 是 IO 多线程）。 */
+    private var writesSinceTrimScan = 0
+    private var bytesAddedSinceTrimScan = 0L
+
+    /**
+     * 写盘后 trim 触发（双门节流，自检轮 R1-15 对锁 iOS MediaDiskCache.trimScanWriteInterval/
+     * trimScanBytesDelta——距上次全扫累计 ≥[TRIM_SCAN_WRITE_INTERVAL] 次写或净增
+     * ≥[TRIM_SCAN_BYTES_DELTA] 才真正全目录扫一次）：帽内大量小缩略图时写路径不再每写付
+     * O(n) 全目录枚举+求和+排序代价。超帽清理至多延迟到下一门开（临时超帽 ≤16MB 量级，LRU
+     * 语义不变）；重写同键按净增上界计（文件替换不做差量账），触发略偏保守无害。
+     * 双端参数须一致（iOS 同轮对齐）。
+     */
+    private fun trimDiskIfOverCapThrottled(addedBytes: Long) {
+        synchronized(diskLock) {
+            writesSinceTrimScan += 1
+            bytesAddedSinceTrimScan += addedBytes
+            if (writesSinceTrimScan < TRIM_SCAN_WRITE_INTERVAL &&
+                bytesAddedSinceTrimScan < TRIM_SCAN_BYTES_DELTA
+            ) {
+                return
+            }
+            writesSinceTrimScan = 0
+            bytesAddedSinceTrimScan = 0
+            trimDiskIfOverCap() // diskLock 可重入，直进全扫
+        }
+    }
+
+    /** 磁盘惰性 trim：总量超 [capBytes] 才触发，mtime 升序删至回帽内（写盘路径经 [trimDiskIfOverCapThrottled] 节流）。 */
     fun trimDiskIfOverCap() {
         synchronized(diskLock) {
             val files = dir.listFiles() ?: return
@@ -172,8 +201,14 @@ internal class MediaCacheStore(
 /** 内存帽 96MB（复核 B5 对锁：一张 12MP RGBA≈48MB，全分辨率位图池可达 GB 级）。 */
 internal const val DEFAULT_MEMORY_CAP_BYTES: Long = 96L * 1024 * 1024
 
-/** 磁盘帽 256MB，写后惰性 trim。 */
+/** 磁盘帽 256MB，写后惰性 trim（双门节流，见 MediaCacheStore.trimDiskIfOverCapThrottled 注）。 */
 internal const val DEFAULT_DISK_CAP_BYTES: Long = 256L * 1024 * 1024
+
+/** trim 扫描节流双门（自检轮 R1-15，与 iOS MediaDiskCache.trimScanWriteInterval 同值对锁：双端参数须一致）。 */
+internal const val TRIM_SCAN_WRITE_INTERVAL = 32
+
+/** trim 扫描节流净增门（与 iOS MediaDiskCache.trimScanBytesDelta 16MB 同值对锁）。 */
+internal const val TRIM_SCAN_BYTES_DELTA: Long = 16L * 1024 * 1024
 
 /** 解码降采样帽（与 iOS MediaSupport.decodeForDisplay 2048 同值对锁）。 */
 internal const val DEFAULT_MAX_PIXEL: Int = 2048
@@ -226,13 +261,18 @@ internal fun stableCacheKey(raw: String): String {
     return if (params.isEmpty()) base + fragment else base + "?" + params.joinToString("&") + fragment
 }
 
-/** 时效/签名参数白名单（key 小写比对；闭集与 iOS MediaDiskCache 对锁）。 */
+/**
+ * 时效/签名参数白名单（key 小写比对；闭集与 iOS MediaDiskCache.volatileQueryKeys 对锁——
+ * 自检轮 R1-2/R1-10/R1-20 起取并集对齐：本侧补 x-amz-security-token/oss-access-key-id/
+ * oss-security-token，iOS 侧补 oss-expires_at。单端增删必须双端同步改，否则同 URL 两端
+ * 归一键漂移；测试 fixture 与 iOS 侧同清单互锚，见 MediaCacheTest）。
+ */
 private val STRIP_QUERY_PARAMS = setOf(
     "expires", "expire", "expiry", "expires_at", "expiresat",
     "x-amz-date", "x-amz-expires", "x-amz-signature", "x-amz-credential",
-    "x-amz-algorithm", "x-amz-signedheaders",
+    "x-amz-algorithm", "x-amz-signedheaders", "x-amz-security-token",
     "signature", "sig", "token", "access_token",
-    "oss-expires", "oss-signature", "oss-expires_at",
+    "oss-expires", "oss-signature", "oss-expires_at", "oss-access-key-id", "oss-security-token",
 )
 
 /** 真实网络取数（HttpURLConnection，8s/15s 超时 + UA；非 2xx 与异常一律 null 降级）。 */

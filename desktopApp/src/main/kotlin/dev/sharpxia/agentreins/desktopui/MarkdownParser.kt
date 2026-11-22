@@ -35,8 +35,9 @@ internal sealed interface MdBlock {
      * 表格（2026-11-23 批次二轮，GFM 最小口径）：表头行含 `|` 且次行为分隔行形态、列数一致
      * 才成表——无分隔行 / 块级打断 / 半流中断一律落回段落字面量（wp-6「纯文本等价」契约不破）。
      * [header]/[rows] 单元格均为行内 span 平铺（短行按表头列数补空、长行截断，GFM 同口径）；
-     * 单元格 span 已在解析期做每 16 字符 U+200B 软断行（[softBreakSpans]，与 iOS cell 渲染期
-     * 注入同法同口径——验收=长 URL/哈希完整显示无「…」），[aligns] 与列一一对应。
+     * 单元格 span 已在解析期做长 token U+200B 软断行（[softBreakSpans]：连续无空白且 >24 字符
+     * 的 token 每 16 字符插断点，与 iOS cell 渲染期注入 softBreakLongTokens 同法同参——
+     * 验收=长 URL/哈希完整显示无「…」），[aligns] 与列一一对应。
      */
     data class Table(
         val header: List<List<MdSpan>>,
@@ -290,7 +291,7 @@ internal data class MdTableParse(val table: MdBlock.Table, val endExclusive: Int
  * [lines[startIndex + 1]] 须为分隔行且列数与表头一致——任一不成立返回 null（调用方落回
  * 段落字面量，wp-6「纯文本等价」契约不破）。表体行消费至块级打断（空行/围栏/标题/列表/
  * 图片行）或无 `|` 行；短行按表头列数补空、长行截断（GFM 同口径）。单元格 span 在解析期
- * 做软断行（[softBreakSpans]，与 iOS cell 渲染期注入同法——验收=完整显示无「…」）。
+ * 做长 token 软断行（[softBreakSpans]，与 iOS cell 渲染期注入同法同参——验收=完整显示无「…」）。
  */
 internal fun parseTableBlock(lines: List<String>, startIndex: Int): MdTableParse? {
     if (startIndex + 1 >= lines.size) return null
@@ -380,15 +381,13 @@ private fun isTableRowCandidate(line: String): Boolean {
     return true
 }
 
-/**
- * 单元格内不可断词 token 软断行（2026-11-23 批次二轮）：每 [every] 个可见字符插一个
- * U+200B 零宽空格（[MD_SOFT_BREAK]），Compose Text 拆不开的 URL/哈希长 token 由软断点
- * 换行——表格验收「完整显示无省略号」的落点。幂等：已有断点不计可见数、且第 16 位下一
- * 字符已是断点时不再插（重复应用产物逐字节一致）。平台差异知情：iOS 于 cell 渲染期注入、
- * 桌面于解析期注入（两端同法同参）。
- */
+/** 单元格软断点字符：U+200B 零宽空格（视觉不可见、Text 可在断点折行）。 */
 internal const val MD_SOFT_BREAK = "\u200B"
 
+/** 长 token 门控阈值（与 iOS softBreakLongTokens threshold=24 同值对锁）：更短 token 折行伤观感。 */
+internal const val MD_SOFT_BREAK_TOKEN_THRESHOLD = 24
+
+/** span 版软断行（表格单元格解析期注入口，六种 span 变体全覆盖；语义见 [softBreakText] 注）。 */
 internal fun softBreakSpans(spans: List<MdSpan>): List<MdSpan> = spans.map { span ->
     when (span) {
         is MdSpan.Text -> span.copy(text = softBreakText(span.text))
@@ -400,35 +399,53 @@ internal fun softBreakSpans(spans: List<MdSpan>): List<MdSpan> = spans.map { spa
     }
 }
 
-/** 软断行正文版（保原字符、只插断点；幂等性见 [softBreakSpans] 注）。 */
+/**
+ * 单元格内不可断词 token 软断行（2026-11-23 批次二轮；自检轮 R1-3/R1-21 对齐 iOS 口径）：
+ * 扫描 token（连续无空白、无 U+200B 的字符段——空白/ZWSP 视作断点重置），仅对长度超过
+ * [MD_SOFT_BREAK_TOKEN_THRESHOLD] 的 token（URL/哈希/ULID——Compose Text 拆不出词内断点，
+ * 帽内放不下即尾部「…」）自 token 头起每 [every] 个字符插一个 [MD_SOFT_BREAK] 供 Text 折行
+ * ——普通散文（词间有空白）不再吃断点，选中复制出的是干净文本（iOS softBreakLongTokens
+ * 同法同参：threshold 24 / stride 16 / 空白与 ZWSP 重置；零宽字符进选中复制面属两端共同的
+ * 知情取舍，仅限超长无空白 token）。幂等：ZWSP 自身即 token 断点，已断行文本重应用时各
+ * token 已 ≤ 阈值，零新增。保原字符、只插断点，token 尾不留断点。
+ */
 internal fun softBreakText(text: String, every: Int = 16): String {
-    if (text.length <= every) return text
-    val sb = StringBuilder(text.length + text.length / every + 1)
-    var visible = 0
-    var i = 0
-    while (i < text.length) {
+    if (text.length <= MD_SOFT_BREAK_TOKEN_THRESHOLD) return text
+    // 第一遍：字符级扫 token，记录超过阈值的 token 内每个断点位（全局下标）
+    val insertAt = mutableListOf<Int>()
+    var tokenStart = -1
+    for (i in text.indices) {
         val c = text[i]
-        if (c == '\u200B') { // 已有断点：原样保留不计可见数（幂等前提）
-            sb.append(c); i++
-            continue
-        }
-        visible++
-        sb.append(c)
-        if (visible == every) {
-            visible = 0
-            val next = i + 1
-            if (next < text.length) {
-                if (text[next] == '\u200B') {
-                    // 断点已就位：跳过既有断点，不重复插
-                    sb.append('\u200B')
-                    i = next + 1
-                    continue
+        if (c.isWhitespace() || c == '\u200B') {
+            if (tokenStart >= 0 && i - tokenStart > MD_SOFT_BREAK_TOKEN_THRESHOLD) {
+                var p = tokenStart + every
+                while (p < i) {
+                    insertAt += p
+                    p += every
                 }
-                sb.append('\u200B')
             }
+            tokenStart = -1
+        } else if (tokenStart == -1) {
+            tokenStart = i
         }
-        i++
     }
+    // 尾 token（无尾随空白收束）：长度超阈值才按步插（末位不插，不在词尾留断点）
+    if (tokenStart >= 0 && text.length - tokenStart > MD_SOFT_BREAK_TOKEN_THRESHOLD) {
+        var p = tokenStart + every
+        while (p < text.length) {
+            insertAt += p
+            p += every
+        }
+    }
+    if (insertAt.isEmpty()) return text
+    // 第二遍：按位插断点（保原字符）
+    val sb = StringBuilder(text.length + insertAt.size)
+    var prev = 0
+    for (pos in insertAt.sorted()) {
+        sb.append(text, prev, pos).append(MD_SOFT_BREAK)
+        prev = pos
+    }
+    sb.append(text, prev, text.length)
     return sb.toString()
 }
 

@@ -20,8 +20,14 @@ class MarkdownParserTest {
     fun plainTextWithoutMarkdownTokensIsNotMarkdown() {
         assertFalse(looksLikeMarkdown("普通中文回复，没有 markdown。"))
         assertFalse(looksLikeMarkdown("第一行\n第二行\n\n第三行"))
+    }
+
+    @Test
+    fun looksLikeMarkdownAllowsBareUrlsForLinkify() {
         // 裸 URL 2026-11-23 批次二轮起放行（链接化：裸 URL 消息必须进解析管线吃链接化，不得
-        // 落纯文本回退——原「不放行」口径随链接化轮翻转；解析产物仍逐字等价）
+        // 落纯文本回退——原「不放行」口径随链接化轮翻转；解析产物仍逐字等价）。自检轮 R1-23
+        // 从 plainTextWithoutMarkdownTokensIsNotMarkdown 与 imageOnlyContentRoutesThroughGate
+        // 两处拆出：URL 现已是放行语素，原用例名与断言语义不再对应——用例名=断言语义回归
         assertTrue(looksLikeMarkdown("https://example.com/path?a=1"))
     }
 
@@ -147,12 +153,11 @@ class MarkdownParserTest {
 
     @Test
     fun imageOnlyContentRoutesThroughGate() {
-        // 图片行本身不含 * ` _ 语素，gate 需显式放行（否则纯图片消息误落纯文本回退）
+        // 图片行本身不含 * ` _ 语素，gate 需显式放行（否则纯图片消息误落纯文本回退）；
+        // 裸 URL 放行断言已拆至 looksLikeMarkdownAllowsBareUrlsForLinkify（R1-23 用例名=断言语义）
         assertTrue(looksLikeMarkdown("![橙猫](https://example.com/cat.png)"))
         assertTrue(looksLikeMarkdown("  ![a](https://e.com/a.png)  "))
         assertEquals(1, markdownBlocksOrFallback("![a](https://e.com/a.png)", cursor = false)?.size)
-        // 裸 URL（非图片行）随链接化轮（2026-11-23 批次二）放行——进解析管线吃链接化
-        assertTrue(looksLikeMarkdown("https://example.com/path?a=1"))
     }
 
     @Test

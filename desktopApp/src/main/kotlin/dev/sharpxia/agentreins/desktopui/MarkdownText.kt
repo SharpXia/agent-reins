@@ -195,7 +195,10 @@ private val MD_TABLE_CELL_MAX_WIDTH = 480.dp
 /**
  * 表格：表头行 + 分隔线 + 体行，单元格无 maxLines 无 Ellipsis（段落 Text 同款），列对齐
  * 随 aligns；超宽表由表级横向滚动兜底（Column 全量布局在滚动容器内，纵向仍交给时间线）。
- * 单元格 span 已于解析期软断行（softBreakSpans）——不可断词 token 每 16 字符可换行。
+ * 单元格 span 已于解析期软断行（softBreakSpans）——连续无空白的长 token 每 16 字符可换行。
+ * 成本知情（自检轮 R1-16）：表级 Column/Row 全量组合（非 lazy，iOS LiteTableView 同为非懒
+ * 布局既有结构），数百行大表一次性组合全部单元格进 LazyColumn 单行，首现物化可能掉帧——
+ * 行内显示与横滑兜底正确性优先，行数帽/懒加载留待后续轮。
  */
 @Composable
 private fun MarkdownTable(
@@ -366,11 +369,15 @@ private fun headingStyle(level: Int) = when (level) {
 // ── 链接化 + 打开/复制气泡（2026-11-23 批次二轮；桌面从零建，双路径覆盖） ────────────
 
 /**
- * URL 匹配（http(s) 显式 scheme 或 www. 前缀；空白与 `<>()` 终止）。CJK 不在排除集——
- * 中英文粘连 URL 会整体成 Link（与 iOS NSDataDetector 宽松匹配同向，知情口径）；句尾
- * CJK 标点由 [MD_URL_TRAILING_PUNCT] 剥离兜底（标点收尾形态），句中粘连属已知观感面。
+ * URL 匹配（http(s) 显式 scheme 或 www. 前缀；空白与 `<>()` 终止；U+200B 不在终止集——
+ * 表格单元格解析期软断行插在长 token 内的零宽字符须随 URL 整段成 Link，[linkifyText] 再
+ * 从 url 侧剥净，展示文本保留断点）。CJK 不在排除集——中英文粘连 URL 会整体成 Link（与
+ * iOS NSDataDetector 宽松匹配同向，知情口径）；句尾 CJK 标点由 [MD_URL_TRAILING_PUNCT]
+ * 剥离兜底（标点收尾形态），句中粘连属已知观感面。www 分支带前置词边界（自检轮 R1-14）：
+ * 词中 www.（`foo.www.bar` 域中段、`user@www.example.com` 邮箱本地部）不产假链接——对齐
+ * iOS NSDataDetector 自带词边界语义；http(s) 分支自证 scheme 不需要边界。
  */
-private val MD_URL_REGEX = Regex("""(https?://[^\s<>()]+|www\.[^\s<>()]+)""")
+private val MD_URL_REGEX = Regex("""(https?://[^\s<>()]+|(?<![\w./@-])www\.[^\s<>()]+)""")
 
 /** URL 句尾标点剥离集（行文句读紧跟 URL 的常见形态；本体不含 `)`——正则已排除括号）。 */
 private val MD_URL_TRAILING_PUNCT = charArrayOf(
@@ -390,8 +397,10 @@ internal fun normalizeUrl(raw: String): String? = when {
 
 /**
  * 平铺 Text span → Text/Link 切分（解析路径链接化的渲染层出口）：只切 Text——Code/Bold/
- * Italic/BoldItalic 内不切（iOS autolink 跳过行内代码同语义），已切好的 Link 原样保留
- * （幂等）。句尾标点剥离后留在后续 Text 段（纯文本等价面不丢字符）。
+ * Italic/BoldItalic 内不切，`[label](url)` markdown 链接语法不解析（仍按字面量呈现，仅 URL
+ * 子串可点）。桌面为比 iOS 更窄的口径知情落注（自检轮 R1-4）：iOS autolink 只跳显式链接与
+ * 行内代码（MarkdownView.autolink alreadyStyled 检查），粗体内 URL iOS 可点、桌面不可点。
+ * 已切好的 Link 原样保留（幂等）。句尾标点剥离后留在后续 Text 段（纯文本等价面不丢字符）。
  */
 internal fun linkifySpans(spans: List<MdSpan>): List<MdSpan> = buildList {
     spans.forEach { span ->
@@ -412,7 +421,11 @@ private fun linkifyText(text: String): List<MdSpan> {
         val start = match.range.first
         val end = start + url.length
         if (start > lastEnd) out += MdSpan.Text(text.substring(lastEnd, start))
-        val normalized = normalizeUrl(url)
+        // 表格单元格解析期软断行插在长 token（URL 几乎必中）内的 U+200B 随匹配段整体成
+        // Link：展示文本（[MdSpan.Link.text]）保留断点（表格折行面不回退），url 侧剥净——
+        // 零宽字符进 openUri（URISyntaxException 被吞、打开静默失败）或剪贴板（粘贴不可用）
+        // 都是坏面（自检轮 R1-1/R1-17；iOS 同输入干净：.link 属性取自解析期、断点只改展示）。
+        val normalized = normalizeUrl(url.replace(MD_SOFT_BREAK, ""))
         if (normalized != null) {
             out += MdSpan.Link(text = url, url = normalized)
         } else {
@@ -428,7 +441,11 @@ private fun linkifyText(text: String): List<MdSpan> {
  * 链接操作气泡（打开/复制二选一；正文 Link 与 chip URL 同款）：打开走 LocalUriHandler
  * （桌面=Desktop.browse，不直持 AWT）只用归一 url；复制复制归一完整 URL（对齐 iOS
  * UIPasteboard 复制完整 URL 口径）——normalizedUrl=null（白名单外 scheme）时「打开」禁用、
- * 复制退回原样字符串。focusable Popup：气泡外点击/焦点丢失即 onDismissRequest 关闭。
+ * 复制退回原样字符串。focusable=false（自检轮 R1-13）：外点即关由 Popup 无条件的
+ * outside-press 监听承担（compose ui-desktop 1.12.2 实证：Popup 外点 press 经
+ * setOutsidePointerEventListener 派发 onDismissRequest，不依赖 focusable），focusable=true
+ * 反而打开即抢键盘焦点——composer 输入中点链接会失焦、后续键入落入气泡窗口、气泡在途期间
+ * 根级时间线键盘导航收不到键，故关掉（气泡内无键盘交互面，两按钮纯点击）。
  * 锚定=挂载点父布局底部居中（首版退化行内锚，视觉细节实机走查项——知情注释）。
  */
 @Composable
@@ -438,7 +455,7 @@ internal fun LinkActionPopup(displayUrl: String, normalizedUrl: String?, onDismi
     val clipboard = LocalClipboardManager.current
     Popup(
         onDismissRequest = onDismiss,
-        properties = PopupProperties(focusable = true),
+        properties = PopupProperties(focusable = false),
         alignment = Alignment.BottomCenter,
         offset = IntOffset(0, 8),
     ) {

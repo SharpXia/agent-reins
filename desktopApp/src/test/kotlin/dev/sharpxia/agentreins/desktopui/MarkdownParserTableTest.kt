@@ -161,53 +161,75 @@ class MarkdownParserTableTest {
         assertFalse(looksLikeMarkdown("| 单行竖线"))
     }
 
-    // ── 单元格软断行 ──
+    // ── 单元格软断行（自检轮 R1-3/R1-21 对齐 iOS：长 token 门控，threshold 24 / stride 16） ──
 
     @Test
-    fun softBreakInsertsEverySixteenVisibleChars() {
-        // 19 字符 → 第 16 位后插一个 U+200B
+    fun softBreakOnlyGatesLongTokensAndBreaksEverySixteen() {
+        // 长 token（连续无空白 > 24）：25 字符 → 第 16 位后插一个 U+200B
         assertEquals(
-            "abcdefghijklmnop" + MD_SOFT_BREAK + "qrs",
-            softBreakText("abcdefghijklmnopqrs"),
+            "abcdefghijklmnop" + MD_SOFT_BREAK + "qrstuvwxy",
+            softBreakText("abcdefghijklmnopqrstuvwxy"),
         )
-        // 恰 16 字符 → 末位不插（无尾随断点）
-        assertEquals("abcdefghijklmnop", softBreakText("abcdefghijklmnop"))
-        // 短文本原样
+        // 恰 24 字符 → 低于阈值不插（更短 token 折行伤观感，iOS 同口径）
+        assertEquals("abcdefghijklmnopqrstuvwx", softBreakText("abcdefghijklmnopqrstuvwx"))
+        // 短 token / 短文本原样
+        assertEquals("abcdefghijklmnopqrs", softBreakText("abcdefghijklmnopqrs"))
         assertEquals("短文本", softBreakText("短文本"))
+        // 散文（词间有空白，各 token ≤ 阈值）不吃断点——选中复制出的是干净文本（R1-3 主面）
+        assertEquals("one two three four five six", softBreakText("one two three four five six"))
+        // 空白重置：空白两侧短 token 均不插
+        assertEquals("ab cd ef gh", softBreakText("ab cd ef gh"))
     }
 
     @Test
     fun softBreakSpansAreIdempotent() {
-        val original = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEF" // 42 字符 → 2 个断点
+        val original = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEF" // 42 字符长 token → 2 个断点
         val once = softBreakText(original)
         val twice = softBreakText(once)
         assertEquals(once, twice)
-        // 断点数 = 每 16 可见字符 1 个
+        // 断点数 = token 内每 16 字符 1 个（42 > 24：第 16/32 位各 1 个）
         assertEquals(2, once.count { it == '\u200B' })
-        // 已有断点不计可见数（21 可见字符只在第 16 位补 1 个新断点，旧断点原样保留）
+        // ZWSP 自身视作 token 断点（iOS 同口径）：已断行文本各 token ≤ 阈值，重应用零新增
         val pre = "ab" + MD_SOFT_BREAK + "cdefghijklmnopqrstu"
-        val reapplied = softBreakText(pre)
-        assertEquals(2, reapplied.count { it == '\u200B' })
-        assertEquals(pre.length + 1, reapplied.length)
-        assertEquals(softBreakText(reapplied), reapplied) // 再应用恒等（幂等收敛）
+        assertEquals(pre, softBreakText(pre))
+        val reapplied = softBreakText(once)
+        assertEquals(once, reapplied) // 再应用恒等（幂等收敛）
     }
 
     @Test
     fun softBreakSpansCoverAllSpanVariantsAndKeepUrl() {
         val spans = listOf(
             MdSpan.Text("https://example.com/" + "a".repeat(30)),
-            MdSpan.Code("x".repeat(20)),
+            MdSpan.Code("x".repeat(30)),
+            MdSpan.Text("短词 span"), // ≤ 阈值 token 原样（门控语义回归面）
             MdSpan.Link("www.example.com/" + "b".repeat(20), "https://www.example.com/b"),
         )
         val broken = softBreakSpans(spans)
-        // 每个变体都被软断（文本变长）
+        // 长 token 变体被软断（文本变长）；短 token 变体原样
         assertEquals(spans.size, broken.size)
         assertTrue(broken[0].let { it as MdSpan.Text }.text.contains('\u200B'))
         assertTrue(broken[1].let { it as MdSpan.Code }.text.contains('\u200B'))
+        assertEquals("短词 span", broken[2].let { it as MdSpan.Text }.text)
         // Link 只断展示文本，url 原样（打开面不受软断影响）
-        val link = broken[2] as MdSpan.Link
+        val link = broken[3] as MdSpan.Link
         assertTrue(link.text.contains('\u200B'))
         assertEquals("https://www.example.com/b", link.url)
+    }
+
+    @Test
+    fun softBrokenCellUrlLinkifiesWithZeroWidthFreeUrl() {
+        // 自检轮 R1-1/R1-17 管线级用例（表格单元格真实顺序「解析 → 软断行 → 渲染期 linkify」）：
+        // 长 URL 经软断行后混入 U+200B，linkifySpans 产出的 Link 展示文本保留断点（表格折行
+        // 面不回退），url 侧必须零宽字符干净——openUri/剪贴板吃坏 URL 是「打开静默失败/复制
+        // 损坏」两坏面的根因
+        val cell = softBreakSpans(parseInlineSpans("详见 https://example.com/" + "a".repeat(30)))
+        val linked = linkifySpans(cell)
+        val link = linked.filterIsInstance<MdSpan.Link>().single()
+        assertFalse(link.url.contains('\u200B'))
+        assertEquals("https://example.com/" + "a".repeat(30), link.url)
+        assertTrue(link.text.contains('\u200B')) // 展示文本保留断点（折行面）
+        // 非 URL 段照旧留在 Text（纯文本等价面不丢字符）
+        assertEquals("详见 ", linked.first().let { it as MdSpan.Text }.text)
     }
 
     // ── wp-6 纯文本等价回归（非表序列逐字原样，含 \| 未解释口径） ──

@@ -33,12 +33,13 @@ class LinkifySpansTest {
 
     @Test
     fun inlineCodeAndBoldAreNotLinkified() {
-        // 行内代码内 URL 不转（iOS autolink 跳过行内代码同语义）
+        // 行内代码内 URL 不转（iOS autolink 只跳显式链接与行内代码——此形态两端同语义）
         assertEquals(
             listOf(MdSpan.Code("see https://e.com/x")),
             linkifySpans(listOf(MdSpan.Code("see https://e.com/x"))),
         )
-        // Bold/Italic/BoldItalic 内不转
+        // Bold/Italic/BoldItalic 内不转——桌面比 iOS 更窄的知情口径：iOS autolink 对粗体内
+        // URL 会切 .link run（可点），桌面不切（见 linkifySpans 注，自检轮 R1-4）
         assertEquals(
             listOf(MdSpan.Bold("https://e.com/bold")),
             linkifySpans(listOf(MdSpan.Bold("https://e.com/bold"))),
@@ -46,6 +47,44 @@ class LinkifySpansTest {
         assertEquals(
             listOf(MdSpan.Italic("www.e.com/i"), MdSpan.BoldItalic("x")),
             linkifySpans(listOf(MdSpan.Italic("www.e.com/i"), MdSpan.BoldItalic("x"))),
+        )
+    }
+
+    @Test
+    fun midWordWwwDoesNotLinkify() {
+        // www 分支前置词边界（自检轮 R1-14，对齐 iOS NSDataDetector 自带词边界语义）：词中
+        // www.（域中段/邮箱本地部）不产假链接，整段保持 Text（纯文本等价面逐字保留）
+        assertEquals(
+            listOf(MdSpan.Text("foo.www.bar/baz")),
+            linkifySpans(listOf(MdSpan.Text("foo.www.bar/baz"))),
+        )
+        assertEquals(
+            listOf(MdSpan.Text("user@www.example.com")),
+            linkifySpans(listOf(MdSpan.Text("user@www.example.com"))),
+        )
+        // 正向对照：句首/空白后/括号后的 www 仍命中
+        assertEquals(
+            listOf(
+                MdSpan.Link("www.e.com/start", "https://www.e.com/start"),
+                MdSpan.Text(" 与 "),
+                MdSpan.Link("www.b.com/x", "https://www.b.com/x"),
+                MdSpan.Text("）"),
+            ),
+            linkifySpans(listOf(MdSpan.Text("www.e.com/start 与 www.b.com/x）"))),
+        )
+    }
+
+    @Test
+    fun zeroWidthBreakInsideUrlKeepsDisplayAndCleansUrl() {
+        // 自检轮 R1-1/R1-17 单测面：软断行 U+200B 混进 URL 匹配段（表格单元格管线常态）——
+        // Link 展示文本保留断点（折行面），url 剥净（openUri/剪贴板面）
+        assertEquals(
+            listOf(
+                MdSpan.Text("看 "),
+                MdSpan.Link("https://e.com/aa\u200Bbb", "https://e.com/aabb"),
+                MdSpan.Text(" 完"),
+            ),
+            linkifySpans(listOf(MdSpan.Text("看 https://e.com/aa\u200Bbb 完"))),
         )
     }
 

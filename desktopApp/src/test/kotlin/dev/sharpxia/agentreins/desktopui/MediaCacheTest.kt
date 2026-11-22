@@ -71,6 +71,16 @@ class MediaCacheTest {
         )
         // 大小写不敏感剥离（AWS X-Amz-* 与 OSS oss-* 闭集）
         assertEquals("https://e.com/x.png", stableCacheKey("https://e.com/x.png?oss-expires=1&oss-signature=s"))
+        // 双端对锁白名单 fixture（自检轮 R1-2/R1-10/R1-20 并集对齐 iOS MediaDiskCache.
+        // volatileQueryKeys——STS 轮转/security-token 与 OSS access-key-id/security-token 家族
+        // 剥离；与 iOS 侧测试同一清单互锚，单端增删白名单必须双端同步改）
+        assertEquals(
+            "https://e.com/x.png",
+            stableCacheKey(
+                "https://e.com/x.png?x-amz-security-token=t&oss-access-key-id=k" +
+                    "&oss-security-token=s&oss-expires_at=9",
+            ),
+        )
         // 无 query / fragment 原样
         assertEquals("https://e.com/x.png", stableCacheKey("https://e.com/x.png"))
         // 稳定性：同输入两次恒等

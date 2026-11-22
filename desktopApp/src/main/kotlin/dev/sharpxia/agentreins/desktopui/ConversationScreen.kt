@@ -419,11 +419,15 @@ internal fun ConversationScreen(
     // 与 iOS resetPagingState 随会话期同语义）。判定纯函数见 TimelineScroll.kt。
     var atBottom by remember { mutableStateOf(true) }
     var followAnimating by remember { mutableStateOf(false) }
-    // 程序化滚动旗标（2026-11-23 批次二轮）：包住全部非贴底跟随的程序化滚动出口（回底按钮/
-    // 键盘命令/翻页恢复锚/首签定位）——期间 isUserDrivenScroll 恒 false，防跳转前几帧几何过窗
-    // 误触发 loadEarlier（白付 REST）与恢复锚把视口从跳转半途硬拽回。纪律注释：**新增程序化
-    // 跳转必须入旗标**（贴底跟随动画保持 followAnimating 不动——语义不同：跟随不触发续拉）。
-    var programmaticJumpInFlight by remember { mutableStateOf(false) }
+    // 程序化滚动计数（2026-11-23 批次二轮；自检轮 R1-12/R1-18 布尔→计数并发安全化）：包住
+    // 全部非贴底跟随的程序化滚动出口（回底按钮/键盘命令/翻页恢复锚/首签定位）——期间
+    // isUserDrivenScroll 恒 false，防跳转前几帧几何过窗误触发 loadEarlier（白付 REST）与恢复
+    // 锚把视口从跳转半途硬拽回。计数而非布尔：并发跳转（键重复/连按）时 animateScrollToItem
+    // 内部 MutatorMutex 取消前一跳，被取消协程的 finally 若清布尔会把仍在途的后一跳门放开
+    // （近顶过窗误触发续拉 + 恢复锚拽回，正是旗标要防的两个后果）；++/-- 成对入 finally，
+    // 门只在全部跳转收尾后放开。纪律注释：**新增程序化跳转必须入计数**（贴底跟随动画保持
+    // followAnimating 不动——语义不同：跟随不触发续拉）。
+    var programmaticJumpInFlight by remember { mutableStateOf(0) }
     var earlierExhausted by remember { mutableStateOf(false) }
     var earlierCursor by remember { mutableStateOf<Long?>(null) }
     var loadingEarlier by remember { mutableStateOf(false) }
@@ -463,7 +467,7 @@ internal fun ConversationScreen(
     // wp-5 滚动锚定②：贴底条件化跟随（iOS wp-7① onChange tailSignature 同型）——尾签变化 且
     // 在底部锚定态才跟随；尾签覆盖行数与尾行身份/状态/内容量（比旧「只看条数」多覆盖流式
     // 原地增长与占位行收敛）。首签（打开会话/空会话收首批）直接定位到尾（iOS onAppear 同位，
-    // 程序化跳转入 programmaticJumpInFlight 旗标——本轮）；翻页 prepend 也变签，但被 atBottom
+    // 程序化跳转入 programmaticJumpInFlight 计数——本轮）；翻页 prepend 也变签，但被 atBottom
     // 守卫拦住（翻页时用户在上方读史）。贴底跟随动画保持 followAnimating 旗标（不并入
     // programmaticJumpInFlight——跟随语义不同，见纯函数注）。
     LaunchedEffect(listState) {
@@ -476,11 +480,11 @@ internal fun ConversationScreen(
             lastSig = sig
             if (messages.isEmpty()) return@collect
             if (isFirst || prevSig.isNullOrEmpty()) {
-                programmaticJumpInFlight = true
+                programmaticJumpInFlight += 1
                 try {
                     listState.scrollToItem(messages.lastIndex + prefixCountNow())
                 } finally {
-                    programmaticJumpInFlight = false
+                    programmaticJumpInFlight -= 1
                 }
                 return@collect
             }
@@ -508,12 +512,12 @@ internal fun ConversationScreen(
             restoreArmed = false
             restoreAnchorId = null
             if (target != null) {
-                // 恢复后视口仍近顶，不包旗标会在恢复帧再次误触发自动续拉（本轮入旗标）
-                programmaticJumpInFlight = true
+                // 恢复后视口仍近顶，不包旗标会在恢复帧再次误触发自动续拉（本轮入计数）
+                programmaticJumpInFlight += 1
                 try {
                     listState.scrollToItem(target + prefixCountNow(), 0)
                 } finally {
-                    programmaticJumpInFlight = false
+                    programmaticJumpInFlight -= 1
                 }
             }
         }
@@ -526,13 +530,18 @@ internal fun ConversationScreen(
     // wp-12 加载更早（iOS HubStore.loadEarlier 同型）：按 oldestSeq keyset 翻页，REST 走
     // loadEarlierMessages（nil = 通道不可用/REST 未成功，显式降级可重试不静默）；成功回执后
     // 服务端 hasMore 接管按钮可见性，翻到头锁存。限流纪律：一次一请求（loadingEarlier 互斥）。
-    fun loadEarlier() {
+    // [armRestore] 区分入口（自检轮 R1-8）：手动点击（默认 true）武装阅读位置恢复锚；近顶
+    // 自动续拉传 false 不武装——触发时用户正拖向更早内容，prepend 后 LazyColumn 锚定
+    // firstVisibleIndex、视口自然落在新页（正是拖顶用户要的落点），武装恢复锚反而把视口从
+    // 新页拽回触发前最老行一整页，呈「拖顶→加载→被拽回」循环。
+    fun loadEarlier(armRestore: Boolean = true) {
         if (loadingEarlier || earlierExhausted || !canLoadEarlierNow) return
         val oldestLoaded = messages.firstOrNull()
         val before = nextBeforeCursor(earlierCursor, oldestLoaded?.seq) ?: return
         if (before < 1) return // 契约 Before minimum: 1（08 §4.3）
-        // 阅读位置恢复锚 = 触发前最老一行（新页将合入其上方，落地后滚回该行，视口不跳）
-        restoreAnchorId = oldestLoaded?.messageId
+        // 阅读位置恢复锚 = 触发前最老一行（新页将合入其上方，落地后滚回该行，视口不跳）——
+        // 仅手动路径武装（见 [armRestore] 注）
+        if (armRestore) restoreAnchorId = oldestLoaded?.messageId
         restoreArmed = false
         loadingEarlier = true
         loadEarlierError = null
@@ -552,7 +561,7 @@ internal fun ConversationScreen(
                 restoreAnchorId = null
                 restoreArmed = false
             } else {
-                restoreArmed = true
+                restoreArmed = armRestore
             }
             loadEarlierError = null
         }
@@ -565,7 +574,8 @@ internal fun ConversationScreen(
     // loadEarlier，而 Kotlin 局部声明禁止前向引用（编译错误）；rememberUpdatedState 每次重组
     // 更新到最新闭包（:loadEarlier 捕获的 canLoadEarlierNow 等随实例新鲜）。三个
     // LaunchedEffect(listState) 各自独立 collect snapshotFlow、key 相同，顺序搬迁无语义影响。
-    val loadEarlierNow by rememberUpdatedState(::loadEarlier)
+    // 显式 lambda 携带 armRestore（自检轮 R1-8 入口区分：自动续拉 false / 手动点击默认 true）。
+    val loadEarlierNow by rememberUpdatedState { armRestore: Boolean -> loadEarlier(armRestore) }
     LaunchedEffect(listState) {
         var prevScrolling = false
         snapshotFlow {
@@ -585,8 +595,8 @@ internal fun ConversationScreen(
         }.collect { s ->
             val justSettled = !s.scrolling && prevScrolling
             prevScrolling = s.scrolling
-            // 程序化滚动旗标并入相位门（本轮）：跳转/恢复锚在途的几何过窗不算用户驱动
-            val userDriven = isUserDrivenScroll(s.scrolling, followAnimating || programmaticJumpInFlight)
+            // 程序化滚动计数并入相位门（本轮）：跳转/恢复锚在途（计数>0）的几何过窗不算用户驱动
+            val userDriven = isUserDrivenScroll(s.scrolling, followAnimating || programmaticJumpInFlight > 0)
             if (s.lastItemVisible && shouldRecomputeAnchor(userDriven, justSettled)) {
                 atBottom = isAtBottom(s)
             }
@@ -594,6 +604,7 @@ internal fun ConversationScreen(
             // 入口 Loadable 才触发；loadEarlier 内 loadingEarlier/earlierExhausted/
             // canLoadEarlierNow 守卫照旧幂等双保险。iOS earlierAutoProximity 为像素、桌面为
             // 行数近似——parity 口径差异知情（见 TimelineScroll.kt 常量注）。
+            // armRestore=false（自检轮 R1-8）：不武装恢复锚——prepend 后视口自然落在新页。
             if (shouldAutoLoadEarlier(
                     firstVisibleItemIndex = s.firstVisibleItemIndex,
                     loaderState = earlierRowState(
@@ -604,7 +615,7 @@ internal fun ConversationScreen(
                     isUserDrivenScroll = userDriven,
                 )
             ) {
-                loadEarlierNow()
+                loadEarlierNow(false)
             }
         }
     }
@@ -840,7 +851,7 @@ internal fun ConversationScreen(
                 ) ?: return@onPreviewKeyEvent false
                 if (messages.isEmpty()) return@onPreviewKeyEvent false // 空会话无可滚（animateScrollToItem 越界）
                 scope.launch {
-                    programmaticJumpInFlight = true
+                    programmaticJumpInFlight += 1
                     try {
                         when (command) {
                             TimelineScrollCommand.ScrollToBottom ->
@@ -848,7 +859,7 @@ internal fun ConversationScreen(
                             TimelineScrollCommand.ScrollToTop -> listState.animateScrollToItem(0)
                         }
                     } finally {
-                        programmaticJumpInFlight = false
+                        programmaticJumpInFlight -= 1
                     }
                 }
                 true
@@ -954,8 +965,10 @@ internal fun ConversationScreen(
                         }
                     }
                     EarlierRowState.Loadable -> item(key = "earlier-loader") {
+                        // 手动点击路径（armRestore 默认 true）：武装恢复锚保阅读位置（自动续拉
+                        // 才传 false，见 loadEarlier 注——自检轮 R1-8）
                         TextButton(
-                            onClick = ::loadEarlier,
+                            onClick = { loadEarlier() },
                             modifier = Modifier.fillMaxWidth(),
                         ) { Text("↑ 加载更早", fontSize = 12.sp) }
                     }
@@ -1013,16 +1026,16 @@ internal fun ConversationScreen(
                 modifier = Modifier.align(Alignment.CenterEnd),
             )
             // 2026-11-07 二轮：回到底部悬浮按钮（iOS HubChatView 同款语义；最后一条不可见即浮现）
-            // 程序化跳转入旗标（本轮）：动画中途 firstVisible 过窗不再误触发自动续拉（白付 REST）
+            // 程序化跳转入计数（本轮）：动画中途 firstVisible 过窗不再误触发自动续拉（白付 REST）
             if (showJumpToBottom) {
                 TextButton(
                     onClick = {
                         scope.launch {
-                            programmaticJumpInFlight = true
+                            programmaticJumpInFlight += 1
                             try {
                                 listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
                             } finally {
-                                programmaticJumpInFlight = false
+                                programmaticJumpInFlight -= 1
                             }
                         }
                     },

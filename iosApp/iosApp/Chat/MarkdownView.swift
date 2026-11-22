@@ -527,7 +527,9 @@ enum LiteMarkdownParser {
 
     /// 裸网址自动链接（cmark-gfm autolink 扩展的等价物，Foundation 解析器不做）：只认
     /// http(s):// 与 www. 开头，跳过已是显式链接与行内代码的片段。解析结果有缓存，
-    /// 检测只在首次解析时发生。
+    /// 检测只在首次解析时发生。自检轮 R2-5：www 裸链 scheme 钉死 https——NSDataDetector
+    /// 对 www 匹配自带 http://（业界默认），桌面 normalizeUrl（MarkdownText.kt）恒补
+    /// https://，两端复制/打开目标同串（口径互锚）。
     static func autolink(_ attr: inout AttributedString) {
         let plain = String(attr.characters)
         let lower = plain.lowercased()
@@ -536,8 +538,13 @@ enum LiteMarkdownParser {
         for match in detector.matches(in: plain, range: NSRange(location: 0, length: ns.length)) {
             let literal = ns.substring(with: match.range).lowercased()
             guard literal.hasPrefix("http://") || literal.hasPrefix("https://") || literal.hasPrefix("www."),
-                  let url = match.url,
                   let range = Range(match.range, in: attr) else { continue }
+            // www 匹配重写 scheme（display 文本不动，只换 link 目标）；构造失败按桌面口径
+            // 退回纯文本不入链——不回落 http://，防两端再漂移。
+            let url: URL? = literal.hasPrefix("www.")
+                ? URL(string: "https://" + ns.substring(with: match.range))
+                : match.url
+            guard let url else { continue }
             let alreadyStyled = attr[range].runs.contains {
                 $0.link != nil || $0.inlinePresentationIntent?.contains(.code) == true
             }
@@ -569,19 +576,22 @@ enum LiteMarkdownParser {
     /// （URL/哈希/ULID——SwiftUI Text 拆不出词内断点，帽内放不下即尾部「…」）每 16 字符插
     /// 一个 U+200B 零宽空格给出换行断点，视觉不可见、Text 可在断点折行，单元格「帽内换行 +
     /// 外层横滑兜底」永不产生省略号。只作用表格 cell 渲染期（LiteTableView.cell），不进
-    /// LiteMarkdownCache 解析产物。知情取舍：textSelection 选中复制会带上零宽字符（批次一
-    /// 风险④ 接受）。阈值 24（更短 token 折行伤观感）、步距 16（帽 480pt 内的安全断距）。
+    /// LiteMarkdownCache 解析产物。自检轮 R2-2：CJK/假名/谚文/全角形视作 token 断点重置
+    /// （UAX #14 下 Text 原生可断行，零注入零收益）——中文长单元格不再被当不可断词，
+    /// 选中复制面随之干净。知情取舍收窄：仅无 CJK 的超长 token（URL/哈希）复制仍带零宽
+    /// 字符（批次一风险④ 的存留面）。阈值 24（更短 token 折行伤观感）、步距 16（帽 480pt
+    /// 内的安全断距）。
     static func softBreakLongTokens(_ s: AttributedString) -> AttributedString {
         let threshold = 24
         let stride = 16
         let zwsp: Character = "\u{200B}"
         let chars = Array(s.characters)
-        // 第一遍：字符级扫 token（空白/换行/ZWSP 视作断点重置），token 超阈值时记下
-        // 每 16 字符处的全局插入位（token 末位除外，不在词尾留断点）。
+        // 第一遍：字符级扫 token（空白/换行/ZWSP/原生可断行字符视作断点重置），token 超
+        // 阈值时记下每 16 字符处的全局插入位（token 末位除外，不在词尾留断点）。
         var insertAt = Set<Int>()
         var tokenStart: Int?
         for (i, ch) in chars.enumerated() {
-            if ch.isWhitespace || ch == zwsp {
+            if ch.isWhitespace || ch == zwsp || nativelyBreakable(ch) {
                 if let start = tokenStart {
                     var p = start + stride
                     while p < i {
@@ -615,6 +625,27 @@ enum LiteMarkdownParser {
             out += AttributedString(piece, attributes: run.attributes)
         }
         return out
+    }
+
+    /// 原生可断行字符（自检轮 R2-2）：CJK 统一表意/扩展 A/兼容、假名、谚文音节、CJK 标点
+    /// 与全角形——UAX #14 在这些字素处给出原生换行机会，Text 无需注入断点；计入 token 只会
+    /// 把中英混排长单元格误判成不可断词、污染复制面。冷僻扩展 B+ 平面不覆盖（表格 cell 内
+    /// 25+ 连续生僻字的形态可忽略；该形态退回旧行为 = 插零宽断点，仅显示语义无回归）。
+    private static func nativelyBreakable(_ ch: Character) -> Bool {
+        ch.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x3000...0x303F,   // CJK 标点（、。「」《》等）
+                 0x3041...0x30FF,   // 平假名/片假名
+                 0x3400...0x4DBF,   // CJK 扩展 A
+                 0x4E00...0x9FFF,   // CJK 统一表意文字
+                 0xAC00...0xD7AF,   // 谚文音节
+                 0xF900...0xFAFF,   // CJK 兼容表意
+                 0xFF00...0xFFEF:   // 全角/半角形（，．％等）
+                return true
+            default:
+                return false
+            }
+        }
     }
 
     private struct Builder {

@@ -657,10 +657,11 @@ struct HubChatView: View {
     /// v1.4.0 追补（2026-11-16 用户反馈「没看到删除入口」）：#29 会话删除从管理 sheet 提到
     /// 会话详情页 ellipsis 菜单——终态确认挂本态。
     @State private var deletingConversation = false
-    /// 需求3（2026-11-23 批次一）+ 自检轮 R1-6：会话级在途链接气泡互斥单例——同一时刻
-    /// 至多一行挂 LinkActionBubble。行级置 pendingLink 即上抛本行 messageId 占坑；他行
-    /// 占坑时旧行 bubbleActive 翻 false 气泡随行收；行出视口随 LazyVStack 重建后行态
-    /// pendingLink 已复位，本态残指旧行无呈现面（幂等无害，下次占坑即覆写）。
+    /// 需求3（2026-11-23 批次一）+ 自检轮 R1-6/R2-1：会话级在途链接气泡互斥单例——同一
+    /// 时刻至多一行挂 LinkActionBubble。行级置 pendingLink 即上抛本行 messageId 占坑；他行
+    /// 占坑时旧行 bubbleActive 翻 false，气泡随行收且行态 pendingLink 经行内 onChange
+    /// 失坑即清（R2-10，不留不可见 tap 捕获层）；行出视口随 LazyVStack 重建行态同样复位，
+    /// 本态残指旧行无呈现面（幂等无害，下次占坑即覆写）。
     @State private var linkBubbleMessageId: String?
     /// 角色系统批次4：标题栏交互角色的眼神触发面——composer 输入聚焦下视（@FocusState）、
     /// 标题区指针注视（onContinuousHover，Catalyst/Mac；触摸设备无 hover 自然只走后三路）、
@@ -2857,9 +2858,10 @@ private final class ScrollProbeBox {
     /// v1.4 查看器打开回调（会话页 imageViewer binding 承担）：页集 + 被点页序。入口 a/b
     /// 共用——附件图片块（含 Markdown 图块）点按上抛，查看器本体在 ImageViewer.swift。
     let onOpenImages: ([ImageViewerPage], Int) -> Void
-    /// 自检轮 R1-6：跨行互斥——会话级在途气泡唯一（HubChatView 持 linkBubbleMessageId
+    /// 自检轮 R1-6/R2-10：跨行互斥——会话级在途气泡唯一（HubChatView 持 linkBubbleMessageId
     /// 单例态）。本行置 pendingLink 即上抛本行 messageId 占坑；他行占坑时本行 bubbleActive
-    /// 翻 false，气泡随行收。呈现与否仍以行级 pendingLink 为准（父态仅作互斥门）。
+    /// 翻 false，气泡随行收、pendingLink 经 onChange 失坑即清（关闭层随之消失，R2-1）。
+    /// 呈现 = 行级 pendingLink ∧ 父态坑位（bubbleActive），父态仅作互斥门。
     var bubbleActive: Bool = false
     /// 气泡活跃态上抛（开=本行 messageId、收=nil）：父级单例态唯一写入面。
     var onLinkBubbleActiveChange: ((String?) -> Void)? = nil
@@ -3039,9 +3041,11 @@ private final class ScrollProbeBox {
                 // 关闭气泡——background 层只命中主内容未吃掉的 tap（行内空白区），不遮正文：
                 // 链接 tap 由 openURL 环境在内容层先接管、图块开查看器 onTapGesture 内容层先
                 // 命中、textSelection 长按与 tap 不同手势均不受干扰。知情：该 tap 不再上传
-                // HubChatView 时间线收键盘 tap（同一 tap 单消费者）。
+                // HubChatView 时间线收键盘 tap（同一 tap 单消费者）。自检轮 R2-1/R2-15：门与
+                // 互斥坑位对齐——被他行夺坑的行（bubbleActive=false）不再挂本层，残行 tap
+                // 落回时间线（收键盘）而不会误清当前活跃行的坑位。
                 .background {
-                    if pendingLink != nil {
+                    if pendingLink != nil, bubbleActive {
                         Color.clear
                             .contentShape(Rectangle())
                             .onTapGesture { dismissLinkBubble() }
@@ -3061,20 +3065,32 @@ private final class ScrollProbeBox {
                 // 会话级互斥坑位（bubbleActive），他行占坑即随行收；动画值随之取两条件与。
                 .overlay(alignment: m.role == "user" ? .bottomTrailing : .bottomLeading) {
                     if let url = pendingLink, bubbleActive {
+                        // 自检轮 R2-7：换链接强制重建气泡——挂载点固定时 SwiftUI 跨 url 保
+                        // @State，copied/openFailed 残留上一链接的「已复制/无法打开」态；
+                        // .id(url) 换链即换身份，瞬态随 url 归零（与行物化重建同口径）。
                         LinkActionBubble(url: url, onDismiss: dismissLinkBubble)
+                            .id(url)
                     }
                 }
                 .animation(.easeInOut(duration: 0.15), value: pendingLink != nil && bubbleActive)
+                // 自检轮 R2-10：失坑即清行态——他行占坑（bubbleActive 翻 false）时本行
+                // pendingLink 一并复位，行级关闭层/气泡随行消失；与上方关闭层门、dismiss
+                // 上抛条件三侧同口径，残行不再持有任何呈现面。
+                .onChange(of: bubbleActive) { _, active in
+                    if !active, pendingLink != nil { pendingLink = nil }
+                }
                 if m.role != "user" { Spacer(minLength: 40) }
             }
         }
     }
 
     /// 自检轮 R1-6：收起本行气泡——行内空白关闭层与胶囊空白点按共用：清行态并上抛清除
-    /// 会话级活跃 id（跨行互斥随行释放）。
+    /// 会话级活跃 id（跨行互斥随行释放）。自检轮 R2-1：上抛仅在本行持有坑位时进行——
+    /// 残行（已被他行夺坑）只清本地 pendingLink，不动会话级坑位（防误关他行在途气泡）。
     private func dismissLinkBubble() {
+        let ownsSlot = bubbleActive
         pendingLink = nil
-        onLinkBubbleActiveChange?(nil)
+        if ownsSlot { onLinkBubbleActiveChange?(nil) }
     }
 
     // ── wp-8①：行菜单（拷贝全文 / 失败行重发）——挂载点分叉见上方正文 #if 与行脚注

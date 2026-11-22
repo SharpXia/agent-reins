@@ -133,7 +133,13 @@ final class HubMediaLoader {
         if let hit = cache.object(forKey: mediaId as NSString) { return hit }
         if let running = inflight[mediaId] { return await running.value }
         let task = Task<UIImage?, Never> { [weak self] () -> UIImage? in
-            guard let self, MediaIdCheck.isUlid(mediaId) else { return nil }
+            // 自检轮 R2-3：病态 mediaId（非 ULID）同样要在途登记清账——早退不清 inflight
+            // 会让该 id 的失败任务永久滞留映射，后续 image(for:) 恒取已完成任务的 nil，
+            // 缩略图失败态「点击重试」不再走网络/磁盘（合法 ULID 失败路径无此问题）。
+            guard let self, MediaIdCheck.isUlid(mediaId) else {
+                self?.inflight[mediaId] = nil
+                return nil
+            }
             // 磁盘命中路径：磁盘 IO 与解码下放 utility detached（本任务体继承 @MainActor，
             // 重活显式离主线程）——命中即回填 NSCache，与网络路径共享同一解码口径（2048 帽）。
             let diskImage: UIImage? = await Task.detached(priority: .utility) { () -> UIImage? in
@@ -185,6 +191,32 @@ final class RemoteImageLoader {
         cache.countLimit = 96
     }
 
+    /// 自检轮 R2-11：取数体量帽——`URLSession.data` 对响应体全量缓冲无上限，外链内容不受
+    /// 仓内控制，超大响应可把行内加载协程内存拉到响应体量级。帽值与桌面 MediaCache
+    /// fetchFromNetwork 体量帽同值互锚（桌面侧同轮修复）；磁盘帽 256MB/内存帽 96 进程级
+    /// 之外补齐「网络→内存」这一跳。
+    private nonisolated static let maxFetchBytes = 32 * 1024 * 1024
+
+    /// 帽内流式取数（iOS 15+ bytes 流）：逐字节累计、超帽即中止返回 nil——走失败态可重试/
+    /// chip 降级，错误方向安全（不显示而非 OOM）。Foundation 的 AsyncBytes 无公开分块读面，
+    /// 图级体量下逐元素遍历成本可接受；中止后剩余响应不再进入本协程内存（未消费字节随流
+    /// 对象弃置回收）。其余语义（默认超时/重定向）与 URLSession.data 一致。nonisolated：
+    /// @MainActor 类的 static 成员默认随主 actor，逐字节循环须离主线程（SE-0338 全局执行器）。
+    private nonisolated static func fetchCapped(_ url: URL) async -> (Data, URLResponse)? {
+        guard let (bytes, response) = try? await URLSession.shared.bytes(from: url) else { return nil }
+        var data = Data()
+        data.reserveCapacity(1 << 20)
+        do {
+            for try await byte in bytes {
+                data.append(byte)
+                if data.count > maxFetchBytes { return nil }
+            }
+        } catch {
+            return nil
+        }
+        return (data, response)
+    }
+
     func image(for url: URL) async -> UIImage? {
         // 需求4（2026-11-23 批次一，复核 B6 对锁）：磁盘缓存键 = stableCacheKey——剥离已知
         // 时效/签名 query 参数并重排序归一，签名窗轮转不换键；白名单外参数全保留（未知签名
@@ -205,7 +237,8 @@ final class RemoteImageLoader {
                 self.inflight[key] = nil
                 return diskImage
             }
-            let fetched = try? await URLSession.shared.data(from: url)
+            // 自检轮 R2-11：取数走 maxFetchBytes 体量帽（fetchCapped，超帽 nil=失败态）。
+            let fetched = await Self.fetchCapped(url)
             let raw = fetched?.0
             // 网络命中路径（自检轮 R1-9/R1-19，对齐桌面 MediaCache 同轮纪律）：URLSession 对
             // 4xx/5xx 不抛错（错误页字节照回）——非 2xx 不解码不落盘；2xx 先解码、成功才落盘

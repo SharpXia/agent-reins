@@ -1554,7 +1554,9 @@ final class HubStore {
     //   Swift 侧按归属可得性显式降级，不编造归属。
 
     /// #4（2026-11-07 二轮）：本地通知派发门槛——仅前台（后台由 APNs 单通道承载，前台 APNs
-    /// 横幅已在 NotificationCoordinator.willPresent 全量抑制：前台=本地/后台=远端，无双响）；
+    /// 横幅已在 NotificationCoordinator.willPresent 全量抑制；「前台=本地/后台=远端」的
+    /// 单通道切分在**派发面**成立、在呈现面不成立——前台本地通知同被 willPresent 空呈现，
+    /// 现状与恢复前置条件见 NotificationCoordinator.willPresent 注）；
     /// 重建（rebuilding）期间的会话列表推送是快照重放，旧消息 unread 差异不算「新回复」。
     private var shouldNotifyLocally: Bool {
         UIApplication.shared.applicationState == .active && syncPhase != "rebuilding"
@@ -1573,6 +1575,9 @@ final class HubStore {
     /// 文本为空），session.message 广播→message.created 每条直达本面——空正文无附件行与
     ///「无回复」心跳行不派发，纯附件行照推（summary 承载「[图片]」家族）。11-06 三面过滤
     ///（客户端查询/服务端 unread/推送闭值）缺的第四面，v1.3 触发面迁移时遗留的回归。
+    /// 结构缺口（FLOW-1 在案）：本面无消息重放锚——若前台本地通知呈现恢复，resume 补投
+    /// 与 APNs 推送会双响显形；恢复的前置条件与候选锚设计（resumeSync 时刻锚 / APNs
+    /// payload 带 messageId）见 NotificationCoordinator.willPresent 注，实现待拍板不落。
     private func noteReplyMessage(conversationId: String, runId: String, content: String, attachmentCount: Int) {
         guard isLoggedIn, !conversationId.isEmpty else { return }
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)

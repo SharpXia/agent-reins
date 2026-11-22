@@ -5,10 +5,11 @@ import UserNotifications
 /// wp-13：iOS 本地通知协调器——UNUserNotificationCenter 的唯一出入口。
 ///
 /// 职责边界：授权请求（登录态建立时一次）、通知派发（内容最小化：只有 kind 会话名，
-/// 不携带审批 payload 与消息正文）、前台横幅呈现（验收要求前台也收到审批与回复通知）、
-/// 点按回调（userInfo.conversationId → HubStore 跳会话）。触发判定（非当前打开/静音/
-/// 去重）全部在 HubStore 差异面，本类不做业务判定。wp-17 增补：远程通知注册入口
-/// （token 取得与上报在 AppDelegate，见 App.swift）。
+/// 不携带审批 payload 与消息正文）、前台呈现裁决（2026-11-07 重复推送根修起全量抑制=
+/// 前台零横幅，原验收「前台也收到审批与回复通知」的呈现面已失效——现状与恢复前置条件
+/// 见 willPresent 注）、点按回调（userInfo.conversationId → HubStore 跳会话）。触发判定
+///（非当前打开/静音/去重）全部在 HubStore 差异面，本类不做业务判定。wp-17 增补：远程
+/// 通知注册入口（token 取得与上报在 AppDelegate，见 App.swift）。
 ///
 /// 静默降级纪律（验收硬要求）：权限拒绝（denied）/未决定（notDetermined）时派发静默
 /// no-op；`UNUserNotificationCenter.add` 失败只吞错误，任何路径不抛不崩。macOS 通知面
@@ -100,11 +101,19 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
 
     // ---------- UNUserNotificationCenterDelegate ----------
 
-    /// #4（2026-11-07 二轮，重复推送根修）：前台 APNs 横幅全量抑制——前台呈现完全由本地通知
-    /// 承载（replyArrived/runFailed/approvalRequested 均有本地路径，且仅前台派发），后台由
-    /// APNs 承载（进程挂起，本地无法派发）——前台/后台单通道切分，杀掉「APNs + 本地」同响。
-    /// 当前打开会话的推送因此也不再弹（消息在时间线实时可见）；锁屏/后台的系统呈现不受本
-    /// 回调影响。载荷事件类型在 userInfo（桥侧信封元数据），如需按类型差异化再启用。
+    /// #4（2026-11-07 二轮，重复推送根修）：前台呈现**全量抑制**——无条件
+    /// `completionHandler([])`，前台对本地与 APNs 通知一概不呈现横幅/声音（willPresent
+    /// 在前台对两类通知都会回调）。史实（commit 4d9759b message）：当时意图是「前台=本地/
+    /// 后台=APNs」单通道切分杀双响，但同一提交把本回调改为无条件空呈现后，本地通知的
+    /// 前台呈现通道一并熄灭——注释原声称的「前台呈现完全由本地通知承载」从未兑现，
+    /// 本地通知仍被 HubStore.shouldNotifyLocally 照常调度（仅前台派发），只是呈现为空，
+    /// 净效果=前台横幅全灭（回复/审批/run 失败前台均不弹）；是回归还是有意的降噪拍板
+    /// 无在案记录，现状如此。锁屏/后台的系统呈现不受本回调影响（后台由 APNs 承载）。
+    /// 结构缺口（FLOW-1 在案）：若未来恢复前台本地呈现，必须先补 APNs 回声锚——候选
+    /// 设计一：resumeSync 时刻锚（挂起窗内的 message.created 不再本地重推）；候选设计二：
+    /// APNs payload 携带 messageId 做端上去重（触服务端推送面）。否则恢复当日即「resume
+    /// 补投本地通知 + APNs 推送」双响显形（noteReplyMessage 无重放锚，见 HubStore 同名
+    /// 函数注）。载荷事件类型在 userInfo（桥侧信封元数据），如需按类型差异化再启用。
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification,

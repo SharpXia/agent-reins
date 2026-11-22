@@ -1437,14 +1437,17 @@ struct HubChatView: View {
                 // 构造提为局部 let 拆散 TextField 长链的 Release 类型检查负担（行为等价）。
                 // 2026-11-22 键位通道修复轮：面板/空白/多行三个渲染期快照提共享局部 let——
                 // .onKeyPress 双保险挂载与文本视图层 composer（Catalyst 分支见下）同帧同
-                // 快照注入，分流全走 ComposerKeyRouter 纯表语义恒同。
+                // 快照注入，分流全走 ComposerKeyRouter 纯表语义恒同。同日债清轮补第四个：
+                // 附件在场快照（分流表②真空白/③强发的附件半边，见 routeEnter 注）。
                 let panelVisibleNow = !slashSuggestions.isEmpty
                 let draftTextIsBlankNow = draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                let draftHasAttachmentsNow = !hub.draft(for: conv.conversationId).attachments.isEmpty
                 let draftIsMultilineNow = draftText.contains("\n")
                 let keyHandlers = ComposerKeyHandlers(
                     isFocused: composerFocused,
                     panelVisible: panelVisibleNow,
                     draftTextIsBlank: draftTextIsBlankNow,
+                    draftHasAttachments: draftHasAttachmentsNow,
                     draftIsMultiline: draftIsMultilineNow,
                     onSend: { sendDraft() },
                     onMoveHighlight: { slashMoveSelection($0) },
@@ -1461,8 +1464,8 @@ struct HubChatView: View {
                 //（iOS 编译期剔除零操作；Catalyst 文本视图层已消费的事件不再以 SwiftUI
                 // press 形态可达，挂载待新层真机验证后撤）。
                 // 2026-11-21 回车语义轮注记保留：Enter 生效门=聚焦+IME（面板可见性下沉为
-                // Enter 分流内的行为分支）；shift/⌘/Ctrl 读键值实时修饰键，面板/空白/多行是
-                // 渲染期快照 flag（HubStore @Observable 草稿变化即重渲染）。
+                // Enter 分流内的行为分支）；shift/⌘/Ctrl 读键值实时修饰键，面板/空白/附件/
+                // 多行是渲染期快照 flag（HubStore @Observable 草稿变化即重渲染）。
                 Group {
                     #if targetEnvironment(macCatalyst)
                     ZStack(alignment: .topLeading) {
@@ -1473,6 +1476,7 @@ struct HubChatView: View {
                             maxHeightLines: 4,
                             panelVisible: panelVisibleNow,
                             draftTextIsBlank: draftTextIsBlankNow,
+                            draftHasAttachments: draftHasAttachmentsNow,
                             draftIsMultiline: draftIsMultilineNow,
                             onSend: { sendDraft() },
                             onMoveHighlight: { slashMoveSelection($0) },
@@ -2160,20 +2164,24 @@ private struct SlashCommandPanel: View {
 /// - Enter（keys:[.return]，仅门聚焦+IME，不看面板）分流序——首个命中生效，与桌面
 ///   resolveEnterKey 一张表（前缀序号 = 优先级，全表见 ComposerKeyRouter.routeEnter）：
 ///   ① Shift → 让行（任何情况强制换行）；
-///   ② 空白草稿 → 消费（no-op 不发不换行；先于 ⌘ 判定——空白+⌘Enter 与发送中
-///     +⌘Enter 不落默认换行）。空白判据=纯文本不含附件（附件独发走发送键，与桌面一致）；
-///     知情边界：发送按钮的 ⌘Return 键盘快捷键通道语义跟按钮（draftHasContent 含附件），
-///     纯附件草稿（文本空白+附件在场）在②按空白消费 no-op，但快捷键通道仍可能先触发按钮
-///     发送——同键同草稿态可能「发附件/不动」分叉，实机 ⌘Enter 四态
-///     走查覆盖（桌面键盘通道 2026-11-21 债清已对齐=draftHasContent 含附件即发，本分叉仅
-///     存在于 Catalyst 自身通道间）；
+///   ② 真空白草稿（文本空白且无附件）→ 消费（no-op 不发不换行；先于 ⌘ 判定——空白+⌘Enter
+///     与发送中+⌘Enter 不落默认换行）。2026-11-22 债清轮附件感知对齐桌面矩阵
+///    （SlashCommandRules.resolveEnterKey）：原「纯附件草稿（文本空白+附件在场）在②按空白
+///     消费 no-op、与发送按钮 ⌘Return 快捷键通道（draftHasContent 含附件）同键分叉」的
+///     知情差异消除——附件独发 ⌘Enter 现走③强发（快捷键通道同语义，两通道同键同果），
+///     附件独发裸 Enter/面板可见 Enter 让行默认换行（桌面 hasAttachments→Newline 支同
+///     口径）；真机 ⌘Enter 四态走查仍为在案项；
 ///   ③ ⌘/Ctrl → 强制发送（onSend；含 .control——桌面 isMetaOrCtrlPressed 同
-///     口径，Ctrl+Enter 多行同发，2026-11-21 走查修复②对齐；发送在途由 HubStore
+///     口径，Ctrl+Enter 多行同发，2026-11-21 走查修复②对齐；强发判据=有内容即文本非空白
+///     或附件在场，②真空白兜底先行故到达本支的草稿必有内容；发送在途由 HubStore
 ///     .sendingDraftFor 防重保证单次——发送按钮在场时与 ⌘Return 键盘快捷键构成多通道，
 ///     任一路只发一次）；
-///   ④ 面板可见 → 原样发送当前输入（不走补全；与分支⑤单行同果，保留分支只为表意——
+///   ④ 面板可见 → 原样发送当前输入（不走补全；文本非空白前置与桌面④同口径——面板可见
+///     ⇔草稿 "/" 起手故恒满足，纯附件草稿不落本支；与分支⑤单行同果，保留分支只为表意——
 ///     「面板可见 Enter 直接发送」的用户口径）；
-///   ⑤ 多行 → 让行（需求2：已多行 Enter=插换行，让 TextField 默认行为）；单行 → 发送。
+///   ⑤ 多行 → 让行（需求2：已多行 Enter=插换行，让 TextField 默认行为）；单行 → 发送；
+///     文本空白+附件在场（附件独发）裸 Enter → 让行默认换行（桌面 hasAttachments→Newline
+///     支同口径，不误发）。
 /// - ↑↓/Tab（keys:[.upArrow,.downArrow,.tab]，三重门聚焦+IME+面板可见）：↑↓ 移动高亮、
 ///   Tab 补全高亮（无键盘动作即首行）命令+空格。
 /// Shift/⌘ 读键值实时修饰键（渲染期快照会失真）；panelVisible/空白/多行是
@@ -2191,23 +2199,32 @@ private enum ComposerKeyRouter {
     /// ↑↓/Tab 键位（KeyPress.key 与 UIKey.keyCode 两映射都归到本枚举）。
     enum ArrowTabKey { case up, down, tab }
 
-    /// Enter 分流（分流序 Shift→空白→⌘/Ctrl→面板可见→多行/单行；序号 = 优先级，
-    /// 首个命中生效）。allowsSend=false = 限权模式（insertText 兜底通道专用）：修饰键
-    /// 上下文不可得，只允许消费②空白 no-op，发送分支（③④⑤-send）一律让行默认换行、
-    /// 永不触发 onSend——两道闸之二（2026-11-22 复核轮，见 ComposerTextViewBase 类注）。
+    /// Enter 分流（分流序 Shift→真空白→⌘/Ctrl→面板可见→多行/单行→附件独发；序号 =
+    /// 优先级，首个命中生效；与桌面 SlashCommandRules.resolveEnterKey 逐支对齐——
+    /// 2026-11-22 债清轮附件感知：②空白消费收窄为真空白（文本空白且无附件，与桌面
+    /// ②真空白兜底同判据），③强发判据=有内容（文本非空白或附件在场，与桌面
+    /// draftHasContent 同义——附件独发 ⌘Enter 强发），④面板支补文本非空白前置（桌面
+    /// slashPanelVisible && isNotBlank 同口径），附件独发裸 Enter 让行默认换行不误发
+    ///（桌面 hasAttachments→Newline 支同口径）。allowsSend=false = 限权模式（insertText
+    /// 兜底通道专用）：修饰键上下文不可得，只允许消费②真空白 no-op，发送分支（③④⑤-send）
+    /// 一律让行默认换行、永不触发 onSend——两道闸之二（2026-11-22 复核轮，见
+    /// ComposerTextViewBase 类注）。
     static func routeEnter(
-        shift: Bool, metaOrCtrl: Bool, draftTextIsBlank: Bool,
+        shift: Bool, metaOrCtrl: Bool, draftTextIsBlank: Bool, draftHasAttachments: Bool,
         panelVisible: Bool, draftIsMultiline: Bool, onSend: () -> Void,
         allowsSend: Bool = true
     ) -> Bool {
         if shift { return false } // ① 任何情况强制换行
-        if draftTextIsBlank { return true } // ② 空白兜底 no-op（先于 ⌘ 判定）
+        if draftTextIsBlank && !draftHasAttachments { return true } // ② 真空白兜底 no-op（先于 ⌘ 判定）
         if !allowsSend { return false } // 限权：③④⑤-send 全让行（默认插换行）
-        if metaOrCtrl { onSend(); return true } // ③ ⌘/Ctrl+Enter 强制发送
-        if panelVisible { onSend(); return true } // ④ 面板可见=原样发送当前输入（不走补全）
-        if draftIsMultiline { return false } // ⑤ 多行=默认插换行
-        onSend() // ⑤ 单行=发送
-        return true
+        if metaOrCtrl { onSend(); return true } // ③ ⌘/Ctrl+Enter 强制发送（到此处草稿必有内容）
+        if panelVisible && !draftTextIsBlank { onSend(); return true } // ④ 面板可见+文本非空白=原样发送当前输入（不走补全）
+        if !draftTextIsBlank {
+            if draftIsMultiline { return false } // ⑤ 文本多行=默认插换行
+            onSend() // ⑤ 文本单行=发送
+            return true
+        }
+        return false // 附件独发裸 Enter=按多行矩阵让行默认换行（不消费不误发）
     }
 
     /// ↑↓/Tab 分流（三重门聚焦+IME+面板可见已由调用方过门）：↑↓ 移动高亮、
@@ -2228,10 +2245,12 @@ private struct ComposerKeyHandlers: ViewModifier {
     let isFocused: Bool
     /// 渲染期快照：斜杠面板可见（= !slashSuggestions.isEmpty）。
     let panelVisible: Bool
-    /// 渲染期快照：草稿纯文本 trim 后为空（不含附件——附件独发走发送键的守卫；勿与
-    /// draftHasContent 混用，后者含附件。桌面键盘通道 ⌘Enter 已对齐含附件即发，本纯文本
-    /// 判据只约束本端 onKeyPress 的②空白消费）。
+    /// 渲染期快照：草稿纯文本 trim 后为空（不含附件；勿与 draftHasContent 混用，后者含
+    /// 附件——两判据 2026-11-22 债清轮起都进分流表：②空白消费收窄为真空白
+    /// draftTextIsBlank && !draftHasAttachments，③强发补附件在场，对齐桌面矩阵）。
     let draftTextIsBlank: Bool
+    /// 渲染期快照：草稿 pending 附件槽位在场（draftHasContent 的附件半边）。
+    let draftHasAttachments: Bool
     /// 渲染期快照：草稿已含换行（多行）。
     let draftIsMultiline: Bool
     let onSend: () -> Void
@@ -2251,6 +2270,7 @@ private struct ComposerKeyHandlers: ViewModifier {
                         shift: m.contains(.shift),
                         metaOrCtrl: m.contains(.command) || m.contains(.control),
                         draftTextIsBlank: draftTextIsBlank,
+                        draftHasAttachments: draftHasAttachments,
                         panelVisible: panelVisible,
                         draftIsMultiline: draftIsMultiline,
                         onSend: onSend,
@@ -2325,8 +2345,11 @@ private struct ComposerTextView: UIViewRepresentable {
     let maxHeightLines: Int
     /// 渲染期快照：斜杠面板可见（= !slashSuggestions.isEmpty）。
     let panelVisible: Bool
-    /// 渲染期快照：草稿纯文本 trim 后为空。
+    /// 渲染期快照：草稿纯文本 trim 后为空（不含附件；与 draftHasAttachments 成对进分流表，
+    /// 见 ComposerKeyRouter.routeEnter ②/③ 债清轮口径）。
     let draftTextIsBlank: Bool
+    /// 渲染期快照：草稿 pending 附件槽位在场。
+    let draftHasAttachments: Bool
     /// 渲染期快照：草稿已含换行（多行）。
     let draftIsMultiline: Bool
     let onSend: () -> Void
@@ -2360,6 +2383,7 @@ private struct ComposerTextView: UIViewRepresentable {
                     shift: shift,
                     metaOrCtrl: metaOrCtrl,
                     draftTextIsBlank: draftTextIsBlank,
+                    draftHasAttachments: draftHasAttachments,
                     panelVisible: panelVisible,
                     draftIsMultiline: draftIsMultiline,
                     onSend: onSend,
@@ -2370,6 +2394,7 @@ private struct ComposerTextView: UIViewRepresentable {
                     shift: false,
                     metaOrCtrl: false,
                     draftTextIsBlank: draftTextIsBlank,
+                    draftHasAttachments: draftHasAttachments,
                     panelVisible: panelVisible,
                     draftIsMultiline: draftIsMultiline,
                     onSend: onSend,
@@ -2453,7 +2478,7 @@ final class ComposerTextViewBase: UITextView {
     enum Key {
         case enter(shift: Bool, metaOrCtrl: Bool)
         /// insertText 兜底专用：pressesBegan 未见的直插（软键盘/程序注入，Catalyst 恒硬件
-        /// 键盘理论不达）——无修饰键上下文，分流表只允许消费②空白 no-op，发送分支
+        /// 键盘理论不达）——无修饰键上下文，分流表只允许消费②真空白 no-op，发送分支
         /// （③④⑤-send）一律让行默认换行，永不触发 onSend。
         case enterFromFallback
         case tab
@@ -2522,7 +2547,7 @@ final class ComposerTextViewBase: UITextView {
         }
         // 闸二——pressesBegan 未见过该 press 的直插（软键盘/程序注入，Catalyst 恒硬件键盘
         // 理论不达）：走 enterFromFallback 限权分流，永不触发 onSend（发送只能由带修饰键
-        // 实况的 presses 主通道或发送键承担；②空白 no-op 消费保持）。
+        // 实况的 presses 主通道或发送键承担；②真空白 no-op 消费保持，附件独发让行默认换行）。
         if markedTextRange == nil, text == "\n", routeKey?(.enterFromFallback) == true {
             return
         }
@@ -4176,22 +4201,37 @@ private struct AnimatedEllipsis: View {
 /// 单页时不显示页点、高度收敛到内容。页面下标 @State：行随 LazyVStack 物化/去物化
 /// 重置回首页（可接受——目录顺序稳定，首页即最常用项）。id 走 keyPath（KMP DTO
 /// 类非 Identifiable，与既有 ForEach(id:) 同口径）。
+/// SWIFT-6（2026-11-22 债清轮）：行高 44pt 魔法数改 UIFontMetrics(.footnote) 缩放——
+/// 卡内按钮 .footnote/.caption2 随 Dynamic Type 缩放，页高预算同倍缩放（乘缩放系数路径），
+/// 大字号档不再裁剪末行。残余边界（在案 AX 走查项）：特大字号档下按钮文本超两行换行
+///（长模型名/长选项名）时实测行高超预算，仍可能裁剪——按内容实测行高需逐按钮测量，
+/// 本轮不落。
 private struct PagedChoiceGrid<Item, ID: Hashable, Card: View>: View {
     let items: [Item]
     let id: KeyPath<Item, ID>
-    /// 每页行数（列数固定 2，模型名/选项名两行文本按钮的实测行高 ~44pt）。
+    /// 每页行数（列数固定 2；行高基准 = 两行文本按钮实测 44pt，随字号档缩放见 pageHeight）。
     var rowsPerPage: Int = 3
     @ViewBuilder let card: (Item) -> Card
 
     @State private var page: Int = 0
+    /// 字号档挂进 body 依赖：环境档变化触发本视图重估、页高随缩放系数重算（UIFontMetrics
+    /// 无参 scaledValue 读的是应用级 preferredContentSizeCategory，不读环境值 SwiftUI
+    /// 不知道要重估本视图）。
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     private var perPage: Int { rowsPerPage * 2 }
     private var pageCount: Int { max(1, (items.count + perPage - 1) / perPage) }
 
-    /// 页高 = 行高 44 × 行数 + 行距 6 × (行数-1)；多页时底部加页点净空（页点 overlay
+    /// 行高 = 44pt 基准 × 当前字号档缩放系数（.footnote 度量与卡内按钮主字号同族）。
+    private var scaledRowHeight: CGFloat {
+        _ = dynamicTypeSize
+        return UIFontMetrics(forTextStyle: .footnote).scaledValue(for: 44)
+    }
+
+    /// 页高 = 行高 × 行数 + 行距 6 × (行数-1)；多页时底部加页点净空（页点 overlay
     /// 在 TabView 底缘内，不占独立高度，须预留防与末行按钮重叠）。
     private var pageHeight: CGFloat {
-        let grid = CGFloat(rowsPerPage) * 44 + CGFloat(rowsPerPage - 1) * 6
+        let grid = CGFloat(rowsPerPage) * scaledRowHeight + CGFloat(rowsPerPage - 1) * 6
         return pageCount > 1 ? grid + 16 : grid + 2
     }
 

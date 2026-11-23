@@ -506,25 +506,48 @@ private struct NewConversationAgentRow: View {
     }
 }
 
-// private→internal（feature/mac-bigscreen-20261118）：Mac 侧栏行复用本行（MacSplitRoot
-// List 行 = 本行 + tag），纯可见性放宽，零行为差。
+// private→internal（feature/mac-bigscreen-20261118）：Mac 侧栏行复用本行作**内容视图**
+//（选中/按压底面由 MacSplitRoot 的 MacSidebarRow 单层自绘——本行不携带选中态、不挂
+// listRowBackground），纯可见性放宽。
 struct HubConversationRow: View {
     @State private var hub = HubStore.shared
     let c: UiConversation
-    /// 选中态翻色（2026-11-21 观感整治轮引入；2026-11-23 Mac 交互回归修复轮改语义）：
-    /// 选中底 = selectionFill 近页面克制灰（不再翻黑/翻白整行反色——用户反馈纯黑实底
-    /// 突兀且影响阅读），行内文字切 onSelection/onSelectionMuted 对（值为深/浅原色系，
-    /// 对 selectionFill 14.04~5.34:1 实测见 InkTheme.swift——翻色机制保留、观感上与
-    /// 未选中行同系，选中态只由底色微差表达）。
-    /// 选中底走 listRowBackground 显式不透明实底（取代系统 sidebar 半透明 accent 胶囊
-    /// ——半透明胶囊落屏 α 合成不受控、对比度口径只在不透明令牌对成立，见 body 尾注）。
-    /// 默认 false：iOS 会话列表调用点（HubHomeView）不传参零变化。
-    var selected: Bool = false
     /// DONE 瞬时窗（角色系统批次2）：hasActiveRun 真→假 触发 900ms 完成弹跳后回落 IDLE。
     /// generation 防 900ms 窗内新 run 启动的陈旧回调误清（真→假→真 序列每次跳变 +1 作废旧窗）。
     @State private var botDoneGeneration = 0
     @State private var botDoneTransient = false
     @Environment(\.inkColors) private var ink
+
+    /// 行内文字三档（2026-11-23 Mac 焦点侧栏终版修复轮）。
+    /// Catalyst 侧栏：显式不透明令牌 sidebarText / sidebarTextMuted，**选中与未选中同值**——
+    /// 此前未选中行走系统 `.tertiary`/`.secondary`，在侧栏材质上落色仅 2.34:1（暗）/
+    /// 1.86:1（亮），而选中行走实色令牌 5.3~5.7:1，即「选中能看清、未选中看不清」；且文字
+    /// 随选中翻色（#585858↔#A8A8A8 跳变）是切换会话时行面闪动的来源之一。令牌对比度全表
+    /// 见 InkTheme.swift。iOS 列表维持系统层级色零变化（编译期分支）。
+    private var titleStyle: AnyShapeStyle {
+        #if targetEnvironment(macCatalyst)
+        return AnyShapeStyle(ink.sidebarText)
+        #else
+        return AnyShapeStyle(.primary)
+        #endif
+    }
+    /// 弱化档（时间戳/网关名/对账中）。
+    private var mutedStyle: AnyShapeStyle {
+        #if targetEnvironment(macCatalyst)
+        return AnyShapeStyle(ink.sidebarTextMuted)
+        #else
+        return AnyShapeStyle(.tertiary)
+        #endif
+    }
+    /// 预览档（iOS 与 muted 分系统两级；Catalyst 同落 sidebarTextMuted——「常规状态看得清
+    /// 所有文字」口径下侧栏弱化文字只保留一档）。
+    private var previewStyle: AnyShapeStyle {
+        #if targetEnvironment(macCatalyst)
+        return AnyShapeStyle(ink.sidebarTextMuted)
+        #else
+        return AnyShapeStyle(.secondary)
+        #endif
+    }
 
     private var title: String {
         if !c.label.isEmpty { return c.label }
@@ -571,13 +594,12 @@ struct HubConversationRow: View {
             )
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    // 选中翻色五处之一（标题）：未选中 = 系统主文字（今日原样）。
                     Text(title)
                         .fontWeight(.semibold).lineLimit(1)
-                        .foregroundStyle(selected ? AnyShapeStyle(ink.onSelection) : AnyShapeStyle(.primary))
+                        .foregroundStyle(titleStyle)
                     if c.reconciling {
                         Text("对账中").font(.caption2)
-                            .foregroundStyle(selected ? AnyShapeStyle(ink.onSelectionMuted) : AnyShapeStyle(.secondary))
+                            .foregroundStyle(mutedStyle)
                     }
                     Spacer(minLength: 0)
                     // #1（2026-11-08）：最近活跃时间（title 行右侧弱化展示——桌面
@@ -585,18 +607,18 @@ struct HubConversationRow: View {
                     Text(formatMessageTimeISO(c.lastActiveAt))
                         .font(.caption2)
                         .lineLimit(1)
-                        .foregroundStyle(selected ? AnyShapeStyle(ink.onSelectionMuted) : AnyShapeStyle(.tertiary))
+                        .foregroundStyle(mutedStyle)
                 }
                 // 多网关轮（§3.2）：标题下网关名 caption——多网关混排列表的归属歧义就此消除；
                 // hub.gateways 按 gatewayId 查名，空名/未知回退 gatewayId 尾段（gatewayDisplayName 口径）
                 Text(hub.gatewayDisplayName(c.gatewayId))
                     .font(.caption2)
                     .lineLimit(1)
-                    .foregroundStyle(selected ? AnyShapeStyle(ink.onSelectionMuted) : AnyShapeStyle(.tertiary))
+                    .foregroundStyle(mutedStyle)
                 if !c.preview.isEmpty {
                     Text(c.preview).font(.footnote)
                         .lineLimit(1)
-                        .foregroundStyle(selected ? AnyShapeStyle(ink.onSelectionMuted) : AnyShapeStyle(.secondary))
+                        .foregroundStyle(previewStyle)
                 }
             }
             Spacer()
@@ -612,14 +634,8 @@ struct HubConversationRow: View {
             }
         }
         .padding(.vertical, 2)
-        // 选中底色面（2026-11-23 Mac 交互回归修复轮定稿）：显式不透明 selectionFill 实底
-        //（近页面克制灰，取代系统 sidebar 半透明 accent 胶囊——半透明胶囊落屏 α 合成
-        // 不受控、对比度口径只在不透明令牌对成立）；未选中传 nil = 系统默认底零变化
-        //（iOS 调用点 selected 恒 false）。选中视觉强度 = 底与页面的微差（明 1.18 /
-        // 暗 1.38:1），行内文字由 onSelection 系令牌保持在深/浅原色系，可读性同未选中行。
-        // sidebar 样式对自定义行底若有平台级覆写（无 API 承诺），以真机明暗双模式走查为
-        // 准（client-ux-round-20261121.md:63 deferred 验收项）。
-        .listRowBackground(selected ? AnyView(RoundedRectangle(cornerRadius: 8).fill(ink.selectionFill)) : nil)
+        // 选中/按压底面不在此：Mac 侧栏由 MacSidebarRow 单层自绘（见 Mac/MacSplitRoot.swift
+        // 文件头注）；iOS 列表走系统选中面，本行零额外底。
         .onChange(of: c.hasActiveRun) { _, active in
             botDoneGeneration += 1
             if active {
@@ -662,10 +678,27 @@ struct HubChatView: View {
     /// 失坑即清（R2-10，不留不可见 tap 捕获层）；行出视口随 LazyVStack 重建行态同样复位，
     /// 本态残指旧行无呈现面（幂等无害，下次占坑即覆写）。
     @State private var linkBubbleMessageId: String?
-    /// 角色系统批次4：标题栏交互角色的眼神触发面——composer 输入聚焦下视（@FocusState）、
-    /// 标题区指针注视（onContinuousHover，Catalyst/Mac；触摸设备无 hover 自然只走后三路）、
-    /// 新消息一次性下瞥 400ms。gaze 合成优先级：注视 > 聚焦下视 > 下瞥窗 > nil。
+    /// 角色系统批次4：标题栏交互角色的眼神触发面——composer 输入聚焦下视、标题区指针注视
+    /// （onContinuousHover，Catalyst/Mac；触摸设备无 hover 自然只走后三路）、新消息一次性
+    /// 下瞥 400ms。gaze 合成优先级：注视 > 聚焦下视 > 下瞥窗 > nil。
+    ///
+    /// 平台分型（2026-11-23 Mac 焦点回归终版修复轮）：iOS = SwiftUI TextField，焦点走
+    /// @FocusState（.focused 修饰符绑定，系统 TextField 是合法 SwiftUI 焦点项）；Catalyst =
+    /// UITextView 桥（ComposerTextView），**焦点真值是 UIKit first responder，本态只作单向
+    /// 镜像**（coordinator 的 didBegin/didEnd 回写）——必须用普通 @State，不得用 @FocusState。
+    /// 根因实锤（进程内探针确定性复现，落档 docs/mac-focus-sidebar-round-20261123.md）：
+    /// B5（8de72d7）把 TextField 换成 representable 时丢了 .focused 修饰符，此后的 @FocusState
+    /// 成了**没有任何 SwiftUI 视图承载的悬空焦点请求**——点击时写入的 true 暂时留存在状态里，
+    /// 下一次界面更新（即输入第一个字符）焦点引擎发现没有可承载它的焦点项，把状态复位成
+    /// false，updateUIView 随即走 RESIGN 分支主动 resign（视图未重建、无他视图抢焦点，是
+    /// 自己的桥执行了复位）=「每输入一个字符就丢焦点」。两轮只怀疑 isScrollEnabled 翻转等
+    /// 旁路都未命中，因为悬空 FocusState 本身才是复位源。普通 @State 不进焦点引擎，不存在
+    /// 复位通道。
+    #if targetEnvironment(macCatalyst)
+    @State private var composerFocused: Bool = false
+    #else
     @FocusState private var composerFocused: Bool
+    #endif
     /// Catalyst composer IME 组合态（ComposerTextView coordinator 逐次 textViewDidChange
     /// 上报 markedTextRange 非 nil，2026-11-22 占位叠加修复轮）：占位符显隐读文本视图实况
     /// ——组合期草稿层刻意让行不同步（textViewDidChange 门），draftText 恒空、旧条件
@@ -1465,10 +1498,11 @@ struct HubChatView: View {
                 //（ComposerTextViewBase）——return/tab/↑↓ 在文本视图层直拦（pressesBegan
                 // 主通道 + insertText 兜底，IME 组合期 markedText 内建让行），分流走
                 // ComposerKeyRouter 纯表。占位/聚焦/限高镜像 TextField 既有观感（placeholder
-                // overlay + FocusState 桥 + 4 行 intrinsic 帽，观感 parity 以真机走查为准；
-                // 2026-11-23 回归修复轮：高度权威收进 representable sizeThatFits+scroll
-                // 恒开——空态一行、换行自适应增高至 4 行帽、超帽滚动，且首字符不再丢焦点，
-                // 详 ComposerTextView 头注）；同日占位叠加修复轮补：占位显隐另读
+                // overlay + 焦点镜像桥（@State，**不得用 FocusState**——悬空 FocusState 是首字符
+                // 丢焦点的真根因，见 composerFocused 注）+ 4 行 intrinsic 帽，观感 parity 以真机
+                // 走查为准；2026-11-23 回归修复轮：高度权威收进 representable sizeThatFits+scroll
+                // 恒开——空态一行、换行自适应增高至 4 行帽、超帽滚动，详 ComposerTextView
+                // 头注）；同日占位叠加修复轮补：占位显隐另读
                 // coordinator 上报的组合态（markedTextActive），组合期隐藏防与 marked text
                 // 叠字。iOS 分支 TextField 原文零变化。.modifier(keyHandlers) 双保险挂载
                 // 两分支共用（iOS 编译期剔除零操作；Catalyst 文本视图层已消费的事件不再以
@@ -2340,24 +2374,30 @@ private enum ComposerIME {
 }
 
 /// Catalyst composer 桥（2026-11-22 键位通道修复轮）：SwiftUI ↔ ComposerTextViewBase。
-/// text 单向同步（SwiftUI 草稿层为源，等值跳过防光标重置）；focus 经 FocusState<Bool>.Binding
-/// 双向桥（didBegin/didEnd 回写，写入由 becomeFirstResponder/resign 承担）——gaze 聚焦
-/// 下视与键位门复用既有 @FocusState 零改型；高度 = 内容自适应 + maxHeightLines 行帽
-///（TextField axis:.vertical + lineLimit(1...4) 同语义）；每帧把渲染期快照重封进
-/// routeKey 闭包（与 .onKeyPress 双保险挂载同帧同快照）。
+/// text 单向同步（SwiftUI 草稿层为源，等值跳过防光标重置）；focus = 普通 Binding<Bool>
+/// 双向桥（didBegin/didEnd 回写 UIKit first responder 实况，写入由 becomeFirstResponder/
+/// resign 承担）——gaze 聚焦下视与键位门共用宿主视图的 composerFocused 镜像态；高度 = 内容
+/// 自适应 + maxHeightLines 行帽（TextField axis:.vertical + lineLimit(1...4) 同语义）；每帧把
+/// 渲染期快照重封进 routeKey 闭包（与 .onKeyPress 双保险挂载同帧同快照）。
 ///
 /// 2026-11-23 Mac 交互回归修复轮（beta-0.5.27 用户反馈：composer 撑满整窗+首字符丢焦点）：
 /// ① 实现协议方法 `sizeThatFits(_:uiView:context:)` 作为 SwiftUI 侧高度唯一权威——缺省
 /// 实现对 UIScrollView 族（UITextView）会把 proposal 原样放行（isScrollEnabled=true 时
-/// 任意提案都「fit」），composer 被拉满可用高度即「空态撑满整窗」根因；② isScrollEnabled
-/// 恒开不翻转（旧实现首字符即触发翻转路径，focused 态翻滚动属性是 UIKit 重配置类行为、
-/// 可放弃 first responder=焦点回归头号嫌疑，机制判读记于 ComposerTextViewBase.init 注），
-/// 超帽滚动改由恒开滚动视图自担；③ focus 桥 become 前加 window 守卫（不在窗上的视图
-/// become 恒失败）。三触点皆 B5（8de72d7）引入且 B5 前的 SwiftUI TextField 均不存在=
-/// 对照面成立；装机走查闭环。
+/// 任意提案都「fit」），composer 被拉满可用高度即「空态撑满整窗」根因（此项成立，保留）；
+/// ② isScrollEnabled 恒开不翻转（超帽滚动改由恒开滚动视图自担，滚动行为纪律保留）；
+/// ③ focus 桥 become 前加 window 守卫。**② 当时被判为「首字符丢焦点头号嫌疑」属误判**——
+/// 该轮出包后丢焦点原样复现。
+///
+/// 2026-11-23 Mac 焦点回归终版修复轮（beta-0.5.28 用户反馈原样复现，进程内探针实锤）：
+/// 真根因 = 悬空 FocusState——B5 换 representable 时丢了 .focused 修饰符，@FocusState 没有
+/// SwiftUI 焦点项承载，首字符触发的界面更新里焦点引擎把状态复位 false，updateUIView 的
+/// RESIGN 分支随即执行（完整机制见 HubChatView.composerFocused 注）。修法 = 本参数由
+/// `FocusState<Bool>.Binding` 改普通 `Binding<Bool>`（宿主 Catalyst 分支 @State 单向镜像
+/// UIKit first responder），SwiftUI 焦点引擎不再参与，复位通道结构性不存在。
 private struct ComposerTextView: UIViewRepresentable {
     let text: Binding<String>
-    let focus: FocusState<Bool>.Binding
+    /// UIKit first responder 实况的 SwiftUI 侧镜像（宿主 @State，非 FocusState——见头注）。
+    let focus: Binding<Bool>
     /// IME 组合态回传（coordinator 逐次 textViewDidChange 上报 markedTextRange 非 nil）：
     /// 占位符显隐据此读文本视图实况——组合期草稿层让行不同步、draftText 恒空，占位需
     /// 另行隐藏（2026-11-22 占位叠加修复轮）。
@@ -2510,9 +2550,11 @@ final class ComposerTextViewBase: UITextView {
     /// 显式供给，滚动视图语义自担「超帽帽内滚动、帽内不弹跳（alwaysBounceVertical=false）」。
     /// **禁止翻转 isScrollEnabled**——旧实现 refreshHeight 按 overflows 翻转，首字符触发
     /// 占位符移除→瞬态重排→0 宽测量毒化 overflows 误判即翻（真值实测见 cappedContentHeight
-    /// 注）；focused 态下翻转文本视图的滚动属性属 UIKit 已知的重配置类行为（重建内部布局、
-    /// 可放弃 first responder——beta-0.5.27「输入一个字符就丢焦点、键盘被侧栏 List 接管」
-    /// 与首字符时点强相关，机制判读记此，装机走查闭环）。恒开后该翻转路径结构性不存在。
+    /// 注），恒开后该翻转路径结构性不存在（布局稳定性纪律，保留）。
+    /// 勘误（2026-11-23 焦点终版修复轮）：此前把「focused 态翻滚动属性可放弃 first responder」
+    /// 记为「输入一个字符就丢焦点」的头号嫌疑属误判——beta-0.5.28 撤翻转后丢焦点原样复现；
+    /// 真根因是宿主侧悬空 FocusState 被焦点引擎复位（见 HubChatView.composerFocused 注），
+    /// 与本类的滚动属性无关。
     override init(frame: CGRect, textContainer: NSTextContainer?) {
         super.init(frame: frame, textContainer: textContainer)
         isScrollEnabled = true
@@ -2628,8 +2670,8 @@ final class ComposerTextViewBase: UITextView {
     }
 
     /// 高度重算入口（草稿变化/文本外部重置/宽度变化三路调用）：只作废测量让宿主重新
-    /// 询问 cappedContentHeight。isScrollEnabled 恒开（init 钉死，翻转=丢焦点，见 init 注），
-    /// 旧版按 overflows 翻转 scroll 的逻辑已撤。
+    /// 询问 cappedContentHeight。isScrollEnabled 恒开（init 钉死，禁翻转——布局稳定性纪律，
+    /// 见 init 注），旧版按 overflows 翻转 scroll 的逻辑已撤。
     func refreshHeight() {
         invalidateIntrinsicContentSize()
     }

@@ -7,8 +7,11 @@ import SwiftUI
 // 1. `.tint` 只作交互控件着色，不作隐式文本色来源——行内文字一律显式令牌
 //    （.tint(colors.ink) 把 app accent 劫持成近白/近黑单色，beta-0.5.22 侧栏选中胶囊
 //    与行内浅灰白字同色的根因即「系统选中面吃 accent + 行内文字钉死 tertiary」叠加）。
-// 2. 系统选中面（List(selection:)/sidebar 胶囊）必须作用域覆盖 selectionFill 令牌，
-//    不得裸吃全局 tint——防未来全局 tint 漂移时选中面随行漂移。
+// 2. Mac 侧栏选中面**不使用系统选中面**（2026-11-23 焦点侧栏终版修复轮）：List(selection:)
+//    的系统胶囊是半透明、随键盘焦点在侧栏/输入框间迁移而变色（强调/非强调两相），且与
+//    自绘行底出现时机相差一帧以上——两层叠加即「切换会话选中行闪烁」。选中/按压面由
+//    MacSidebarRow 以不透明 selectionFill 单层自绘，行内文字 sidebarText/sidebarTextMuted
+//    选中未选中同值。iOS 列表不在本条范围（系统选中面照旧）。
 // 3. 新圆钮一律走统一面组件 `inkIconButtonFace`（Components.swift），禁就地
 //    `Circle().fill(...)`——就地拼面是半透明材质/雾面残留的根源（c01acea 只换了
 //    两处看不见的背景层，真身 glyph 半透明盘与默认 bezel 漏网）。
@@ -19,7 +22,7 @@ import SwiftUI
 
 /// 颜色令牌：与 composeApp `ui/theme/InkColors.kt` 同源同值。
 /// FuncColors 四件套在 Swift 里折平为带前缀的属性（infoText/infoBorder/...）。
-/// 选中面六令牌（selectionFill/onSelection/onSelectionMuted/controlFace/onControlFace/
+/// 选中面与按钮面令牌（selectionFill/sidebarText/sidebarTextMuted/controlFace/onControlFace/
 /// onControlFaceMuted）为本仓自有（2026-11-21 观感整治轮扩容），Kotlin 侧无对应——全部
 /// 不透明实色，明暗成对，对比度为本轮 python3 WCAG 2.x 相对亮度公式实测。
 struct InkColors {
@@ -70,22 +73,27 @@ struct InkColors {
     /// dark  0x4D9BFF 对 paper 6.64 / 气泡面 6.11 / 卡面 5.51 / elevated 5.91
     /// ——全表面 ≥4.5（描边/薄底等非文本用法 ≥3 同过）。
     let accent: Color
-    // ── 选中面（行选中实底 + 行内文字对）──
+    // ── 选中面（侧栏选中实底 + 行内文字对）──
     /// 选中行底色面（2026-11-23 Mac 交互回归修复轮：近页面克制灰——用户反馈
     /// 0x1C1C1C 纯黑实底「黑块突兀、与整页观感割裂」；select 的表达语义改为
     /// 「与页面微差的可辨灰」，行内文字保持深/浅原色系不再翻白黑，可读性优先。
-    /// 本令牌不透明（HubConversationRow 经 listRowBackground 显式实底接管，
-    /// 取代系统 sidebar 半透明 accent 胶囊——半透明胶囊落屏 α 合成不受控，
-    /// 对比度口径只在不透明令牌对成立。List(selection:) 作用域 .tint 钉住同令牌保留）。
+    /// 本令牌不透明；Mac 侧栏选中/按压面由 MacSidebarRow 自绘（单一视觉来源，见
+    /// MacSplitRoot 头注），不依赖系统 sidebar 半透明胶囊。
     /// light 0xE9E9E9 ≈ 系统 quaternarySystemFill 惯用档；dark 0x2E2E2E ≈ controlFace
-    /// 同族。两模式与各自 paper 的差（1.18/1.38:1）即选中态的全部视觉强度。
+    /// 同族。两模式与各自侧栏底的差即选中态的全部视觉强度。
     let selectionFill: Color
-    /// 选中行主文字（标题）。2026-11-23 起为深/浅原色系（不再反色）：
-    /// light 0x1C1C1C 对 selectionFill 14.04:1 / dark 0xF5F5F5 对 12.46:1（WCAG 实测）。
-    let onSelection: Color
-    /// 选中行弱化文字（时间戳/网关名/预览/对账中）。light 0x5E5E5E 5.34:1 / dark
-    /// 0xA8A8A8 5.71:1（2026-11-23 重测）。
-    let onSelectionMuted: Color
+    /// 侧栏行主文字（标题/图标）。**选中与未选中同值**（2026-11-23 Mac 焦点侧栏终版修复轮）：
+    /// light 0x1C1C1C / dark 0xF5F5F5，对 selectionFill 14.04 / 12.46:1，对明暗侧栏底
+    ///（亮 0xE4E4E4~0xF8F8F8 / 暗 0x1A1A1A~0x3A3A3A 区间）最小 13.40 / 10.43:1（python3
+    /// WCAG 2.x 实测）——文字不随选中翻色，选中只由底色微差表达。
+    let sidebarText: Color
+    /// 侧栏行弱化文字（时间戳/网关名/预览/对账中），选中与未选中同值：light 0x5E5E5E /
+    /// dark 0xB0B0B0。beta-0.5.28 及之前未选中行用系统 `.tertiary`/`.secondary`，在侧栏
+    /// 材质上落色仅 2.34:1（暗，#585858）/1.86:1（亮，#AFAFAF）——「选中能看清、未选中
+    /// 看不清」即此（选中态走的是实色令牌）。本令牌对 selectionFill 5.34 / 6.26:1，对上述
+    /// 侧栏底区间最小 5.10 / 5.24:1，全部 ≥ WCAG AA 正文 4.5:1；dark 自 0xA8A8A8 提到
+    /// 0xB0B0B0 为亮壁纸下偏亮侧栏留余量。
+    let sidebarTextMuted: Color
     // ── 按钮面（统一圆钮 inkIconButtonFace 用）──
     /// 圆钮实色面（替代半透明材质/雾面 bezel）。light 0xFFFFFF / dark 0x2A2A2A。
     let controlFace: Color
@@ -137,8 +145,8 @@ struct InkColors {
             awaitingSubtle: Color(hex: 0x1680F3, alpha: 0x17),
             accent: Color(hex: 0x0A61BC),              // 链接/交互强调；paper 5.93:1 / 气泡面 5.30 / 卡面 4.74
             selectionFill: Color(hex: 0xE9E9E9),       // 近页面克制灰（≈quaternarySystemFill 档）
-            onSelection: Color(hex: 0x1C1C1C),         // 14.04:1 on selectionFill（深色原系不翻白）
-            onSelectionMuted: Color(hex: 0x5E5E5E),    //  5.34:1 on selectionFill
+            sidebarText: Color(hex: 0x1C1C1C),         // 14.04:1 on selectionFill；侧栏底区间最小 13.40（选中/未选中同值）
+            sidebarTextMuted: Color(hex: 0x5E5E5E),    //  5.34:1 on selectionFill；侧栏底区间最小 5.10
             controlFace: Color(hex: 0xFFFFFF),
             onControlFace: Color(hex: 0x1C1C1C),       // 17.04:1 on controlFace
             onControlFaceMuted: Color(hex: 0x6E6E6E),  //  5.10:1 on controlFace
@@ -183,8 +191,8 @@ struct InkColors {
             awaitingSubtle: Color(hex: 0x1884FC, alpha: 0x12),
             accent: Color(hex: 0x4D9BFF),              // =infoText 同值；paper 6.64:1 / 气泡面 6.11 / 卡面 5.51
             selectionFill: Color(hex: 0x2E2E2E),       // 近页面克制灰（controlFace 同族提亮档）
-            onSelection: Color(hex: 0xF5F5F5),         // 12.46:1 on selectionFill（浅色原系不翻黑）
-            onSelectionMuted: Color(hex: 0xA8A8A8),    //  5.71:1 on selectionFill
+            sidebarText: Color(hex: 0xF5F5F5),         // 12.46:1 on selectionFill；侧栏底区间最小 10.43（选中/未选中同值）
+            sidebarTextMuted: Color(hex: 0xB0B0B0),    //  6.26:1 on selectionFill；侧栏底区间最小 5.24
             controlFace: Color(hex: 0x2A2A2A),
             onControlFace: Color(hex: 0xEDEDED),       // 12.26:1 on controlFace
             onControlFaceMuted: Color(hex: 0xA8A8A8),  //  6.04:1 on controlFace

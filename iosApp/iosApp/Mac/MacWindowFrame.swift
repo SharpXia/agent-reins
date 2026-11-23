@@ -36,7 +36,7 @@ final class MacWindowSceneDelegate: NSObject, UIWindowSceneDelegate {
             NSLog("[MacWindowFrame] sizeRestrictions unavailable")
             return
         }
-        NSLog("[MacWindowFrame] sizeRestrictions before: \\(restrictions.minimumSize) → set min \\(minWindowSize) max ∞")
+        NSLog("[MacWindowFrame] sizeRestrictions before: \(NSStringFromSize(restrictions.minimumSize)) → set min \(NSStringFromSize(minWindowSize)) max ∞")
         restrictions.minimumSize = minWindowSize
         restrictions.maximumSize = CGSize(width: CGFloat.greatestFiniteMagnitude,
                                           height: CGFloat.greatestFiniteMagnitude)
@@ -80,7 +80,7 @@ final class MacWindowSceneDelegate: NSObject, UIWindowSceneDelegate {
                     try? JSONSerialization.data(withJSONObject: report).write(
                         to: dir.appendingPathComponent("probe-report.json"))
                 }
-                NSLog("[MacWindowFrame] probe: \\(report)")
+                NSLog("[MacWindowFrame] probe: \(report)")
             }
         }
     }
@@ -194,7 +194,7 @@ final class MacWindowSceneDelegate: NSObject, UIWindowSceneDelegate {
         windowScene.requestGeometryUpdate(
             UIWindowScene.GeometryPreferences.Mac(systemFrame: frame)
         ) { error in
-            NSLog("[MacWindowFrame] request frame failed: \\(error.localizedDescription)")
+            NSLog("[MacWindowFrame] request frame failed: \(error.localizedDescription)")
         }
     }
 

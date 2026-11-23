@@ -966,14 +966,18 @@ struct HubChatView: View {
         hub.setDraftText(cmd.name + " ", conversationId: conv.conversationId)
     }
 
-    // ── composer 键位（2026-11-21 回车语义轮；2026-11-20 Mac 键盘交互轮 ↑↓/Tab 原样保留）──
-    // 回车语义矩阵与斜杠面板键位一张表（拦截层 ComposerKeyHandlers，分流序全表见其头注释，
+    // ── composer 键位（2026-11-21 回车语义轮；2026-11-23 Mac 键位修复轮重排通道与④语义）──
+    // 回车语义矩阵与斜杠面板键位一张表（分流序全表见 ComposerKeyRouter.routeEnter 头注释，
     // 与桌面 SlashCommandRules.resolveEnterKey 逐支对齐）：IME 组合中全键让行 → Shift+Enter
-    // 强制换行 → 空白草稿消费 no-op → ⌘Enter 强制发送 → 面板可见 Enter=原样发送当前输入
-    //（2026-11-20 版「Enter 发送高亮命令」按用户口径废止——原样发送不走补全，高亮只服务
-    // ↑↓ 视觉与 Tab 补全，slashHandleReturn 随之退役）→ 单行发送 / 多行换行。
-    // nil = 未动过键盘（视觉高亮落第 0 行）；↑↓/Tab 仅面板可见时拦截，修饰器在 TextField
-    // 上 Catalyst 门控挂载（iOS 触控面零变化）。
+    // 强制换行 → 空白草稿消费 no-op → ⌘Enter 强制发送 → **面板可见 Enter=发送高亮的完整
+    // 斜杠命令**（2026-11-23 用户口径「enter 直接发送完整斜杠命令」，推翻 2026-11-20 版
+    // 「原样发送当前输入」；发送与点行 selectSlashCommand 同一通道，桌面端 ④ 仍为原样
+    // 发送=双端语义分叉知情在案）→ 单行发送 / 多行换行。
+    // nil = 未动过键盘（视觉高亮落第 0 行）；↑↓/Tab 仅面板可见时拦截。
+    // **通道（2026-11-23 beta-0.5.29 走查实锤）**：Catalyst 真实键盘的 return/tab/↑↓ 不走
+    // pressesBegan（B5 轮主通道整段未触发，落 insertText 兜底限权通道永不 onSend=「Enter
+    // 不发送」根因）——主通道改 UIKeyCommand（ComposerTextViewBase.keyCommands override，
+    // 修饰键完整、IME 门动态让行），.onKeyPress 双保险挂载与 pressesBegan 兜底通道保留。
 
     @State private var slashKeyboardIndex: Int?
 
@@ -997,6 +1001,14 @@ struct HubChatView: View {
         guard let i = slashActiveIndex else { return false }
         prefillSlashCommand(slashSuggestions[i])
         return true
+    }
+
+    /// 面板可见 Enter = 发送高亮（无键盘动作即首行）的完整斜杠命令——与点行
+    /// selectSlashCommand 同一通道（2026-11-23 用户口径「enter 直接发送完整斜杠命令」，
+    /// 路由层见 ComposerKeyRouter.routeEnter ④ 注）。
+    private func sendSlashHighlighted() {
+        guard let i = slashActiveIndex else { return }
+        selectSlashCommand(slashSuggestions[i])
     }
 
     /// wp-9：会话页内嵌审批卡的数据源——只挂归属本会话（conversationId 命中）的 pending 审批；
@@ -1491,6 +1503,7 @@ struct HubChatView: View {
                     draftHasAttachments: draftHasAttachmentsNow,
                     draftIsMultiline: draftIsMultilineNow,
                     onSend: { sendDraft() },
+                    onSendHighlighted: { sendSlashHighlighted() },
                     onMoveHighlight: { slashMoveSelection($0) },
                     onTabComplete: { slashHandleTab() },
                 )
@@ -1523,6 +1536,7 @@ struct HubChatView: View {
                             draftHasAttachments: draftHasAttachmentsNow,
                             draftIsMultiline: draftIsMultilineNow,
                             onSend: { sendDraft() },
+                            onSendHighlighted: { sendSlashHighlighted() },
                             onMoveHighlight: { slashMoveSelection($0) },
                             onTabComplete: { slashHandleTab() },
                         )
@@ -2254,16 +2268,26 @@ private enum ComposerKeyRouter {
     /// 兜底通道专用）：修饰键上下文不可得，只允许消费②真空白 no-op，发送分支（③④⑤-send）
     /// 一律让行默认换行、永不触发 onSend——两道闸之二（2026-11-22 复核轮，见
     /// ComposerTextViewBase 类注）。
+    ///
+    /// ④ 面板可见语义（2026-11-23 Mac 键位修复轮用户口径，推翻 2026-11-20 版）：
+    /// **Enter = 直接发送高亮的完整斜杠命令**（与点行 selectSlashCommand 同一通道——
+    /// hub.send(cmd.name)，无论是否带参），非旧版「原样发送当前输入不走补全」。
+    /// onSendHighlighted 缺省 nil 时回落 onSend（行为退回原样发送，桌面 resolveEnterKey
+    /// ④ 仍为原样发送——双端语义分叉知情，落档在案）。
     static func routeEnter(
         shift: Bool, metaOrCtrl: Bool, draftTextIsBlank: Bool, draftHasAttachments: Bool,
         panelVisible: Bool, draftIsMultiline: Bool, onSend: () -> Void,
+        onSendHighlighted: (() -> Void)? = nil,
         allowsSend: Bool = true
     ) -> Bool {
         if shift { return false } // ① 任何情况强制换行
         if draftTextIsBlank && !draftHasAttachments { return true } // ② 真空白兜底 no-op（先于 ⌘ 判定）
         if !allowsSend { return false } // 限权：③④⑤-send 全让行（默认插换行）
         if metaOrCtrl { onSend(); return true } // ③ ⌘/Ctrl+Enter 强制发送（到此处草稿必有内容）
-        if panelVisible && !draftTextIsBlank { onSend(); return true } // ④ 面板可见+文本非空白=原样发送当前输入（不走补全）
+        if panelVisible && !draftTextIsBlank {
+            if let sendHighlighted = onSendHighlighted { sendHighlighted() } else { onSend() } // ④ 面板可见=发送高亮完整命令（与点行同通道）
+            return true
+        }
         if !draftTextIsBlank {
             if draftIsMultiline { return false } // ⑤ 文本多行=默认插换行
             onSend() // ⑤ 文本单行=发送
@@ -2299,6 +2323,9 @@ private struct ComposerKeyHandlers: ViewModifier {
     /// 渲染期快照：草稿已含换行（多行）。
     let draftIsMultiline: Bool
     let onSend: () -> Void
+    /// ④ 面板可见 Enter = 发送高亮完整斜杠命令（selectSlashCommand 同通道；
+    /// 2026-11-23 用户口径，见 routeEnter 注）。
+    let onSendHighlighted: () -> Void
     /// ↑↓ 移动高亮（±1，环绕）。
     let onMoveHighlight: (Int) -> Void
     /// 返回 true = 已消费（高亮命令已预填）。
@@ -2319,6 +2346,7 @@ private struct ComposerKeyHandlers: ViewModifier {
                         panelVisible: panelVisible,
                         draftIsMultiline: draftIsMultiline,
                         onSend: onSend,
+                        onSendHighlighted: onSendHighlighted,
                     )
                     return consumed ? .handled : .ignored
                 }
@@ -2414,6 +2442,8 @@ private struct ComposerTextView: UIViewRepresentable {
     /// 渲染期快照：草稿已含换行（多行）。
     let draftIsMultiline: Bool
     let onSend: () -> Void
+    /// ④ 面板可见 Enter = 发送高亮完整斜杠命令（selectSlashCommand 同通道）。
+    let onSendHighlighted: () -> Void
     /// ↑↓ 移动高亮（±1，环绕）。
     let onMoveHighlight: (Int) -> Void
     /// 返回 true = 已消费（高亮命令已预填）。
@@ -2456,6 +2486,7 @@ private struct ComposerTextView: UIViewRepresentable {
                     panelVisible: panelVisible,
                     draftIsMultiline: draftIsMultiline,
                     onSend: onSend,
+                    onSendHighlighted: onSendHighlighted,
                 )
             case .enterFromFallback:
                 // insertText 兜底限权模式：永不触发 onSend（见 Key.enterFromFallback 注）。
@@ -2587,6 +2618,100 @@ final class ComposerTextViewBase: UITextView {
     /// press 序列起始复位；若 super 换行实际不走 insertText 则标记滞留到下一 press，
     /// 代价仅为该窗口内一次直插不过兜底（兜底本身近死代码，可忽略）。
     private var pressAlreadyRouted = false
+
+    // ── UIKeyCommand 主通道（2026-11-23 Mac 键位修复轮）──
+    // beta-0.5.29 走查实锤：Catalyst 真实键盘的 Enter 不走 pressesBegan（本类主通道整段
+    // 未触发），落到 insertText("\n") 兜底=限权永不 onSend——「单行 Enter 发送/斜杠面板
+    // Enter」双双失效。UIKit 对物理键盘的权威通道是 UIKeyCommand（responder 链按需询问
+    // keyCommands，input+modifierFlags 精确匹配，修饰键上下文完整）：本 override 动态注册
+    // return/tab/↑↓/⌘⌫，action 逐键实读 modifierFlags 后进同一张分流表（routeKey），未
+    // 消费分支手动补默认行为（注册即吞内建：换行/制表/光标移动不再自动发生）。
+    // IME 门 = markedTextRange 非 nil 时整表让行（返回 super.keyCommands——组合期候选
+    // 确认/导航/选定全部交回 IME 引擎）。⌘⌫ = macOS 文本编辑惯例「删除到行首」（同轮
+    // MacCommands 删除会话快捷键让位 ⌘⇧⌫，冲突见彼注）。
+    override var keyCommands: [UIKeyCommand]? {
+        // IME 组合期：全键让行（候选确认=Enter、候选导航=↑↓、候选选定=Tab 都不能拦）。
+        guard markedTextRange == nil else { return super.keyCommands }
+        var cmds = [
+            UIKeyCommand(input: "\r", modifierFlags: [], action: #selector(keyEnter(_:))),
+            UIKeyCommand(input: "\r", modifierFlags: .shift, action: #selector(keyEnter(_:))),
+            UIKeyCommand(input: "\r", modifierFlags: .command, action: #selector(keyEnter(_:))),
+            UIKeyCommand(input: "\r", modifierFlags: .control, action: #selector(keyEnter(_:))),
+            UIKeyCommand(input: "\t", modifierFlags: [], action: #selector(keyTab(_:))),
+            UIKeyCommand(input: UIKeyCommand.inputUpArrow, modifierFlags: [], action: #selector(keyArrow(_:))),
+            UIKeyCommand(input: UIKeyCommand.inputDownArrow, modifierFlags: [], action: #selector(keyArrow(_:))),
+            // ⌘⌫ 删到行首（backspace 两形态都注册：U+0008=backspace，U+007F=delete 等价形态）。
+            UIKeyCommand(input: "\u{8}", modifierFlags: .command, action: #selector(keyDeleteToLineStart(_:))),
+            UIKeyCommand(input: "\u{7F}", modifierFlags: .command, action: #selector(keyDeleteToLineStart(_:))),
+        ]
+        if let superCmds = super.keyCommands { cmds.append(contentsOf: superCmds) }
+        return cmds
+    }
+
+    /// Enter action：修饰键从 UIKeyCommand 实读（不再依赖 pressesBegan 的 UIEvent 面——
+    /// Catalyst 真机该通道未达）。未消费分支（Shift 换行/多行换行/附件独发）手动补默认
+    /// 换行：注册即吞内建，super 默认不再发生。
+    @objc private func keyEnter(_ cmd: UIKeyCommand) {
+        let m = cmd.modifierFlags
+        let consumed = routeKey?(
+            .enter(shift: m.contains(.shift),
+                   metaOrCtrl: m.contains(.command) || m.contains(.control))
+        ) ?? false
+        if !consumed { super.insertText("\n") }
+    }
+
+    /// Tab action：面板可见时补全高亮命令，面板隐藏未消费=补插制表符。
+    @objc private func keyTab(_ cmd: UIKeyCommand) {
+        if routeKey?(.tab) != true { super.insertText("\t") }
+    }
+
+    /// ↑↓ action：面板可见时移动高亮（消费），面板隐藏未消费=手动补光标行移动
+    /// （caretLineMove——注册即吞内建光标移动）。
+    @objc private func keyArrow(_ cmd: UIKeyCommand) {
+        switch cmd.input {
+        case UIKeyCommand.inputUpArrow:
+            if routeKey?(.upArrow) != true { caretLineMove(-1) }
+        default:
+            if routeKey?(.downArrow) != true { caretLineMove(1) }
+        }
+    }
+
+    /// ⌘⌫ 删到行首（macOS deleteToBeginningOfLine 惯例）：删光标所在行首到光标；光标已在
+    /// 行首时删除前一字符（换行符，与上一行合并——TextEdit 同款惯例）。有选区时以选区起点
+    /// 为准（删行首到选区起点）。
+    @objc private func keyDeleteToLineStart(_ cmd: UIKeyCommand) {
+        guard let sel = selectedTextRange else { return }
+        let ns = text as NSString
+        let caret = offset(from: beginningOfDocument, to: sel.start)
+        guard caret > 0 else { return } // 文档起点：无事可删
+        let lineStart = ns.lineRange(for: NSRange(location: min(caret, ns.length), length: 0)).location
+        let deleteFrom = lineStart < caret ? lineStart : caret - 1 // 行首时删前导换行（合并上一行）
+        guard let from = position(from: beginningOfDocument, offset: deleteFrom),
+              let range = textRange(from: from, to: sel.start) else { return }
+        replace(range, withText: "")
+    }
+
+    /// 光标按行移动（dy=-1 上一行/+1 下一行，保留目标列=min(当前列, 目标行长)；首行 ↑/
+    /// 尾行 ↓ 不动）。keyCommands 注册 ↑↓ 后内建光标移动被吞，此处为面板隐藏态的手动补。
+    private func caretLineMove(_ dy: Int) {
+        guard let sel = selectedTextRange else { return }
+        let ns = text as NSString
+        let caret = offset(from: beginningOfDocument, to: sel.start)
+        let cur = ns.lineRange(for: NSRange(location: min(caret, ns.length), length: 0))
+        let column = caret - cur.location
+        // 目标行锚点：上一行取 (cur.location - 1) 处、下一行取 (cur.location + cur.length) 处的行范围。
+        let anchor: Int
+        if dy < 0 { anchor = cur.location - 1 } else { anchor = NSMaxRange(cur) }
+        guard anchor >= 0, anchor <= ns.length else { return } // 首行 ↑ / 尾行 ↓：不动
+        let target = ns.lineRange(for: NSRange(location: anchor, length: 0))
+        // 行长不含换行符：行尾字符为 \n 时 -1；空行（len 0）不剔。
+        var targetLen = NSMaxRange(target) - target.location
+        if targetLen > 0, ns.character(at: NSMaxRange(target) - 1) == 0x0A { targetLen -= 1 }
+        let newOffset = target.location + min(column, targetLen)
+        guard let pos = position(from: beginningOfDocument, offset: newOffset),
+              let moved = textRange(from: pos, to: pos) else { return }
+        selectedTextRange = moved
+    }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         // IME 组合期（markedText 非 nil）或事件缺修饰键面：全键让行超类（组合期 Enter=

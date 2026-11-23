@@ -3,7 +3,7 @@ import SwiftUI
 import composeApp
 
 /// 菜单栏 Commands（UxPlan item2）：新建会话 ⌘N / 设置 ⌘, / 会话菜单（静音·重命名·压缩·
-/// 回到底部 ⌘↓·删除 ⌘⌫）。状态全部取自 HubStore 单例：
+/// 回到底部 ⌘J·删除 ⌘⇧⌫）。状态全部取自 HubStore 单例：
 /// - showNewConversation / selectedTab：store 发布属性（本项提升自视图本地态，iOS 行为不变）；
 /// - 回底走自增 token requestJumpToBottom（评审修正⑥：own-send 信号随下一条消息变化才消费、
 ///   Bool 信号重复触发不翻变——回底必须即时且可重复，HubChatView onChange 立即消费）；
@@ -85,7 +85,12 @@ struct MacHubCommands: Commands {
             Button("删除会话…", role: .destructive) {
                 if hub.selected != nil { hub.menuDeleteRequested = true }
             }
-            .keyboardShortcut(.delete, modifiers: .command)
+            // 2026-11-23 Mac 键位修复轮（用户反馈）：原 ⌘⌫ 与 macOS 文本编辑惯例「删除到
+            // 行首」撞车——Catalyst 菜单键等价物先于 composer 文本视图拦截按键，输入框里
+            // 按 ⌘⌫ 弹出的是删除会话确认而非删行首。换 ⌘⇧⌫（破坏性操作配重键位，与上方
+            // 重命名 ⌘⇧R 同族；⌘↓→⌘J 前例同理）；⌘⌫ 回归 ComposerTextViewBase 的
+            // deleteToBeginningOfLine（keyCommands 通道）。
+            .keyboardShortcut(.delete, modifiers: [.command, .shift])
             .disabled(!hub.isLoggedIn || hub.selected == nil)
         }
     }

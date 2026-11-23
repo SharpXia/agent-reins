@@ -511,15 +511,14 @@ private struct NewConversationAgentRow: View {
 struct HubConversationRow: View {
     @State private var hub = HubStore.shared
     let c: UiConversation
-    /// 选中态翻色（2026-11-21 观感整治轮）：Mac 侧栏选中胶囊是近白/近黑实色高亮块
-    ///（selectionFill 令牌），行内五处文字钉死 .tertiary/.secondary 时白字糊进高亮块
-    ///（beta-0.5.22 用户截图实证「选中行内容看不清」）。选中即整行切 onSelection/
-    /// onSelectionMuted 令牌对（明暗对比度 16.61~5.27:1 实测见 InkTheme.swift）。
-    /// 2026-11-22 对比度收口轮补底色面：选中底不再靠系统 sidebar 半透明 accent 胶囊
-    ///（.tint(selectionFill) 钉色后落屏 α 合成中间调，近白标题对比坍缩——半透明胶囊
-    /// 的 α 不受代码控制，WCAG 数只在不透明令牌对口径成立），改 listRowBackground
-    /// 显式不透明 selectionFill 实底（见 body 尾注），令牌注释里的对比度口径真正
-    /// govern 落屏。默认 false：iOS 会话列表调用点（HubHomeView）不传参零变化。
+    /// 选中态翻色（2026-11-21 观感整治轮引入；2026-11-23 Mac 交互回归修复轮改语义）：
+    /// 选中底 = selectionFill 近页面克制灰（不再翻黑/翻白整行反色——用户反馈纯黑实底
+    /// 突兀且影响阅读），行内文字切 onSelection/onSelectionMuted 对（值为深/浅原色系，
+    /// 对 selectionFill 14.04~5.34:1 实测见 InkTheme.swift——翻色机制保留、观感上与
+    /// 未选中行同系，选中态只由底色微差表达）。
+    /// 选中底走 listRowBackground 显式不透明实底（取代系统 sidebar 半透明 accent 胶囊
+    /// ——半透明胶囊落屏 α 合成不受控、对比度口径只在不透明令牌对成立，见 body 尾注）。
+    /// 默认 false：iOS 会话列表调用点（HubHomeView）不传参零变化。
     var selected: Bool = false
     /// DONE 瞬时窗（角色系统批次2）：hasActiveRun 真→假 触发 900ms 完成弹跳后回落 IDLE。
     /// generation 防 900ms 窗内新 run 启动的陈旧回调误清（真→假→真 序列每次跳变 +1 作废旧窗）。
@@ -613,11 +612,11 @@ struct HubConversationRow: View {
             }
         }
         .padding(.vertical, 2)
-        // 2026-11-22 对比度收口轮：选中底色面收归显式不透明令牌——系统 sidebar 半透明
-        // accent 胶囊（被 .tint(selectionFill) 钉成近黑/近白）落屏 α 合成中间调后近白标题
-        // 对比坍缩（WCAG 16.61/17.18:1 只在不透明令牌对口径成立，半透明 α≈0.3~0.5 合成
-        // 实测跌至 2.17~3.65:1），显式实底接管后 onSelection 系文字令牌的对比度口径在
-        // 落屏成立；未选中传 nil = 系统默认底零变化（iOS 调用点 selected 恒 false）。
+        // 选中底色面（2026-11-23 Mac 交互回归修复轮定稿）：显式不透明 selectionFill 实底
+        //（近页面克制灰，取代系统 sidebar 半透明 accent 胶囊——半透明胶囊落屏 α 合成
+        // 不受控、对比度口径只在不透明令牌对成立）；未选中传 nil = 系统默认底零变化
+        //（iOS 调用点 selected 恒 false）。选中视觉强度 = 底与页面的微差（明 1.18 /
+        // 暗 1.38:1），行内文字由 onSelection 系令牌保持在深/浅原色系，可读性同未选中行。
         // sidebar 样式对自定义行底若有平台级覆写（无 API 承诺），以真机明暗双模式走查为
         // 准（client-ux-round-20261121.md:63 deferred 验收项）。
         .listRowBackground(selected ? AnyView(RoundedRectangle(cornerRadius: 8).fill(ink.selectionFill)) : nil)
@@ -1466,12 +1465,14 @@ struct HubChatView: View {
                 //（ComposerTextViewBase）——return/tab/↑↓ 在文本视图层直拦（pressesBegan
                 // 主通道 + insertText 兜底，IME 组合期 markedText 内建让行），分流走
                 // ComposerKeyRouter 纯表。占位/聚焦/限高镜像 TextField 既有观感（placeholder
-                // overlay + FocusState 桥 + 4 行 intrinsic 帽，观感 parity 以真机走查为准）；
-                // 同日占位叠加修复轮补：占位显隐另读 coordinator 上报的组合态
-                //（markedTextActive），组合期隐藏防与 marked text 叠字。iOS 分支 TextField
-                // 原文零变化。.modifier(keyHandlers) 双保险挂载两分支共用
-                //（iOS 编译期剔除零操作；Catalyst 文本视图层已消费的事件不再以 SwiftUI
-                // press 形态可达，挂载待新层真机验证后撤）。
+                // overlay + FocusState 桥 + 4 行 intrinsic 帽，观感 parity 以真机走查为准；
+                // 2026-11-23 回归修复轮：高度权威收进 representable sizeThatFits+scroll
+                // 恒开——空态一行、换行自适应增高至 4 行帽、超帽滚动，且首字符不再丢焦点，
+                // 详 ComposerTextView 头注）；同日占位叠加修复轮补：占位显隐另读
+                // coordinator 上报的组合态（markedTextActive），组合期隐藏防与 marked text
+                // 叠字。iOS 分支 TextField 原文零变化。.modifier(keyHandlers) 双保险挂载
+                // 两分支共用（iOS 编译期剔除零操作；Catalyst 文本视图层已消费的事件不再以
+                // SwiftUI press 形态可达，挂载待新层真机验证后撤）。
                 // 2026-11-21 回车语义轮注记保留：Enter 生效门=聚焦+IME（面板可见性下沉为
                 // Enter 分流内的行为分支）；shift/⌘/Ctrl 读键值实时修饰键，面板/空白/附件/
                 // 多行是渲染期快照 flag（HubStore @Observable 草稿变化即重渲染）。
@@ -2344,6 +2345,16 @@ private enum ComposerIME {
 /// 下视与键位门复用既有 @FocusState 零改型；高度 = 内容自适应 + maxHeightLines 行帽
 ///（TextField axis:.vertical + lineLimit(1...4) 同语义）；每帧把渲染期快照重封进
 /// routeKey 闭包（与 .onKeyPress 双保险挂载同帧同快照）。
+///
+/// 2026-11-23 Mac 交互回归修复轮（beta-0.5.27 用户反馈：composer 撑满整窗+首字符丢焦点）：
+/// ① 实现协议方法 `sizeThatFits(_:uiView:context:)` 作为 SwiftUI 侧高度唯一权威——缺省
+/// 实现对 UIScrollView 族（UITextView）会把 proposal 原样放行（isScrollEnabled=true 时
+/// 任意提案都「fit」），composer 被拉满可用高度即「空态撑满整窗」根因；② isScrollEnabled
+/// 恒开不翻转（旧实现首字符即触发翻转路径，focused 态翻滚动属性是 UIKit 重配置类行为、
+/// 可放弃 first responder=焦点回归头号嫌疑，机制判读记于 ComposerTextViewBase.init 注），
+/// 超帽滚动改由恒开滚动视图自担；③ focus 桥 become 前加 window 守卫（不在窗上的视图
+/// become 恒失败）。三触点皆 B5（8de72d7）引入且 B5 前的 SwiftUI TextField 均不存在=
+/// 对照面成立；装机走查闭环。
 private struct ComposerTextView: UIViewRepresentable {
     let text: Binding<String>
     let focus: FocusState<Bool>.Binding
@@ -2377,6 +2388,14 @@ private struct ComposerTextView: UIViewRepresentable {
         view.textContainer.lineFragmentPadding = 0
         view.delegate = context.coordinator
         return view
+    }
+
+    /// SwiftUI 侧高度唯一权威（2026-11-23 回归修复轮，见 struct 头注①）：按提案宽度测
+    /// capped 内容高回给 SwiftUI；宽度未定（nil/非有限/≤0，首帧前的询问）返回 nil 走视图
+    /// 自身 intrinsicContentSize（同为 capped 测度，0 宽毒化值不再进入布局）。
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: ComposerTextViewBase, context: Context) -> CGSize? {
+        guard let width = proposal.width, width.isFinite, width > 0 else { return nil }
+        return CGSize(width: width, height: uiView.cappedContentHeight(forWidth: width))
     }
 
     func updateUIView(_ view: ComposerTextViewBase, context: Context) {
@@ -2430,7 +2449,10 @@ private struct ComposerTextView: UIViewRepresentable {
             }
         }
         if focus.wrappedValue, !view.isFirstResponder {
-            view.becomeFirstResponder()
+            // window 守卫（2026-11-23 回归修复轮③）：不在窗上的视图 becomeFirstResponder
+            // 恒失败（UIKit 拒绝并刷控制台告警），且在 SwiftUI 更新事务中途调 become 属于
+            // 已知脆弱点——只对已挂窗视图执行，未挂窗等下一帧 update 再试。
+            if view.window != nil { view.becomeFirstResponder() }
         } else if !focus.wrappedValue, view.isFirstResponder {
             view.resignFirstResponder()
         }
@@ -2484,6 +2506,23 @@ private struct ComposerTextView: UIViewRepresentable {
 /// 较 ComposerIME 窗口递归探测更稳）；面板隐藏时 ↑↓/Tab 放行超类默认（光标移动/制表符），
 /// 与分流表三重门同语义。
 final class ComposerTextViewBase: UITextView {
+    /// 滚动恒开（2026-11-23 回归修复轮②）：高度由 SwiftUI 侧 sizeThatFits/intrinsicContentSize
+    /// 显式供给，滚动视图语义自担「超帽帽内滚动、帽内不弹跳（alwaysBounceVertical=false）」。
+    /// **禁止翻转 isScrollEnabled**——旧实现 refreshHeight 按 overflows 翻转，首字符触发
+    /// 占位符移除→瞬态重排→0 宽测量毒化 overflows 误判即翻（真值实测见 cappedContentHeight
+    /// 注）；focused 态下翻转文本视图的滚动属性属 UIKit 已知的重配置类行为（重建内部布局、
+    /// 可放弃 first responder——beta-0.5.27「输入一个字符就丢焦点、键盘被侧栏 List 接管」
+    /// 与首字符时点强相关，机制判读记此，装机走查闭环）。恒开后该翻转路径结构性不存在。
+    override init(frame: CGRect, textContainer: NSTextContainer?) {
+        super.init(frame: frame, textContainer: textContainer)
+        isScrollEnabled = true
+        alwaysBounceVertical = false
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) 未支持：UIViewRepresentable 走 init(frame:)")
+    }
+
     /// 键型（修饰键由本类从 UIEvent.modifierFlags 解出，分流闭包只收语义键）。
     enum Key {
         case enter(shift: Bool, metaOrCtrl: Bool)
@@ -2571,25 +2610,28 @@ final class ComposerTextViewBase: UITextView {
 
     private var lineHeight: CGFloat { font?.lineHeight ?? 17 }
 
-    private var contentHeight: CGFloat {
-        let fitWidth = bounds.width > 0 ? bounds.width : frame.width
-        let fit = sizeThatFits(CGSize(width: fitWidth, height: .greatestFiniteMagnitude))
+    /// capped 内容高——SwiftUI sizeThatFits 与 intrinsicContentSize 共用的唯一测度
+    ///（2026-11-23 回归修复轮收口）。宽度未定（首帧/瞬态重排，≤0）按单行返回：
+    /// 0 宽 sizeThatFits 会把每个字符折一行给出爆值，旧实现把该值喂进 overflows 判定
+    /// 与 intrinsic（=撑满整窗+误翻 scroll 的毒化源）。
+    func cappedContentHeight(forWidth width: CGFloat) -> CGFloat {
         let cap = lineHeight * CGFloat(max(1, maxHeightLines))
             + textContainerInset.top + textContainerInset.bottom
-        return min(max(fit.height, lineHeight), cap)
+        guard width.isFinite, width > 0 else { return min(lineHeight, cap) }
+        let fit = sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height
+        return min(max(fit, lineHeight), cap)
     }
 
     override var intrinsicContentSize: CGSize {
-        CGSize(width: UIView.noIntrinsicMetric, height: contentHeight)
+        CGSize(width: UIView.noIntrinsicMetric,
+               height: cappedContentHeight(forWidth: bounds.width > 0 ? bounds.width : frame.width))
     }
 
-    /// 高度重算入口（草稿变化/文本外部重置/宽度变化三路调用）。
+    /// 高度重算入口（草稿变化/文本外部重置/宽度变化三路调用）：只作废测量让宿主重新
+    /// 询问 cappedContentHeight。isScrollEnabled 恒开（init 钉死，翻转=丢焦点，见 init 注），
+    /// 旧版按 overflows 翻转 scroll 的逻辑已撤。
     func refreshHeight() {
         invalidateIntrinsicContentSize()
-        let fitWidth = bounds.width > 0 ? bounds.width : frame.width
-        let overflows = sizeThatFits(CGSize(width: fitWidth, height: .greatestFiniteMagnitude)).height
-            > lineHeight * CGFloat(max(1, maxHeightLines)) + 1
-        if isScrollEnabled != overflows { isScrollEnabled = overflows }
     }
 
     override func layoutSubviews() {

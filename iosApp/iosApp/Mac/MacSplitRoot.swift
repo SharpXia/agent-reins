@@ -20,7 +20,8 @@ import composeApp
 struct MacSplitRoot: View {
     @State private var hub = HubStore.shared
     /// 选中面/行内文字令牌（2026-11-21 观感整治轮：List 作用域 .tint 钉 selectionFill +
-    /// 选中行翻色，见 sidebarList 注）。
+    /// 选中行翻色，见 sidebarList 注；2026-11-23 起 selectionFill=近页面克制灰，
+    /// 选中态只由底色微差表达）。
     @Environment(\.inkColors) private var ink
     /// 用户现值字号档（2026-11-22 反向钳制修复轮）：侧栏字号环境按下限 .large 取
     /// max(用户现值, .large)——原绝对值 `.environment(\.dynamicTypeSize, .large)` 注释
@@ -199,19 +200,18 @@ struct MacSplitRoot: View {
         // 用户不再被压回；语义字体随环境缩放，Section 头/系统行同效。
         .environment(\.dynamicTypeSize, max(incomingTypeSize, .large))
         // 2026-11-21 观感整治轮（铁律②）：选中胶囊作用域钉住 selectionFill 令牌，脱离全局
-        // tint 的隐式来源——今日两模式 selectionFill 与全局 tint 同值（light=ink:45 /
-        // dark=ink:83），本行是 no-op，防的是未来全局 tint 漂移时选中面随行漂移。
+        // tint 的隐式来源（防未来全局 tint 漂移时选中面随行漂移；2026-11-23 起该令牌=
+        // 近页面克制灰，与全局 tint 分值，本行真正生效不再恒 no-op）。
         .tint(ink.selectionFill)
         // 2026-11-20 Mac 观感轮：sidebar 样式——plain 样式的选中高亮是近白实底
         //（暗色模式下白底压白字，用户截图实证「选中行内容看不清」）；sidebar 样式
         // 选中=系统 accent 半透明胶囊+primary 文字。
-        //（2026-11-21 注：accent 已被全局 .tint(colors.ink) 劫持为近白/近黑，胶囊并不
-        // 自动获得对比度保证——对比度改由行内文字翻色 onSelection 系令牌承载，见上。）
         //（2026-11-22 对比度收口轮：半透明胶囊的落屏 α 不受代码控制——α 合成中间调后
-        // 近白标题对比坍缩（α≈0.3~0.5 实测 2.17~3.65:1）。会话行选中底已由
-        // HubConversationRow 的 listRowBackground 显式不透明 selectionFill 实底接管
-        //（本 .tint 钉保留，胶囊被行底覆盖后无副作用）；「设置」系统行无行级通道，
-        // 选中对比仍由其 onSelection 文字翻色承载=知情边界。）
+        // 对比坍缩。会话行选中底已由 HubConversationRow 的 listRowBackground 显式
+        // 不透明 selectionFill 实底接管（本 .tint 钉保留，胶囊被行底覆盖后无副作用）；
+        //「设置」系统行无行级通道，选中底由 .tint 钉色承载——2026-11-23 起该色=近页面
+        // 克制灰，行内文字 onSelection 深色系直接可读，此前「文字翻色扛对比」的知情
+        // 边界随令牌改值自然收敛。）
         .listStyle(.sidebar)
         // 「新建」钮已迁 detail 列（补完项③）：原挂本列 .toolbar，侧栏折叠（detailOnly）
         // 后按钮随列隐藏，折叠态动作面只剩菜单栏 ⌘N——现挂 detailColumn 的 NavigationStack，

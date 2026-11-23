@@ -71,15 +71,20 @@ struct InkColors {
     /// ——全表面 ≥4.5（描边/薄底等非文本用法 ≥3 同过）。
     let accent: Color
     // ── 选中面（行选中实底 + 行内文字对）──
-    /// 选中行底色面（2026-11-22 对比度收口轮：HubConversationRow 选中时经
-    /// listRowBackground 显式不透明实底接管，取代系统 sidebar 半透明 accent 胶囊——
-    /// 半透明胶囊落屏 α 合成不受控、对比度坍缩；本令牌不透明，onSelection 系文字对
-    /// 它的 WCAG 数在落屏成立。List(selection:) 作用域 .tint 钉住同令牌保留）。
-    /// 今日与全局 tint 同值（light=ink:45 / dark=ink:83），非本轮变色项。
+    /// 选中行底色面（2026-11-23 Mac 交互回归修复轮：近页面克制灰——用户反馈
+    /// 0x1C1C1C 纯黑实底「黑块突兀、与整页观感割裂」；select 的表达语义改为
+    /// 「与页面微差的可辨灰」，行内文字保持深/浅原色系不再翻白黑，可读性优先。
+    /// 本令牌不透明（HubConversationRow 经 listRowBackground 显式实底接管，
+    /// 取代系统 sidebar 半透明 accent 胶囊——半透明胶囊落屏 α 合成不受控，
+    /// 对比度口径只在不透明令牌对成立。List(selection:) 作用域 .tint 钉住同令牌保留）。
+    /// light 0xE9E9E9 ≈ 系统 quaternarySystemFill 惯用档；dark 0x2E2E2E ≈ controlFace
+    /// 同族。两模式与各自 paper 的差（1.18/1.38:1）即选中态的全部视觉强度。
     let selectionFill: Color
-    /// 选中行主文字（标题）。light 0xFCFCFC 对 selectionFill 16.61:1 / dark 0x121212 对 17.18:1。
+    /// 选中行主文字（标题）。2026-11-23 起为深/浅原色系（不再反色）：
+    /// light 0x1C1C1C 对 selectionFill 14.04:1 / dark 0xF5F5F5 对 12.46:1（WCAG 实测）。
     let onSelection: Color
-    /// 选中行弱化文字（时间戳/网关名/预览/对账中）。light 8.13:1 / dark 5.27:1。
+    /// 选中行弱化文字（时间戳/网关名/预览/对账中）。light 0x5E5E5E 5.34:1 / dark
+    /// 0xA8A8A8 5.71:1（2026-11-23 重测）。
     let onSelectionMuted: Color
     // ── 按钮面（统一圆钮 inkIconButtonFace 用）──
     /// 圆钮实色面（替代半透明材质/雾面 bezel）。light 0xFFFFFF / dark 0x2A2A2A。
@@ -131,9 +136,9 @@ struct InkColors {
             awaiting: Color(hex: 0x0B6DD3),
             awaitingSubtle: Color(hex: 0x1680F3, alpha: 0x17),
             accent: Color(hex: 0x0A61BC),              // 链接/交互强调；paper 5.93:1 / 气泡面 5.30 / 卡面 4.74
-            selectionFill: Color(hex: 0x1C1C1C),       // = ink（今日与全局 tint 同值）
-            onSelection: Color(hex: 0xFCFCFC),         // 16.61:1 on selectionFill
-            onSelectionMuted: Color(hex: 0xB3B3B3),    //  8.13:1 on selectionFill
+            selectionFill: Color(hex: 0xE9E9E9),       // 近页面克制灰（≈quaternarySystemFill 档）
+            onSelection: Color(hex: 0x1C1C1C),         // 14.04:1 on selectionFill（深色原系不翻白）
+            onSelectionMuted: Color(hex: 0x5E5E5E),    //  5.34:1 on selectionFill
             controlFace: Color(hex: 0xFFFFFF),
             onControlFace: Color(hex: 0x1C1C1C),       // 17.04:1 on controlFace
             onControlFaceMuted: Color(hex: 0x6E6E6E),  //  5.10:1 on controlFace
@@ -177,9 +182,9 @@ struct InkColors {
             awaiting: Color(hex: 0x4D9BFF),
             awaitingSubtle: Color(hex: 0x1884FC, alpha: 0x12),
             accent: Color(hex: 0x4D9BFF),              // =infoText 同值；paper 6.64:1 / 气泡面 6.11 / 卡面 5.51
-            selectionFill: Color(hex: 0xF5F5F5),       // = ink（今日与全局 tint 同值）
-            onSelection: Color(hex: 0x121212),         // 17.18:1 on selectionFill
-            onSelectionMuted: Color(hex: 0x666666),    //  5.27:1 on selectionFill
+            selectionFill: Color(hex: 0x2E2E2E),       // 近页面克制灰（controlFace 同族提亮档）
+            onSelection: Color(hex: 0xF5F5F5),         // 12.46:1 on selectionFill（浅色原系不翻黑）
+            onSelectionMuted: Color(hex: 0xA8A8A8),    //  5.71:1 on selectionFill
             controlFace: Color(hex: 0x2A2A2A),
             onControlFace: Color(hex: 0xEDEDED),       // 12.26:1 on controlFace
             onControlFaceMuted: Color(hex: 0xA8A8A8),  //  6.04:1 on controlFace

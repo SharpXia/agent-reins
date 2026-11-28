@@ -102,10 +102,13 @@ import dev.sharpxia.agentreins.hub.UiWorkActivity
 import dev.sharpxia.agentreins.hub.projection.CommandsList
 import java.io.File
 import java.text.BreakIterator
+import java.time.Instant
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -322,7 +325,18 @@ internal fun ConversationScreen(
     // 会话换装 dialog 预览动效门控与 PUT 载荷 motionLevel（动效不进会话 sheet，仍全局档）
     globalMotion: AvatarMotion = AvatarMotion.STANDARD,
 ) {
-    val messages by client.observeMessages(conversationId).collectAsState(initial = emptyList())
+    // 实时新到登记（2026-11-28 流式逐字轮，iOS HubStore.noteTypewriterArrivals 镜像）：消息流
+    // 每帧先交打字机账本观测——已打开会话里首次出现的助手 final 行登记为实时新到，行视图
+    // 据此从 0 逐字打出（OpenClaw 等网关回复整条落库无 delta，流式行从未浮现）。onEach 在
+    // 收集方上下文（主线程）执行，账本仅主线程访问。
+    val messages by client.observeMessages(conversationId)
+        .onEach { list ->
+            TypewriterHandoff.ledger.observeMessages(
+                conversationId,
+                list.map { TypewriterHandoffLedger.ArrivalCandidate(it.messageId, it.role, it.state, it.ts, it.content.length) },
+            )
+        }
+        .collectAsState(initial = emptyList())
     // wp-15：工作过程披露条数据面（hubToolEvents + hubRunStatus 两表合流快照）——此前零消费，
     // 会话打开即订阅；会话切换随 HubShell key(conversationId) 重挂换订阅。
     val workActivity by client.observeWorkActivity(conversationId)
@@ -1540,21 +1554,35 @@ internal const val TYPEWRITER_MIN_TICK_MS = 16L
 /** 追平视界（毫秒）：贴桥 2s 合并窗（delta-coalesce DEFAULT_COALESCE_WINDOW_MS）。 */
 internal const val TYPEWRITER_HORIZON_MS = 2_000L
 
-/** 滞后上限（簇）：积压超限步进升档——持续快流（>60 簇/秒）下显示滞后有界。 */
-internal const val TYPEWRITER_LAG_LIMIT_CLUSTERS = 300
+/**
+ * 流式期滞后上限（簇）：积压 ≤750 恒逐字（一次性到达的整条常见回复完整逐字放完）；超限
+ * 步进升档 ceil(积压/750)——持续快流（>60 簇/秒）下显示滞后有界（此时每帧多簇肉眼已
+ * 不可分辨）。iOS TypewriterPacing.lagLimitChars 同值对锁。
+ */
+internal const val TYPEWRITER_LAG_LIMIT_CLUSTERS = 750
 
 /**
- * final 续打收敛除数：续打阶段按 ceil(积压/75) 步进——积压按指数消退，尾 75 簇恒逐字收口；
- * 总 tick ≈ 75×(1+ln(积压/75))（150 簇尾包 ≈112 tick≈1.8s、300 簇 ≈156 tick≈2.5s），尾包
- * 不再一次跳出。
+ * final 续打期严格逐字的积压上限（簇）：行收敛 final 时剩余积压 ≤750 **仍严格逐字**——一次性
+ * 回复的续打即正文本体，不得快进（iOS carrySingleLimit）。
  */
-internal const val TYPEWRITER_CATCH_UP_TICKS = 75
+internal const val TYPEWRITER_CARRY_SINGLE_LIMIT = 750
+
+/**
+ * final 续打期超出 [TYPEWRITER_CARRY_SINGLE_LIMIT] 部分的追平除数（tick 量级，iOS
+ * carryDrainTicks）：按 ceil(超出/60) 步进，积压指数消退、回到上限内即逐字收口——长回复
+ * 尾包 ~60×(1+ln) tick 有界收敛，不一次跳出。
+ */
+internal const val TYPEWRITER_CARRY_DRAIN_TICKS = 60
 
 /** 等待期光标闪烁半周期（毫秒）。 */
 internal const val TYPEWRITER_BLINK_MS = 530L
 
-/** 首个流式行从 0 逐字的积压上限：首窗文本超此量（快流大窗）仍贴齐，防迟到物化整段重打。 */
-internal const val TYPEWRITER_FIRST_CHUNK_LIMIT = 300
+/**
+ * 首个流式行从 0 逐字的积压上限：首窗 ≤1200 簇逐字（探针实证：快 agent 一条 800 字回复在
+ * 首个 2s 合并窗内整段到达并紧接 final——首窗不逐字则全程零逐字）；超此量=迟到物化的长
+ * 内容，贴齐不重打。iOS TypewriterPacing.firstChunkTypingLimit。
+ */
+internal const val TYPEWRITER_FIRST_CHUNK_LIMIT = 1_200
 
 /**
  * 本 tick 时长（毫秒）= 追平视界 / 积压，钳 [帧率档, 慢速档]：积压 ≤62 簇走慢速档，≥125 簇
@@ -1566,12 +1594,21 @@ internal fun typewriterTickMs(backlog: Int): Long =
     (TYPEWRITER_HORIZON_MS / backlog.coerceAtLeast(1)).coerceIn(TYPEWRITER_MIN_TICK_MS, TYPEWRITER_BASE_TICK_MS)
 
 /**
- * 本 tick 步进（簇）：恒 1，仅积压超上限时 ceil(积压/上限) 升档；[catchUp] = final 续打阶段
- *（上限换 [TYPEWRITER_CATCH_UP_TICKS]，尾包有界收敛）。入参非正按 0 处理（恒 1）。
+ * 流式期本 tick 步进（簇）：恒 1，仅积压超 [TYPEWRITER_LAG_LIMIT_CLUSTERS] 时 ceil(积压/上限)
+ * 升档；入参非正按 0 处理（恒 1）。iOS TypewriterPacing.step 同式。
  */
-internal fun typewriterStep(backlog: Int, catchUp: Boolean = false): Int {
-    val limit = if (catchUp) TYPEWRITER_CATCH_UP_TICKS else TYPEWRITER_LAG_LIMIT_CLUSTERS
-    return maxOf(1, (backlog.coerceAtLeast(0) + limit - 1) / limit)
+internal fun typewriterStep(backlog: Int): Int =
+    maxOf(1, (backlog.coerceAtLeast(0) + TYPEWRITER_LAG_LIMIT_CLUSTERS - 1) / TYPEWRITER_LAG_LIMIT_CLUSTERS)
+
+/**
+ * final 续打期本 tick 步进（簇）：积压 ≤ [TYPEWRITER_CARRY_SINGLE_LIMIT] 恒 1；超出部分按
+ * ceil(超出/[TYPEWRITER_CARRY_DRAIN_TICKS]) 追平（积压指数消退，回到上限内即逐字收口）。
+ * iOS TypewriterPacing.carryStep 同式。
+ */
+internal fun typewriterCarryStep(backlog: Int): Int {
+    val excess = backlog - TYPEWRITER_CARRY_SINGLE_LIMIT
+    if (excess <= 0) return 1
+    return maxOf(1, (excess + TYPEWRITER_CARRY_DRAIN_TICKS - 1) / TYPEWRITER_CARRY_DRAIN_TICKS)
 }
 
 /**
@@ -1597,23 +1634,30 @@ internal fun typewriterClusterEnds(content: String): IntArray {
     return ends.copyOf(count)
 }
 
-// ── 流式 → final 续打交接账本（iOS Chat/StreamingTypewriter.swift TypewriterHandoff 镜像） ──
+// ── 打字机交接账本（iOS Chat/StreamingTypewriter.swift TypewriterHandoff 镜像） ──
 
 /**
- * 打字机交接账本（2026-11-28 流式逐字轮；纯逻辑类，时钟注入供单测）。按会话一键（同会话
- * 同时至多一条在途流式行），两条职责：
+ * 打字机交接账本（2026-11-28 流式逐字轮；纯逻辑类，时钟注入供单测）。三条职责：
  * 1. **final 续打**：流式行被 final 权威行替换时行身份（dstream:… → messageId）更换，
  *    LazyColumn 视为全新行，旧打字机连同剩余积压一并离场——旧口径尾包一次性跳出。流式行
- *    每 tick 记进度，final 行首次组合时查得「同会话 + 未过期 + 前缀吻合 + 确有剩余」即从
- *    记录进度续打（TTL 5s：行滚出视口后再物化、快照/重进等迟到物化一律贴齐不续打）；
- * 2. **首窗逐字 / 重物化不重打**：流式行由首个 delta 创建，旧口径「挂载即贴齐」使每条
- *    回复的首个 2s 窗恒整块瞬显。按 messageId 辨别——本会话账本未见该行 = 首次出现，从 0
- *    逐字；已见（滚动往返重新物化、runActive 瞬态翻转重建分支）= 贴齐不重打。
+ *    每 tick 记进度（按会话一键），final 行首次组合时查得「同会话 + 未过期 + 前缀吻合 +
+ *    确有剩余」即从记录进度续打（TTL 5s：行滚出视口后再物化、快照/重进等迟到物化一律贴齐）；
+ * 2. **首窗逐字 / 重物化不重打**（流式行）：流式行由首个 delta 创建，旧口径「挂载即贴齐」
+ *    使每条回复的首个 2s 窗恒整块瞬显。按 messageId 辨别——本会话账本未见该行 = 首次出现，
+ *    从 0 逐字；已见（滚动往返重新物化、runActive 瞬态翻转重建分支）= 贴齐不重打；
+ * 3. **实时新到的 final 行逐字**（探针实证的主路径）：服务端事件表实查——OpenClaw 网关近
+ *    3 天仅 2 条 message.delta 对 278 条 message.created，main 会话回复是 run.started →
+ *    **整条 message.created** → run.completed，没有流式增量；快 agent 的一次性回复也是合并窗
+ *    flush 与 final 同批落库。两条路径下流式行从未浮现，只给流式行做打字机 = 这类回复全程
+ *    零逐字（「流式输出粗糙」的真根因）。现按「未见此 final 行 messageId + 消息时间戳在近
+ *    [freshWindowMs] 内」判定为实时新到，从 0 逐字打出；历史行与已见行不重打。
  * 线程纪律：仅 UI 线程访问（组合与 LaunchedEffect 同线程），无同步。
  */
 internal class TypewriterHandoffLedger(
     private val now: () -> Long = System::currentTimeMillis,
     private val ttlMs: Long = 5_000,
+    /** 「实时新到」时间窗（毫秒，iOS freshFinalWindow=120s 同值）：容纳设备与服务端时钟偏差。 */
+    private val freshWindowMs: Long = 120_000,
 ) {
     data class Entry(val messageId: String, val shown: Int, val content: String, val at: Long)
 
@@ -1641,8 +1685,84 @@ internal class TypewriterHandoffLedger(
         return shown
     }
 
+    /** 实时新到登记（messageId → 登记时刻），打字机起跑即消耗。 */
+    private val pendingFresh = HashMap<String, Long>()
+
+    /** 消息流观测状态（当前会话的已知消息 id）：首帧 = 历史加载，其后新出现的助手 final 行 = 实时新到。切会话即复位。 */
+    private var observedConversationId: String? = null
+    private val knownMessageIds = HashSet<String>()
+    private var observedInitialFrame = false
+
+    /** 消息流观测输入（消息流每帧逐行映射；只带判定所需字段）。 */
+    data class ArrivalCandidate(
+        val messageId: String,
+        val role: String,
+        val state: String,
+        val ts: String?,
+        val contentLength: Int,
+    )
+
+    /**
+     * 消息流观测（消息流每帧到达时调用）：已打开会话里**首次出现**的助手 final 行登记为实时
+     * 新到。首帧（打开会话的历史加载）只记已知不算新到；消息时间戳须在近 [freshWindowMs] 内
+     * （翻页回灌的旧行不算）。判定落在数据入口而非行组合：组合可重入，入口首见唯一。
+     */
+    fun observeMessages(conversationId: String, list: List<ArrivalCandidate>) {
+        if (conversationId.isEmpty()) return
+        if (observedConversationId != conversationId) {
+            observedConversationId = conversationId
+            knownMessageIds.clear()
+            observedInitialFrame = false
+        }
+        val initial = observedInitialFrame
+        for (c in list) {
+            if (!knownMessageIds.add(c.messageId)) continue
+            if (initial && c.role == "assistant" && c.state == "final") noteFreshArrival(c)
+        }
+        observedInitialFrame = true
+    }
+
+    private fun noteFreshArrival(c: ArrivalCandidate) {
+        if (c.messageId.isEmpty() || c.contentLength <= 0 || c.contentLength > FRESH_FINAL_TYPING_LIMIT) return
+        val at = c.ts?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() } ?: return
+        if (abs(now() - at) > freshWindowMs) return
+        pendingFresh[c.messageId] = now()
+    }
+
+    /**
+     * 实时新到的 final 行打字起点：0 = 从 0 逐字；null = 贴齐整段。非消耗——行组合可重入，
+     * 登记项由打字机起跑时消耗（[consumeFreshFinal]）；登记后 [FRESH_PENDING_TTL_MS] 未起跑
+     * 即过期贴齐（迟到物化不重打旧消息）。
+     */
+    fun freshFinalStart(messageId: String): Int? {
+        val at = pendingFresh[messageId] ?: return null
+        if (now() - at >= FRESH_PENDING_TTL_MS) {
+            pendingFresh.remove(messageId)
+            return null
+        }
+        return 0
+    }
+
+    /** 打字机起跑即消耗登记：此后的重物化由进度账本接续（TTL 内）或贴齐，不从头重打。 */
+    fun consumeFreshFinal(messageId: String) {
+        pendingFresh.remove(messageId)
+    }
+
     /** 登出清账（换账号不残留）。 */
-    fun reset() = entries.clear()
+    fun reset() {
+        entries.clear()
+        pendingFresh.clear()
+        observedConversationId = null
+        knownMessageIds.clear()
+        observedInitialFrame = false
+    }
+
+    private companion object {
+        /** 实时新到 final 行逐字的内容上限（UTF-16 长度）：超长整条（历史回灌/特大粘贴）贴齐不重打。 */
+        const val FRESH_FINAL_TYPING_LIMIT = 20_000
+        /** 「实时新到」登记有效期（毫秒，iOS freshFinalPendingTTL=30s 同值）。 */
+        const val FRESH_PENDING_TTL_MS = 30_000L
+    }
 }
 
 /** 应用级单例（登出链调 [resetForLogout]）。 */
@@ -1743,14 +1863,16 @@ private fun AssistantMessageRow(
                             conversationId = conversationId,
                         )
                     } else {
-                        // final 续打（2026-11-28 流式逐字轮，iOS HubMessageRow carryStart 镜像）：
-                        // 流式行被 final 权威行替换时行身份更换、旧打字机连同剩余积压离场——
-                        // 旧口径尾包一次性跳出。账本查得剩余积压（首次组合定版，防先闪一帧
-                        // 全文）即从记录进度逐字放完，再切回常规 final 整段渲染。
+                        // final 行打字（2026-11-28 流式逐字轮，iOS HubMessageRow carryStart 镜像）：
+                        // 先查流式续打账本（流式行被 final 行替换时接续剩余积压）；否则「实时
+                        // 新到」——未见此行且消息时间戳在近 2 分钟内——从 0 逐字打出（OpenClaw
+                        // 等网关回复整条经 message.created 落库无 delta，这是逐字效果的主路径）。
+                        // 起点首次组合定版（防先闪一帧全文）；历史行/已见行贴齐整段渲染。
                         var carryStart by remember(m.messageId) {
                             mutableStateOf(
                                 if (m.state == "final" && m.content.isNotBlank()) {
                                     TypewriterHandoff.ledger.carryStart(conversationId, m.content)
+                                        ?: TypewriterHandoff.ledger.freshFinalStart(m.messageId)
                                 } else {
                                     null
                                 },
@@ -1852,15 +1974,15 @@ private fun StreamingTypewriterText(
         var shown = start.coerceIn(0, target)
         revealedCount = shown
         cursorOn = true
+        if (carryOverFrom != null) {
+            // final 行打字起跑：消耗「实时新到」登记——此后重物化由进度账本接续，不从头重打。
+            TypewriterHandoff.ledger.consumeFreshFinal(messageId)
+        }
         TypewriterHandoff.ledger.record(conversationId, messageId, shown, content)
         if (shown >= target) {
             if (carryOverFrom != null) onCaughtUp?.invoke()
             return@LaunchedEffect
         }
-        // dt 记账：按真实流逝时间折算本 tick 应放簇数（tick 抖动不改变平均速率）；封顶 2——
-        // 卡顿/后台回来不倾泻。
-        var credit = 0.0
-        var lastTick = System.nanoTime()
         while (true) {
             val backlog = target - shown
             if (backlog <= 0) {
@@ -1872,24 +1994,26 @@ private fun StreamingTypewriterText(
             }
             val tick = typewriterTickMs(backlog)
             delay(tick)
-            val now = System.nanoTime()
-            credit = minOf(credit + (now - lastTick) / 1_000_000.0 / tick, 2.0)
-            lastTick = now
-            var n = credit.toInt()
-            credit -= n
-            // 纯簇数推进：簇数为整，切点查表恒簇边界，代理对/ZWJ 劈半无从产生
-            n = minOf(maxOf(n, typewriterStep(backlog, catchUp = carryOverFrom != null)), backlog)
-            shown += n
+            // 每 tick 恒放步长个字素（不做 dt 补齐，iOS 同口径）：系统合并短定时器时按流逝时间
+            // 补齐会一拍放出 2 簇——违背「一次一个字」；宁慢不跳。纯簇数推进：簇数为整，切点
+            // 查表恒簇边界，代理对/ZWJ 劈半无从产生；final 行打字期 ≤750 簇恒逐字、超出部分
+            // 有界追平（typewriterCarryStep）。
+            val step = if (carryOverFrom != null) typewriterCarryStep(backlog) else typewriterStep(backlog)
+            shown += minOf(step, backlog)
             revealedCount = shown
             cursorOn = true
             TypewriterHandoff.ledger.record(conversationId, messageId, shown, content)
             if (shown >= target) {
                 if (carryOverFrom != null) {
-                    onCaughtUp?.invoke() // final 行续打完成，交回常规渲染
+                    // 收尾：末字落定后光标再闪一拍才交回常规渲染——一次性到达的回复没有
+                    // 「等待新字符」的间隙，这一拍是它唯一可见的闪烁（delay 即取消点，无悬挂回调）。
+                    cursorOn = false
+                    delay(TYPEWRITER_BLINK_MS / 2)
+                    cursorOn = true
+                    delay(TYPEWRITER_BLINK_MS / 2)
+                    onCaughtUp?.invoke()
                     return@LaunchedEffect
                 }
-                credit = 0.0
-                lastTick = System.nanoTime()
             }
         }
     }

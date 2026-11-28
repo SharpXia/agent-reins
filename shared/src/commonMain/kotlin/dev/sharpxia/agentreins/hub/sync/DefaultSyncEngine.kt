@@ -20,6 +20,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlin.concurrent.Volatile
 import kotlin.time.TimeSource
 
@@ -64,6 +67,14 @@ class DefaultSyncEngine(
     private val auth: TokenManager,
     private val projector: EventProjector,
     private val cursors: EventCursorStore,
+    /**
+     * 列表校准触发用协程作用域（可空；2026-11-28）。非空时 `command.acked` 落到
+     * conversation.create 终态（COMPLETED/FAILED）即异步触发一次 [calibrateConversations]——
+     * 新会话卡只经快照/校准可见（session.updated 的 create 不建占位卡），而既有触发点
+     * 「#16 回执 PERSISTED 后立即校准」早于网关真正建成会话（实测 ~2s），输掉竞态就要等
+     * 下一 R4 节拍（分钟级）。缺省 null = 不触发（单测/直连组装零变化）。
+     */
+    private val calibrationScope: CoroutineScope? = null,
 ) : SyncEngine {
 
     /** 去重窗口：同 id 重复（两通道重叠）第二次出现跳过；cursor 单调已兜底大部分，此为重叠窗口内保险。 */
@@ -127,14 +138,32 @@ class DefaultSyncEngine(
         if (page.conversations.isNotEmpty()) projector.applyConversations(page.conversations)
     }
 
-    suspend fun onEventArrived(e: EventEnvelope) = applyMutex.withLock {
-        // 游标读改写整段串行（applyMutex）：入口读 c → 落库 → 判大回写，期间无让位点也不可
-        // 被并发入口插入——真并行线程下「陈旧 c 条件回写」正是游标回退根因（FLOW-3）
-        val c = cursors.eventCursor()
-        if (c != null && e.id <= c) return@withLock // 幂等 + 水位裁决（ULID 字典序=时间序）
-        if (markSeen(e.id)) return@withLock
-        projector.applyEvent(e)
-        if (c == null || e.id > c) cursors.updateEventCursor(e.id)
+    suspend fun onEventArrived(e: EventEnvelope) {
+        var createSettled = false
+        applyMutex.withLock {
+            // 游标读改写整段串行（applyMutex）：入口读 c → 落库 → 判大回写，期间无让位点也不可
+            // 被并发入口插入——真并行线程下「陈旧 c 条件回写」正是游标回退根因（FLOW-3）
+            val c = cursors.eventCursor()
+            if (c != null && e.id <= c) return@withLock // 幂等 + 水位裁决（ULID 字典序=时间序）
+            if (markSeen(e.id)) return@withLock
+            projector.applyEvent(e)
+            if (c == null || e.id > c) cursors.updateEventCursor(e.id)
+            createSettled = isConversationCreateSettled(e)
+        }
+        // 锁外触发（校准是网络请求，不得占住事件应用串行锁）；失败不阻塞事件链（下一校准节拍重试）。
+        if (createSettled) calibrationScope?.launch { runCatching { calibrateConversations() } }
+    }
+
+    /**
+     * command.acked 且 commandType=conversation.create 落终态（COMPLETED/FAILED）——新卡与
+     * 「已提交」收敛态经列表校准才可见。载荷形状漂移（非对象/缺字段）按不命中处理。
+     */
+    private fun isConversationCreateSettled(e: EventEnvelope): Boolean {
+        if (e.type != EventEnvelope.COMMAND_ACKED) return false
+        val obj = e.data as? JsonObject ?: return false
+        if ((obj["commandType"] as? JsonPrimitive)?.contentOrNull != "conversation.create") return false
+        val status = (obj["status"] as? JsonPrimitive)?.contentOrNull
+        return status == "COMPLETED" || status == "FAILED"
     }
 
     /** HUB-SYNC-001/002 后的全量重建（05 §3.6）：清游标 → 快照重建；发送队列不经此路径、原样保留。 */

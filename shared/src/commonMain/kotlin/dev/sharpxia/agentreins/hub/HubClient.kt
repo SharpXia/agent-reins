@@ -340,7 +340,9 @@ class DefaultHubClient(
         }
         projection = TappedEventProjector(baseProjection, tap)
         val cursors = DbEventCursorStore(db)
-        engine = DefaultSyncEngine(stack.api, stack.auth, projection!!, cursors)
+        // 校准作用域注入（2026-11-28）：conversation.create 终态回执到达即触发一次列表校准——
+        // #16 回执后的立即校准常早于网关建成会话（~2s），输掉竞态新卡要等下一 R4 节拍（分钟级）。
+        engine = DefaultSyncEngine(stack.api, stack.auth, projection!!, cursors, scope)
         commands = DefaultCommandClient(stack.api, stack.auth, db, registry)
         val base = runtime.baseUrl ?: return
         val ws = DefaultHubWsClient(
@@ -858,6 +860,9 @@ class DefaultHubClient(
      * UI 入口只对无主线卡 agent 开放（入口侧筛选，本门面不拦）。回执 PERSISTED 后主动触发
      * 一次会话列表校准：新卡出现从 R4 周期节拍（分钟级）提速到秒级，且「90s 内或重进列表
      * 出现」的手工验收因此必然命中。校准失败不吞回执——列表在下一 R4 节拍重试。
+     * 2026-11-28 补强：PERSISTED 后的立即校准常早于网关建成会话（实测 ~2s），终态回执
+     *（command.acked COMPLETED/FAILED）到达时再触发一次校准（DefaultSyncEngine 构造注入
+     * calibrationScope）——新卡不再依赖竞态。
      * 返回 receipt（非空）；未送达（网络不可达 PENDING_LOCAL）抛 IllegalStateException——
      * 调用方（iOS 桥/desktop 面板）runCatching 呈现「提交未送达」降级态，队列稍后自动重放。
      */

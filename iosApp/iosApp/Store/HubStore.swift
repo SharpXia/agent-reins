@@ -1083,10 +1083,28 @@ final class HubStore {
             guard let latest = self.pendingMessages else { return }
             self.pendingMessages = nil
             self.lastMessagesFlushAt = .now
+            self.noteTypewriterArrivals(latest)
             self.messages = latest
             self.refreshCanLoadEarlier()
             self.maybeBackfillEmptyTimeline()
         }
+    }
+
+    /// 实时新到登记（2026-11-28 流式逐字轮）：先于列表落定把本帧消息交打字机账本观测——
+    /// 已打开会话里首次出现的助手 final 行被登记为实时新到，行视图据此从 0 逐字打出。
+    /// OpenClaw 等网关的回复整条经 message.created 落库、没有 delta，只给流式行做打字机
+    /// 时这类回复全程零逐字（「流式输出粗糙」真根因）。观测状态在账本内（按会话记已知
+    /// 行，首帧 = 历史加载不算新到），本处只做字段映射。
+    private func noteTypewriterArrivals(_ list: [UiMessage]) {
+        TypewriterHandoff.shared.observeMessages(
+            conversationId: selected?.conversationId ?? "",
+            list.map {
+                TypewriterHandoff.ArrivalCandidate(
+                    messageId: $0.messageId, role: $0.role, state: $0.state, ts: $0.ts,
+                    contentCount: $0.content.count,
+                )
+            }
+        )
     }
 
     /// 空时间线自动回灌（2026-11-10 加载更早修复轮「进会话首屏不空」）：快照尾页整带被显示

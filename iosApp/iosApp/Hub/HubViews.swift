@@ -3126,12 +3126,21 @@ private final class ScrollProbeBox {
         self.onOpenImages = onOpenImages
         self.bubbleActive = bubbleActive
         self.onLinkBubbleActiveChange = onLinkBubbleActiveChange
-        // 续打只对「助手 final 文本行」成立：交互卡行/空正文/非 final 无流式积压可接。
+        // 打字只对「助手 final 文本行」成立：交互卡行/空正文/非 final 无积压可打。
         let eligible = m.role == "assistant" && m.state == "final"
             && cardHit == nil && !m.content.isEmpty
-        _carryStart = State(initialValue: eligible
-            ? TypewriterHandoff.shared.carryStart(conversationId: conversationId, content: m.content)
-            : nil)
+        _carryStart = State(initialValue: eligible ? Self.finalTypingStart(m, conversationId) : nil)
+    }
+
+    /// final 行打字起点（2026-11-28 流式逐字轮）：先查流式续打账本（流式行被 final 行替换时
+    /// 接续剩余积压）；否则「实时新到」——消息流入口登记过本行（已打开会话里首次出现的助手
+    /// final 行，TypewriterHandoff.observeMessages）——从 0 逐字打出。后者是逐字效果的主路径：
+    /// OpenClaw 等网关的回复整条经 message.created 落库、没有 delta，流式行从未浮现。历史行
+    /// （首载/翻页/重进）与登记过期的迟到物化贴齐。非消耗读取：视图值可被构造多次，登记项
+    /// 由打字机起跑时消耗。
+    private static func finalTypingStart(_ m: UiMessage, _ conversationId: String) -> Int? {
+        TypewriterHandoff.shared.carryStart(conversationId: conversationId, content: m.content)
+            ?? TypewriterHandoff.shared.freshFinalStart(messageId: m.messageId)
     }
 
     /// 会话活跃 run 现值（liveSelected 列表现值，同 Stop 态 wp-8② 口径）：僵尸流式行门控共用

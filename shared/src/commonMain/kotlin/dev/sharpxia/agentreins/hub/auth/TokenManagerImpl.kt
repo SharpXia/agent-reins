@@ -44,8 +44,10 @@ class DefaultTokenManager(
         model: String?,
         appVersion: String?,
     ): DeviceRegistrationOk {
+        // v1.6.0：随注册报安装标识（CredentialStore.installId：无则生成并持久）——服务端按
+        // (用户, installId) 幂等，同一安装重复登录复用同一设备行。
         val ok = withBearer {
-            api.registerDevice(DeviceRegistrationRequest(displayName, platform, model, appVersion))
+            api.registerDevice(DeviceRegistrationRequest(displayName, platform, model, appVersion, installId = store.installId()))
         }
         deviceId = ok.deviceId
         // refreshToken 仅此一次下发，立即落安全存储；会话 accessToken 原值已升级为绑定 Token（ADR-15），不换

@@ -66,22 +66,38 @@ actual fun hubDeviceModel(): String? =
 actual fun platformCredentialStore(): CredentialStore = KeychainCredentialStore()
 
 /**
- * iOS 凭据存储：Keychain Generic Password（service=dev.sharpxia.agentreins.hub, account=refreshToken），
- * 可访问性 AfterFirstUnlockThisDeviceOnly（后台刷新可用、不随备份迁移）。
- * 纯 CoreFoundation 构造查询字典与数据（CFDataCreate/CFStringCreateWithCString），
+ * iOS 凭据存储：Keychain Generic Password（service=dev.sharpxia.agentreins.hub, account=
+ * refreshToken / installId），可访问性 AfterFirstUnlockThisDeviceOnly（后台刷新可用、不随
+ * 备份迁移）。纯 CoreFoundation 构造查询字典与数据（CFDataCreate/CFStringCreateWithCString），
  * 凭据不再以明文文件落 Documents（直连时代的 connection.json 模式已随 P4 退役）。
+ *
+ * v1.6.0 安装标识（2026-11-28）：独立 keychain 项 account=installId，与 refreshToken 同
+ * service 不同项——[clear]（登出）只删凭据项，安装标识跨登出/重登/升级存活；ThisDeviceOnly
+ * 可访问性使它不随备份迁移到新机（新机 = 新安装 = 新设备行，符合「真实设备区分」）。
  */
 @OptIn(ExperimentalForeignApi::class)
 private class KeychainCredentialStore : CredentialStore {
     private val service = "dev.sharpxia.agentreins.hub"
-    private val account = "refreshToken"
 
-    override suspend fun saveRefreshToken(token: String) {
+    override suspend fun saveRefreshToken(token: String) = save(ACCOUNT_REFRESH_TOKEN, token)
+
+    override suspend fun loadRefreshToken(): String? = load(ACCOUNT_REFRESH_TOKEN)
+
+    override suspend fun loadInstallId(): String? = load(ACCOUNT_INSTALL_ID)
+
+    override suspend fun saveInstallId(id: String) = save(ACCOUNT_INSTALL_ID, id)
+
+    override suspend fun clear() {
+        // 登出只清凭据，不清安装标识（同安装重登复用同一服务端设备行）。
+        delete(ACCOUNT_REFRESH_TOKEN)
+    }
+
+    private suspend fun save(account: String, value: String) {
         // 覆盖写：先删再加，避免 errSecDuplicateItem
-        delete()
-        val bytes = token.encodeToByteArray()
+        delete(account)
+        val bytes = value.encodeToByteArray()
         memScoped {
-            val query = baseQuery()
+            val query = baseQuery(account)
             val data = bytes.usePinned { pin ->
                 CFDataCreate(null, pin.addressOf(0).reinterpret(), bytes.size.convert())
             }
@@ -98,8 +114,8 @@ private class KeychainCredentialStore : CredentialStore {
         }
     }
 
-    override suspend fun loadRefreshToken(): String? {
-        val query = baseQuery()
+    private fun load(account: String): String? {
+        val query = baseQuery(account)
         CFDictionaryAddValue(query, kSecReturnData, kCFBooleanTrue)
         CFDictionaryAddValue(query, kSecMatchLimit, kSecMatchLimitOne)
         return memScoped {
@@ -118,17 +134,13 @@ private class KeychainCredentialStore : CredentialStore {
         }
     }
 
-    override suspend fun clear() {
-        delete()
-    }
-
-    private fun delete() {
-        val query = baseQuery()
+    private fun delete(account: String) {
+        val query = baseQuery(account)
         SecItemDelete(query)
         CFRelease(query)
     }
 
-    private fun baseQuery(): CFMutableDictionaryRef {
+    private fun baseQuery(account: String): CFMutableDictionaryRef {
         val query = CFDictionaryCreateMutable(
             null,
             0,
@@ -139,6 +151,11 @@ private class KeychainCredentialStore : CredentialStore {
         addString(query, kSecAttrService, service)
         addString(query, kSecAttrAccount, account)
         return query
+    }
+
+    private companion object {
+        const val ACCOUNT_REFRESH_TOKEN = "refreshToken"
+        const val ACCOUNT_INSTALL_ID = "installId"
     }
 
     /** 字典按 kCFType 回调自行 retain，我们创建出的 +1 引用在加入后即释放。 */

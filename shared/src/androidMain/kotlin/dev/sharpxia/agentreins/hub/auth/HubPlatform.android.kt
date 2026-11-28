@@ -19,12 +19,15 @@ actual fun platformCredentialStore(): CredentialStore = KeystoreCredentialStore(
 /**
  * Android 凭据存储：AES-256-GCM 密钥存 AndroidKeyStore（不可导出），密文落应用私有目录文件。
  * 目录取 HOME 兜底（无 Context 注入的技术债模式；v1.1 换 context.filesDir 时一并迁移路径）。
+ * v1.6.0 安装标识（2026-11-28）：hub-install-id 明文小文件（非机密，只作等值匹配）；
+ * [clear]（登出）只删凭据文件，安装标识跨登出/重登/升级存活。
  */
 private class KeystoreCredentialStore : CredentialStore {
     private val alias = "agentreins.hub.refresh"
     private val dataDir: File
         get() = File(System.getenv("HOME") ?: "/data/local/tmp", ".agentreins").apply { mkdirs() }
     private val file: File get() = File(dataDir, "hub-refresh-token.bin")
+    private val installIdFile: File get() = File(dataDir, "hub-install-id")
 
     private fun secretKey(): SecretKey {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -65,6 +68,14 @@ private class KeystoreCredentialStore : CredentialStore {
     }
 
     override suspend fun clear() {
+        // 登出只清凭据，不清安装标识（同安装重登复用同一服务端设备行）。
         file.delete()
+    }
+
+    override suspend fun loadInstallId(): String? =
+        installIdFile.takeIf { it.exists() }?.readText()?.trim()?.ifEmpty { null }
+
+    override suspend fun saveInstallId(id: String) {
+        installIdFile.writeText(id)
     }
 }

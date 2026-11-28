@@ -32,13 +32,18 @@ data class RefreshOk(
     val refreshExpiresIn: Long,
 )
 
-/** platform ∈ ios/mac-catalyst/android/desktop（v1.5.1 增 mac-catalyst）。 */
+/**
+ * platform ∈ ios/mac-catalyst/android/desktop（v1.5.1 增 mac-catalyst）。
+ * [installId] 安装标识（v1.6.0 可选，契约 hub-api-v1.6.0）：非空 = 幂等注册——同用户同标识
+ * 复用/复活既有服务端设备行（一安装一行，清单不随重登增长）；null = 旧行为恒新建。
+ */
 @Serializable
 data class DeviceRegistrationRequest(
     val displayName: String,
     val platform: String,
     val model: String? = null,
     val appVersion: String? = null,
+    val installId: String? = null,
 )
 
 /** 201：refreshToken 仅此一次下发，交 CredentialStore 落安全存储。 */

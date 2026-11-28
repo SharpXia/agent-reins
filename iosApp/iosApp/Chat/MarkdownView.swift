@@ -18,11 +18,22 @@ struct MarkdownView: View {
     /// v1.4 查看器（入口 b）：Markdown 图片块点按回调——参数 = 本消息全部可内联渲染的
     /// https 图块 URL 序（页集）+ 被点图块序。nil = 不接查看器（点按无动作）。
     var onOpenImage: (([URL], Int) -> Void)? = nil
+    /// 流式光标（2026-11-28 流式逐字轮）：非 nil = 在已揭示前缀的末块文本尾挂 ▌，nil = 无
+    /// 光标（final 行/非流式调用点零变化）。可见性翻转走 MarkdownCursor.visible。
+    var cursor: MarkdownCursor? = nil
 
     var body: some View {
-        LiteMarkdownBody(content: content, streaming: streaming, onOpenImage: onOpenImage)
+        LiteMarkdownBody(content: content, streaming: streaming, onOpenImage: onOpenImage, cursor: cursor)
             .equatable()
     }
+}
+
+/// 流式光标（StreamingTypewriter 专用）：▌ 恒在已揭示前缀末块文本尾，visible=false 时以
+/// 透明色占位——字符不增减、仅颜色翻转，等待期闪烁不触发布局（尾行满宽时光标若随显隐
+/// 增减字符会在「行尾/下一行」间跳）。
+struct MarkdownCursor: Equatable {
+    var visible: Bool
+    static let glyph = "▌"
 }
 
 /// JSON 卡嗅探（ADR-10 纯展示层判定）：仅 final 行（streaming=false）参与——content 去首尾
@@ -238,9 +249,11 @@ private struct LiteMarkdownBody: View, Equatable {
     /// 内容未变的行不因回调换实例而重渲（回调语义由捕获方 HubMessageRow/HubChatView 的
     /// @State 引用稳定性保证，同 onDelete 既有模式）。
     var onOpenImage: (([URL], Int) -> Void)? = nil
+    /// 流式光标（nil = 无）；参与 ==——等待期闪烁只翻 visible，必须触发重渲。
+    var cursor: MarkdownCursor? = nil
 
     static func == (lhs: LiteMarkdownBody, rhs: LiteMarkdownBody) -> Bool {
-        lhs.content == rhs.content && lhs.streaming == rhs.streaming
+        lhs.content == rhs.content && lhs.streaming == rhs.streaming && lhs.cursor == rhs.cursor
     }
 
     var body: some View {
@@ -252,11 +265,15 @@ private struct LiteMarkdownBody: View, Equatable {
             if !streaming, let value = JsonCardSniffer.sniff(content) {
                 JsonCardView(raw: content, value: value)
             } else if LiteMarkdownParser.isPlain(content) {
-                Text(verbatim: content)
+                if let cursor {
+                    Text(LiteMarkdownParser.withCursor(AttributedString(content), cursor))
+                } else {
+                    Text(verbatim: content)
+                }
             } else {
                 let blocks = ScrollBench.shared.time("md.blocksLookup") { LiteMarkdownCache.blocks(content) }
                 if blocks.count == 1, case let .text(s) = blocks[0].kind {
-                    Text(s)
+                    Text(LiteMarkdownParser.withCursor(s, cursor))
                 } else {
                     // v1.4 查看器：页集 = 本消息全部可内联渲染（https）的图块 URL，按块序；
                     // http 图块呈链接 chip 无查看入口，不进页集。
@@ -265,10 +282,13 @@ private struct LiteMarkdownBody: View, Equatable {
                            url.scheme?.lowercased() == "https" { return url }
                         return nil
                     }
+                    // 光标只挂末块（LiteBlockView 按块型落到其尾文本）。
+                    let lastId = blocks.last?.id
                     VStack(alignment: .leading, spacing: 10) {
                         ForEach(blocks) { block in
                             LiteBlockView(block: block, imagePages: imagePages,
-                                          onOpenImage: onOpenImage)
+                                          onOpenImage: onOpenImage,
+                                          cursor: block.id == lastId ? cursor : nil)
                         }
                     }
                 }
@@ -298,11 +318,14 @@ private struct LiteBlockView: View {
     /// v1.4 查看器：本消息 https 图块页集（LiteMarkdownBody 预算好传下）+ 点按回调。
     var imagePages: [URL] = []
     var onOpenImage: (([URL], Int) -> Void)? = nil
+    /// 流式光标：只挂末块，按块型落到其尾文本（段落/列表末项/引用/代码块/表格末格）；
+    /// 分隔线/图片块无可挂文本=瞬时无光标（下一字符到达即成新段落块）。
+    var cursor: MarkdownCursor? = nil
 
     var body: some View {
         switch block.kind {
         case let .text(s):
-            Text(s)
+            Text(LiteMarkdownParser.withCursor(s, cursor))
         case let .list(items):
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(items) { item in
@@ -311,13 +334,13 @@ private struct LiteBlockView: View {
                             .monospacedDigit()
                             .foregroundColor(c.textSecondary)
                             .frame(minWidth: item.depth > 1 ? 10 : 14, alignment: .trailing)
-                        Text(item.text)
+                        Text(LiteMarkdownParser.withCursor(item.text, item.id == items.last?.id ? cursor : nil))
                     }
                     .padding(.leading, CGFloat(item.depth - 1) * 18)
                 }
             }
         case let .code(code, _):
-            Text(code)
+            Text(LiteMarkdownParser.withCursor(AttributedString(code), cursor))
                 .font(.system(size: 13, design: .monospaced))
                 .lineSpacing(2)
                 .padding(12)
@@ -326,11 +349,11 @@ private struct LiteBlockView: View {
         case let .quote(s):
             HStack(alignment: .top, spacing: 10) {
                 Rectangle().fill(c.borderPrimary).frame(width: 3)
-                Text(s).foregroundColor(c.textSecondary)
+                Text(LiteMarkdownParser.withCursor(s, cursor)).foregroundColor(c.textSecondary)
             }
             .fixedSize(horizontal: false, vertical: true)
         case let .table(header, rows):
-            LiteTableView(header: header, rows: rows)
+            LiteTableView(header: header, rows: rows, cursor: cursor)
         case .rule:
             Rectangle().fill(c.borderPrimary).frame(height: 1)
         case let .image(url):
@@ -353,39 +376,125 @@ private struct LiteBlockView: View {
     }
 }
 
+/// 表格两趟测度布局（2026-11-28 表格截断修复轮，取代 SwiftUI Grid）。
+///
+/// 根因复盘：Grid 先以无约束提案问格的尺寸——`frame(minWidth:maxWidth:480)` 下的 Text 按
+/// 单行报理想宽（超帽被钳到 480）与**单行高**，行高就此钉死；真正落位时宽度被钳、Text
+/// 折成多行却只剩一行高，只能尾部「…」（Mac 大屏长中文单元格的截断形态）。探针实证：
+/// 仅给格加 fixedSize(vertical) 会让多出的行叠到下一行（行高仍按单行测），更糟。
+///
+/// 本布局自己做两趟：① 每格以 `.unspecified` 问理想宽，按列取最宽钳 [minTrack, maxTrack]
+/// 定列轨；② 每格按列轨宽重测得真实行高。格视图形状契约（LiteTableView.cell）：内容核
+///「横向吃满提案、纵向取理想高」——frame(maxWidth: .infinity) + fixedSize(vertical)；外层
+/// 再包 frame(maxHeight: .infinity)，落位时吃满整行高（表头底色/体行分隔线随行铺满，同行
+/// 短格底色不断带），文本在格内垂直居中（与原 Grid(alignment: .leading) 落位同语义）。
+/// 不读 proposal——表格恒在横向 ScrollView 内按自然宽排布。
+private struct LiteTableLayout: Layout {
+    let columns: Int
+    let minTrack: CGFloat
+    let maxTrack: CGFloat
+
+    struct Cache {
+        var tracks: [CGFloat] = []
+        var sizes: [CGSize] = []
+        var measured = false
+    }
+
+    func makeCache(subviews: Subviews) -> Cache { Cache() }
+
+    private func measure(_ subviews: Subviews, cache: inout Cache) {
+        guard !cache.measured else { return }
+        var tracks = [CGFloat](repeating: minTrack, count: columns)
+        for (i, sub) in subviews.enumerated() {
+            let ideal = sub.sizeThatFits(.unspecified).width
+            tracks[i % columns] = min(maxTrack, max(tracks[i % columns], ideal))
+        }
+        cache.tracks = tracks
+        cache.sizes = subviews.enumerated().map {
+            $1.sizeThatFits(ProposedViewSize(width: tracks[$0 % columns], height: nil))
+        }
+        cache.measured = true
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
+        measure(subviews, cache: &cache)
+        return CGSize(width: cache.tracks.reduce(0, +), height: totalHeight(subviews, cache: cache))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
+        measure(subviews, cache: &cache)
+        var y = bounds.minY
+        var rowStart = 0
+        while rowStart < subviews.count {
+            let rowEnd = min(rowStart + columns, subviews.count)
+            let rowHeight = (rowStart..<rowEnd).map { cache.sizes[$0].height }.max() ?? 0
+            var x = bounds.minX
+            for j in rowStart..<rowEnd {
+                let track = cache.tracks[j % columns]
+                subviews[j].place(
+                    at: CGPoint(x: x, y: y), anchor: .topLeading,
+                    proposal: ProposedViewSize(width: track, height: rowHeight)
+                )
+                x += track
+            }
+            y += rowHeight
+            rowStart = rowEnd
+        }
+    }
+
+    private func totalHeight(_ subviews: Subviews, cache: Cache) -> CGFloat {
+        var height: CGFloat = 0
+        var rowStart = 0
+        while rowStart < subviews.count {
+            let rowEnd = min(rowStart + columns, subviews.count)
+            height += (rowStart..<rowEnd).map { cache.sizes[$0].height }.max() ?? 0
+            rowStart = rowEnd
+        }
+        return height
+    }
+}
+
 private struct LiteTableView: View {
     @Environment(\.inkColors) private var c
     let header: [AttributedString]
     let rows: [[AttributedString]]
+    /// 流式光标：挂末行末列格（无体行时挂表头末格）。
+    var cursor: MarkdownCursor? = nil
 
-    /// #5（2026-11-07 UX 轮）+ 需求1（2026-11-23 批次一）：单元格最大宽度。280 时代注释自称
-    /// 「超长不可断词（URL/哈希）不截断（横向滚动兜底可见）」与实情相悖——列宽被 280pt 钳死，
-    /// SwiftUI Text 对无空白不可断词 token（URL/哈希）拆不出断点，只能尾部「…」截断（需求方
-    /// 复现的缩略形态；只读核实代码内唯一宽度约束即本帽）。现口径 = 双保险：帽内换行 + 零宽
-    /// 空格软断行（softBreakLongTokens，cell 渲染期转换）永不产生省略号；超气泡表仍由外层
-    /// 横向 ScrollView（body 内）兜底横滑看全。
+    /// #5（2026-11-07 UX 轮）+ 需求1（2026-11-23 批次一）：单元格宽度钳位。列轨 = 本列
+    /// 最宽格的理想宽，钳 [64, 480]：帽内换行完整呈现（行高按折行后真实高度测，见
+    /// LiteTableLayout 头注）；超长不可断词（URL/哈希）另经 softBreakLongTokens 软断行；
+    /// 超气泡表由外层横向 ScrollView 兜底横滑看全。480 帽 = 2026-11-23 批次一定值不变。
+    private static let minCellWidth: CGFloat = 64
     private static let maxCellWidth: CGFloat = 480
 
     var body: some View {
-        let columns = max(header.count, rows.map(\.count).max() ?? 0)
+        let columns = max(1, max(header.count, rows.map(\.count).max() ?? 0))
+        let headerCursor: MarkdownCursor? = rows.isEmpty ? cursor : nil
         // #5（2026-11-07 UX 轮）：表格自然宽度超出气泡即横向滑动看全，不再挤压列宽截断；
         // 窄表仍按内容收宽（minWidth 64 保证短列不至于挤成竖条）。边框/圆角随内容移动。
         ScrollView(.horizontal, showsIndicators: true) {
-            Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
+            LiteTableLayout(columns: columns, minTrack: Self.minCellWidth, maxTrack: Self.maxCellWidth) {
                 if !header.isEmpty {
-                    GridRow {
-                        ForEach(0..<columns, id: \.self) { i in
-                            cell(i < header.count ? header[i] : AttributedString(), bold: true)
-                        }
+                    ForEach(0..<columns, id: \.self) { i in
+                        // 外层 maxHeight 吃满整行高：表头底色随行铺满（原 GridRow background 同语义）。
+                        cell(i < header.count ? header[i] : AttributedString(), bold: true,
+                             cursor: i == columns - 1 ? headerCursor : nil)
+                            .frame(maxHeight: .infinity)
+                            .background(c.surfaceTertiary)
                     }
-                    .background(c.surfaceTertiary)
                 }
                 ForEach(rows.indices, id: \.self) { r in
-                    Rectangle().fill(c.borderPrimary).frame(height: 1).gridCellUnsizedAxes(.horizontal)
-                    GridRow {
-                        ForEach(0..<columns, id: \.self) { i in
-                            cell(i < rows[r].count ? rows[r][i] : AttributedString(), bold: false)
-                        }
+                    ForEach(0..<columns, id: \.self) { i in
+                        let isLast = r == rows.count - 1
+                        let isTail = isLast && i == columns - 1
+                        cell(i < rows[r].count ? rows[r][i] : AttributedString(), bold: false,
+                             cursor: isTail ? cursor : nil)
+                            .frame(maxHeight: .infinity)
+                            .overlay(alignment: .bottom) {
+                                // 体行分隔线：每体行底一条（末行无）——格吃满行高，短格的线也在行底。
+                                if !isLast { Rectangle().fill(c.borderPrimary).frame(height: 1) }
+                            }
                     }
                 }
             }
@@ -395,15 +504,20 @@ private struct LiteTableView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func cell(_ s: AttributedString, bold: Bool) -> some View {
+    /// 格内容核：横向吃满列轨提案（frame maxWidth）、纵向取理想高（fixedSize vertical）——
+    /// LiteTableLayout 两趟测度对格的形状契约，缺一则行高回退单行测度（见布局头注）。
+    private func cell(_ s: AttributedString, bold: Bool, cursor: MarkdownCursor? = nil) -> some View {
         // 需求1（2026-11-23 批次一）：渲染期软断行——超长不可断词 token（URL/哈希）插零宽
         // 空格给 Text 可断点，帽内换行完整呈现；只作用表格 cell，不进 LiteMarkdownCache
         // 解析产物（正文快路径/块 Text/Equatable 隔离层均不受影响）。
-        Text(LiteMarkdownParser.softBreakLongTokens(s))
+        Text(LiteMarkdownParser.withCursor(
+            LiteMarkdownParser.softBreakLongTokens(s), cursor
+        ))
             .font(.system(size: 14, weight: bold ? .semibold : .regular))
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .frame(minWidth: 64, maxWidth: Self.maxCellWidth, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -569,6 +683,22 @@ enum LiteMarkdownParser {
         for range in codeRanges {
             out[range][AttributeScopes.SwiftUIAttributes.BackgroundColorAttribute.self] = Color.primary.opacity(0.08)
         }
+        return out
+    }
+
+    /// 流式光标拼接（2026-11-28 流式逐字轮）：▌ 追加到已揭示前缀的末段文本尾。字体属性随
+    /// 末 run（标题内光标同号），不继承末 run 的链接/行内样式（尾字符恰是链接或行内代码时
+    /// 光标不得变成可点链接）；visible=false 以透明色占位——字符恒在串内，闪烁只翻颜色
+    /// 不动布局（见 MarkdownCursor 注）。
+    static func withCursor(_ s: AttributedString, _ cursor: MarkdownCursor?) -> AttributedString {
+        guard let cursor else { return s }
+        var out = s
+        var caret = AttributedString(MarkdownCursor.glyph)
+        if let font = s.runs.last?.attributes[AttributeScopes.SwiftUIAttributes.FontAttribute.self] {
+            caret.font = font
+        }
+        if !cursor.visible { caret.foregroundColor = .clear }
+        out += caret
         return out
     }
 
@@ -801,6 +931,9 @@ private enum LiteMarkdownCache {
     static let cache: NSCache<NSString, Box> = {
         let c = NSCache<NSString, Box>()
         c.countLimit = 512
+        // 总量帽（2026-11-28 流式逐字轮）：逐字揭示下每个前缀都是新键（一条长回复可入数百
+        // 条渐长前缀），仅限条数时长回复可达数百 MB 瞬时驻留；按 UTF-16 码元计费封顶。
+        c.totalCostLimit = 4_000_000
         return c
     }()
 
@@ -808,7 +941,7 @@ private enum LiteMarkdownCache {
         let key = raw as NSString
         if let hit = cache.object(forKey: key) { return hit.blocks }
         let parsed = ScrollBench.shared.time("md.parse") { LiteMarkdownParser.parse(raw) }
-        cache.setObject(Box(parsed), forKey: key)
+        cache.setObject(Box(parsed), forKey: key, cost: raw.utf16.count)
         return parsed
     }
 

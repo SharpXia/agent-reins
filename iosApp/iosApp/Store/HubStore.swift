@@ -2026,7 +2026,15 @@ final class HubStore {
     /// mac-catalyst 属契约 additive，待拍板）。iOS 分支维持系统通用名，行为不变。
     #if targetEnvironment(macCatalyst)
     private static func deviceDisplayName() -> String {
-        "Mac Catalyst · " + (macComputerName() ?? hostNameFallback())
+        let base = "Mac Catalyst · " + (macComputerName() ?? hostNameFallback())
+        #if DEBUG
+        // 开发构建辨识（2026-11-28）：调试/探针构建与同机已装正式版机器名相同，在设备清单
+        // 里不可辨，且服务端存量认领（契约 v1.6.0「同名同机型旧客户端行」）下会与正式安装行
+        // 同名互抢——加后缀隔离；Release（TF）包零变化。
+        return base + " [dev]"
+        #else
+        return base
+        #endif
     }
 
     private static func macComputerName() -> String? {
@@ -2045,7 +2053,12 @@ final class HubStore {
     }
     #else
     private static func deviceDisplayName() -> String {
-        UIDevice.current.name
+        // 开发构建辨识同上（Catalyst 分支注）：模拟器/调试包设备行可辨，不与真机正式安装行同名。
+        #if DEBUG
+        return UIDevice.current.name + " [dev]"
+        #else
+        return UIDevice.current.name
+        #endif
     }
     #endif
 
@@ -2125,6 +2138,9 @@ final class HubStore {
         // 取消时本行复位仍兜住换账号串档）后不再有帧推回，不复位则重登新账号在 #34 回拉
         // 到达前的窗口会错用旧用户覆盖档渲染（用户级数据同纪律）。
         conversationAvatarProfiles = nil
+        // 2026-11-28 流式逐字轮：打字机交接账本随登出清空（流式行进度与消息正文属账号数据，
+        // 不跨账号残留——重登后 final 行不得误续打上一账号的积压）。
+        TypewriterHandoff.shared.resetForLogout()
         // 确认评审收口：媒体缓存随登出清空——磁盘层 MediaDiskCache 整目录清空（串行队列
         // 承 IO）+ 双 loader NSCache/在途/失败记账清空（loader 是 @MainActor，logout 非隔离
         // 上下文，Task 跳主 Actor 清——媒体字节是账号派生数据，撤销设备换账号不残留呈现；

@@ -24,8 +24,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -92,11 +94,16 @@ import kotlinx.serialization.json.JsonPrimitive
  * 流式行（回归修复）：回退分支同样尾随 ▌ 光标（[fallbackPlainText]，与 wp-6 「content + ▌」
  * 及解析路径 cursor 语义一致）——无 Markdown 语素/解析异常的流式行不得丢光标。
  * 空正文占位（…▌ / （无文本内容））由调用方 [AssistantMessageRow] 先行分流，不进本组件。
+ *
+ * 流式光标闪烁（2026-11-28 流式逐字轮，iOS MarkdownCursor 镜像）：[cursorOn] = false 时末块
+ * 尾部的 ▌ 以透明色占位——字符不增减、仅颜色翻转，等待期闪烁不触发布局。作用域 = 仅末块
+ *（[LocalMdCursorOn] 只在末块提供 false，其余块恒 true——正文里字面 ▌ 不受影响）。
  */
 @Composable
 internal fun MarkdownText(
     content: String,
     showCursor: Boolean,
+    cursorOn: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     // JSON 卡嗅探（ADR-10 纯展示层判定）：消息级裸 JSON 优先整条出卡，未命中走既有管线原样
@@ -113,7 +120,13 @@ internal fun MarkdownText(
         // wp-6 纯文本路径回退：原样 Text（调用方 modifier 携带气泡内边距，样式与 MVP 一致；
         // 流式行补 ▌ 光标——wp-6 既有行为，回退分支不得忽略 showCursor）。解析异常回退路径
         // 不链接化（对齐 iOS parseTextChunk try? 失败也纯文本——知情注释）。
-        Text(fallbackPlainText(content, showCursor), modifier = modifier)
+        // 光标熄灭期尾随 ▌ 透明占位（同解析路径的闪烁语义，回退分支不丢光标也不闪跳）。
+        // 单一 Text(AnnotatedString) 挂载点——闪烁只换入参不换组合结构。
+        val plain = fallbackPlainText(content, showCursor)
+        val fallbackText = remember(plain, cursorOn) {
+            if (showCursor && !cursorOn) AnnotatedString(plain).dimTailCursor() else AnnotatedString(plain)
+        }
+        Text(text = fallbackText, modifier = modifier)
         return
     }
     // 链接气泡态（2026-11-23 批次二轮）：任意块内 Link 点击记录 (展示文本, 归一 url)，
@@ -139,7 +152,19 @@ internal fun MarkdownText(
             modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            blocks.forEach { MarkdownBlockView(it, onLinkTap) }
+            if (showCursor) {
+                // 光标闪烁作用域（2026-11-28）：仅末块读 LocalMdCursorOn（值 = cursorOn），其余
+                // 块恒 true。提供点结构恒定（不随 cursorOn 增减包层），闪烁只换入参；非流式行
+                //（showCursor=false）走原直排零变化。
+                blocks.forEachIndexed { index, block ->
+                    val isTail = index == blocks.lastIndex
+                    CompositionLocalProvider(LocalMdCursorOn provides (!isTail || cursorOn)) {
+                        MarkdownBlockView(block, onLinkTap)
+                    }
+                }
+            } else {
+                blocks.forEach { MarkdownBlockView(it, onLinkTap) }
+            }
         }
         pendingLink?.takeIf { linkBubble.active === bubbleToken }?.let { (display, url) ->
             // 自检轮 4 R4-1/R4-4/R4-11（对齐 iOS R2-7）：换链强制重建气泡——挂载点固定，
@@ -166,14 +191,16 @@ internal fun MarkdownText(
 private fun MarkdownBlockView(block: MdBlock, onLinkTap: (String, String) -> Unit) {
     // DSK-1 散写收敛：墨水令牌单点读取（代码薄底/列表标记/链接强调色）
     val ink = LocalDesktopInk.current
+    // 光标可见性：仅流式行末块会读到 false（MarkdownText 提供点），缺省 true
+    val cursorOn = LocalMdCursorOn.current
     when (block) {
         is MdBlock.Heading -> Text(
-            text = block.spans.toAnnotatedString(ink.surfaceTertiary, ink.accent, onLinkTap),
+            text = block.spans.toAnnotatedString(ink.surfaceTertiary, ink.accent, onLinkTap, cursorOn),
             style = headingStyle(block.level),
             modifier = Modifier.fillMaxWidth(),
         )
         is MdBlock.Paragraph -> Text(
-            text = block.lines.toParagraphString(ink.surfaceTertiary, ink.accent, onLinkTap),
+            text = block.lines.toParagraphString(ink.surfaceTertiary, ink.accent, onLinkTap, cursorOn),
             modifier = Modifier.fillMaxWidth(),
         )
         is MdBlock.CodeBlock -> {
@@ -190,9 +217,14 @@ private fun MarkdownBlockView(block: MdBlock, onLinkTap: (String, String) -> Uni
                     color = ink.surfaceTertiary, // 原 CodeTint 0x14888888
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    // 自动折行（iOS 版同取舍：代码块无横向滚动）
+                    // 自动折行（iOS 版同取舍：代码块无横向滚动）。光标由解析器接进 code 串尾
+                    //（parseMarkdownBlocks），熄灭期尾随 ▌ 透明占位——单一 Text(AnnotatedString)
+                    // 挂载点，闪烁只换入参。
+                    val codeText = remember(block.code, cursorOn) {
+                        if (cursorOn) AnnotatedString(block.code) else AnnotatedString(block.code).dimTailCursor()
+                    }
                     Text(
-                        text = block.code,
+                        text = codeText,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 13.sp,
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
@@ -212,7 +244,7 @@ private fun MarkdownBlockView(block: MdBlock, onLinkTap: (String, String) -> Uni
                     )
                     Spacer(Modifier.padding(end = 6.dp))
                     Text(
-                        text = item.spans.toAnnotatedString(ink.surfaceTertiary, ink.accent, onLinkTap),
+                        text = item.spans.toAnnotatedString(ink.surfaceTertiary, ink.accent, onLinkTap, cursorOn),
                         modifier = Modifier.weight(1f),
                     )
                 }
@@ -399,8 +431,10 @@ private fun MarkdownTableCell(
     onLinkTap: (String, String) -> Unit,
     header: Boolean,
 ) {
+    // 光标可见性：表格为流式行末块时读到提供点的值（光标在末行末单元格，解析器接入）
+    val cursorOn = LocalMdCursorOn.current
     Text(
-        text = spans.toAnnotatedString(codeTint, accent, onLinkTap),
+        text = spans.toAnnotatedString(codeTint, accent, onLinkTap, cursorOn),
         // 表头加粗（视觉分层，iOS LiteTableView 头行同观感）；无 maxLines/Ellipsis——完整显示
         fontWeight = if (header) FontWeight.Bold else null,
         textAlign = when (align) {
@@ -712,15 +746,42 @@ internal fun LinkActionPopup(displayUrl: String, normalizedUrl: String?, onDismi
     }
 }
 
+// ── 流式光标闪烁（2026-11-28 流式逐字轮，iOS MarkdownCursor 镜像） ─────────────────────
+
+/**
+ * 光标可见性作用域：仅流式行末块读到 false（MarkdownText 提供点按 [cursorOn] 提供），其余
+ * 一切挂载点读缺省 true。只翻颜色不增减字符——闪烁不动布局。
+ */
+private val LocalMdCursorOn = compositionLocalOf { true }
+
+/** 追加平铺 Text span：光标熄灭期的 ▌ 以透明色占位（只认整 span 即光标的形态——解析器接入
+ *  的光标恒为独立 `MdSpan.Text(MD_CURSOR)`，正文里与别的字同 span 的字面 ▌ 不受影响）。 */
+private fun AnnotatedString.Builder.appendPlain(text: String, cursorOn: Boolean) {
+    if (!cursorOn && text == MD_CURSOR) {
+        withStyle(SpanStyle(color = Color.Transparent)) { append(text) }
+    } else {
+        append(text)
+    }
+}
+
+/** 串尾 ▌ 透明占位（纯文本回退与代码块的光标熄灭形态——光标在串内无 span 边界）；无尾光标原样。 */
+private fun AnnotatedString.dimTailCursor(): AnnotatedString = buildAnnotatedString {
+    append(this@dimTailCursor)
+    if (text.endsWith(MD_CURSOR)) {
+        addStyle(SpanStyle(color = Color.Transparent), text.length - MD_CURSOR.length, text.length)
+    }
+}
+
 /** 行内 span → AnnotatedString（平铺样式：粗 / 斜 / 粗斜 / 等宽代码底色；codeTint = surfaceTertiary 令牌）。 */
 private fun List<MdSpan>.toAnnotatedString(
     codeTint: Color,
     accent: Color,
     onLinkTap: (String, String) -> Unit,
+    cursorOn: Boolean = true,
 ): AnnotatedString = buildAnnotatedString {
     linkifySpans(this@toAnnotatedString).forEach { span ->
         when (span) {
-            is MdSpan.Text -> append(span.text)
+            is MdSpan.Text -> appendPlain(span.text, cursorOn)
             is MdSpan.Link -> withLink(
                 LinkAnnotation.Url(
                     span.url,
@@ -747,12 +808,13 @@ private fun List<List<MdSpan>>.toParagraphString(
     codeTint: Color,
     accent: Color,
     onLinkTap: (String, String) -> Unit,
+    cursorOn: Boolean = true,
 ): AnnotatedString = buildAnnotatedString {
     forEachIndexed { idx, line ->
         if (idx > 0) append("\n")
         linkifySpans(line).forEach { span ->
             when (span) {
-                is MdSpan.Text -> append(span.text)
+                is MdSpan.Text -> appendPlain(span.text, cursorOn)
                 is MdSpan.Link -> withLink(
                     LinkAnnotation.Url(
                         span.url,

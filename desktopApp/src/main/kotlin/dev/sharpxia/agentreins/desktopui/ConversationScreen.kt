@@ -1524,33 +1524,55 @@ internal fun streamingRowPresentation(
 internal fun assistantPlaceholderText(thinkingNow: Boolean, agentLabel: String): String =
     (if (thinkingNow) "正在思考…" else "$agentLabel 正在处理中…") + "▌"
 
-/** 洪泛档阈值（单位=字素 Cluster：积压 >8192 簇转洪泛档）：2s 合并窗典型几百字，
- *  8192 已是洪泛输出（桥合并缓冲硬帽 256KiB 量级）——此量级逐字档追平成本失衡，快速追平无
- *  体感损失。与 iOS StreamingTypewriter floodBacklogChars 同值同单位对锁（Swift String.count
- *  即簇计数，名称沿 iOS 惯称 chars 不改；2026-11-21 簇计量统一轮起两端「8192」同义，
- *  旧「桌面按 UTF-16 码元」知情差异废止，边界值表按簇见 StreamingTypewriterPacingTest）。 */
-internal const val TYPEWRITER_FLOOD_BACKLOG_CHARS = 8192
+// ── 打字机节拍（2026-11-28 流式逐字轮；与 iOS Chat/StreamingTypewriter.swift TypewriterPacing
+//    同值同义对锁——回归值表锁在 StreamingTypewriterPacingTest，单端改值必须双端同步） ──
+//
+// 旧档「max(1, 积压/90) 簇 / 16ms + 洪泛档 积压/3」废止：积压大时一 tick 跳多簇（2s 窗 300
+// 簇积压 = 每 16ms 跳 3~4 簇）、抽干后空等到下一窗，且无等待光标——「流式输出粗糙」的来源。
+// 新口径 = **恒逐字**：每 tick 至多放 1 个字素 Cluster，靠缩短 tick 提速而非加步长。
+
+/** 慢速档 tick（毫秒）：小积压 ≈31 簇/秒，可辨识的逐字节拍（iOS baseTickNs=32ms）。 */
+internal const val TYPEWRITER_BASE_TICK_MS = 32L
+
+/** 帧率档 tick（毫秒）：≈60 簇/秒，逐字揭示的速度上限（iOS minTickNs=16ms）。 */
+internal const val TYPEWRITER_MIN_TICK_MS = 16L
+
+/** 追平视界（毫秒）：贴桥 2s 合并窗（delta-coalesce DEFAULT_COALESCE_WINDOW_MS）。 */
+internal const val TYPEWRITER_HORIZON_MS = 2_000L
+
+/** 滞后上限（簇）：积压超限步进升档——持续快流（>60 簇/秒）下显示滞后有界。 */
+internal const val TYPEWRITER_LAG_LIMIT_CLUSTERS = 300
 
 /**
- * 打字机步进（2026-11-21 流式单行归一轮；同日走查②扩洪泛档；同日簇计量统一轮——积压单位
- * 改按字素 Cluster，与 iOS String.count 同义；2026-11-22 pacing 对齐轮——常规档改
- * max(1, 积压/90)，常量 8192//90//3 两端从此同义）：
- * - 常规档 max(1, 积压/90)：步长与桥 2s 合并窗时长对齐（≈90 tick×16ms≈1.4s 抽干一个窗、
- *   贴数据节拍），CJK 慢流（每窗 10-60 簇积压）呈 1 簇/16ms 逐字揭示——旧档 max(8, 积压/12)
- *   以 ≤~12 tick（≈200ms）抽干全部积压、下限 8 簇/16ms≈500 簇/秒，是数据节拍的 30-100 倍，
- *   流式行呈「逐 2s 块瞬增」、打字体感在数学上不存在（B2 根因），本档废止；
- * - 洪泛档 积压/3（积压>8192 簇）：特大块若走常规档需数百 tick、且揭示循环每 tick 对已揭示
- *   前缀整体重嗅探+重解析（MarkdownText remember(content)），累计解析 ~百×积压，主线程掉帧；
- *   洪泛档 256KiB 量级 ~9 tick 追平、累计 ~2×积压（阈值邻域 1 tick）。洪泛输出下逐字观感
- *   本已不可信（常规档 8192 簇需 ~545 tick≈8.7s），快速追平无体感损失（走查②判定维持）。
- * 与 iOS HubViews.swift StreamingTypewriter（revealStep 双档 + 16ms tick）双端注释对锁——单端
- * 改值必须双端同步，桌面回归锚兼作两端行为契约不漂移（StreamingRowPresentationTest 同纪律）。
- * 本函数与单位无关（入参=积压簇数、返回值=步进簇数），簇口径由推进方
- * StreamingTypewriterText/typewriterClusterEnds 落地并锁回归（旧「桌面 UTF-16 码元/iOS 字素
- * Cluster」计量知情差异废止：非 BMP（emoji 等）两端揭示速度/洪泛触发点从此同语义）。
+ * final 续打收敛除数：续打阶段按 ceil(积压/75) 步进——积压按指数消退，尾 75 簇恒逐字收口；
+ * 总 tick ≈ 75×(1+ln(积压/75))（150 簇尾包 ≈112 tick≈1.8s、300 簇 ≈156 tick≈2.5s），尾包
+ * 不再一次跳出。
  */
-internal fun typewriterRevealStep(backlog: Int): Int =
-    if (backlog > TYPEWRITER_FLOOD_BACKLOG_CHARS) backlog / 3 else maxOf(1, backlog / 90)
+internal const val TYPEWRITER_CATCH_UP_TICKS = 75
+
+/** 等待期光标闪烁半周期（毫秒）。 */
+internal const val TYPEWRITER_BLINK_MS = 530L
+
+/** 首个流式行从 0 逐字的积压上限：首窗文本超此量（快流大窗）仍贴齐，防迟到物化整段重打。 */
+internal const val TYPEWRITER_FIRST_CHUNK_LIMIT = 300
+
+/**
+ * 本 tick 时长（毫秒）= 追平视界 / 积压，钳 [帧率档, 慢速档]：积压 ≤62 簇走慢速档，≥125 簇
+ * 压到帧率档，之间线性过渡——持续快流下显示速率贴帧率档上限不整块倾泻，积压消退时 tick
+ * 渐次放慢到慢速档（尾段减速收尾）。整数除法（毫秒粒度）与 iOS 同式，两端 tick 逐值相等；
+ * 非正积压按 1。
+ */
+internal fun typewriterTickMs(backlog: Int): Long =
+    (TYPEWRITER_HORIZON_MS / backlog.coerceAtLeast(1)).coerceIn(TYPEWRITER_MIN_TICK_MS, TYPEWRITER_BASE_TICK_MS)
+
+/**
+ * 本 tick 步进（簇）：恒 1，仅积压超上限时 ceil(积压/上限) 升档；[catchUp] = final 续打阶段
+ *（上限换 [TYPEWRITER_CATCH_UP_TICKS]，尾包有界收敛）。入参非正按 0 处理（恒 1）。
+ */
+internal fun typewriterStep(backlog: Int, catchUp: Boolean = false): Int {
+    val limit = if (catchUp) TYPEWRITER_CATCH_UP_TICKS else TYPEWRITER_LAG_LIMIT_CLUSTERS
+    return maxOf(1, (backlog.coerceAtLeast(0) + limit - 1) / limit)
+}
 
 /**
  * 簇边界表（2026-11-21 簇计量统一轮，退役 typewriterSnapToCodePointBoundary）：ends[k] = 前
@@ -1575,8 +1597,59 @@ internal fun typewriterClusterEnds(content: String): IntArray {
     return ends.copyOf(count)
 }
 
-/** 打字机 tick 周期（毫秒，iOS StreamingTypewriter.tickNanos = 16_000_000 对应值）。 */
-private const val TYPEWRITER_TICK_MS = 16L
+// ── 流式 → final 续打交接账本（iOS Chat/StreamingTypewriter.swift TypewriterHandoff 镜像） ──
+
+/**
+ * 打字机交接账本（2026-11-28 流式逐字轮；纯逻辑类，时钟注入供单测）。按会话一键（同会话
+ * 同时至多一条在途流式行），两条职责：
+ * 1. **final 续打**：流式行被 final 权威行替换时行身份（dstream:… → messageId）更换，
+ *    LazyColumn 视为全新行，旧打字机连同剩余积压一并离场——旧口径尾包一次性跳出。流式行
+ *    每 tick 记进度，final 行首次组合时查得「同会话 + 未过期 + 前缀吻合 + 确有剩余」即从
+ *    记录进度续打（TTL 5s：行滚出视口后再物化、快照/重进等迟到物化一律贴齐不续打）；
+ * 2. **首窗逐字 / 重物化不重打**：流式行由首个 delta 创建，旧口径「挂载即贴齐」使每条
+ *    回复的首个 2s 窗恒整块瞬显。按 messageId 辨别——本会话账本未见该行 = 首次出现，从 0
+ *    逐字；已见（滚动往返重新物化、runActive 瞬态翻转重建分支）= 贴齐不重打。
+ * 线程纪律：仅 UI 线程访问（组合与 LaunchedEffect 同线程），无同步。
+ */
+internal class TypewriterHandoffLedger(
+    private val now: () -> Long = System::currentTimeMillis,
+    private val ttlMs: Long = 5_000,
+) {
+    data class Entry(val messageId: String, val shown: Int, val content: String, val at: Long)
+
+    private val entries = HashMap<String, Entry>()
+
+    /** 该会话账本是否未见此行（= 首次出现的流式行）；空键恒 false（不记账的调用点不触发首窗逐字）。 */
+    fun isNewStream(conversationId: String, messageId: String): Boolean =
+        conversationId.isNotEmpty() && messageId.isNotEmpty() && entries[conversationId]?.messageId != messageId
+
+    fun record(conversationId: String, messageId: String, shown: Int, content: String) {
+        if (conversationId.isEmpty()) return
+        entries[conversationId] = Entry(messageId, shown, content, now())
+    }
+
+    /** final 行续打起点：null = 不续打（无记录/过期/前缀不吻合/无剩余积压）。过期即清（长内容串不滞留）。 */
+    fun carryStart(conversationId: String, content: String): Int? {
+        if (conversationId.isEmpty()) return null
+        val e = entries[conversationId] ?: return null
+        if (now() - e.at >= ttlMs) {
+            entries.remove(conversationId)
+            return null
+        }
+        val shown = e.shown.coerceIn(0, e.content.length)
+        if (shown <= 0 || shown >= content.length || !content.startsWith(e.content)) return null
+        return shown
+    }
+
+    /** 登出清账（换账号不残留）。 */
+    fun reset() = entries.clear()
+}
+
+/** 应用级单例（登出链调 [resetForLogout]）。 */
+internal object TypewriterHandoff {
+    val ledger = TypewriterHandoffLedger()
+    fun resetForLogout() = ledger.reset()
+}
 
 @Composable
 private fun AssistantMessageRow(
@@ -1661,17 +1734,45 @@ private fun AssistantMessageRow(
                 // 不包（上方两分支与 interactiveCommand 分支天然在包层外）；MarkdownText 内嵌
                 // JsonCardView 随包层覆盖（拖选无害、卡内展开点击不受影响——知情注释）。
                 else -> SelectionContainer {
+                    val bodyModifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
                     if (presentation == StreamingRowPresentation.Progressive) {
                         StreamingTypewriterText(
                             content = m.content,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            modifier = bodyModifier,
+                            messageId = m.messageId,
+                            conversationId = conversationId,
                         )
                     } else {
-                        MarkdownText(
-                            content = m.content,
-                            showCursor = false, // Progressive 已上走打字机分支；此处恒非进行中行
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                        )
+                        // final 续打（2026-11-28 流式逐字轮，iOS HubMessageRow carryStart 镜像）：
+                        // 流式行被 final 权威行替换时行身份更换、旧打字机连同剩余积压离场——
+                        // 旧口径尾包一次性跳出。账本查得剩余积压（首次组合定版，防先闪一帧
+                        // 全文）即从记录进度逐字放完，再切回常规 final 整段渲染。
+                        var carryStart by remember(m.messageId) {
+                            mutableStateOf(
+                                if (m.state == "final" && m.content.isNotBlank()) {
+                                    TypewriterHandoff.ledger.carryStart(conversationId, m.content)
+                                } else {
+                                    null
+                                },
+                            )
+                        }
+                        val start = carryStart
+                        if (start != null) {
+                            StreamingTypewriterText(
+                                content = m.content,
+                                modifier = bodyModifier,
+                                messageId = m.messageId,
+                                conversationId = conversationId,
+                                carryOverFrom = start,
+                                onCaughtUp = { carryStart = null },
+                            )
+                        } else {
+                            MarkdownText(
+                                content = m.content,
+                                showCursor = false, // Progressive 已上走打字机分支；此处恒非进行中行
+                                modifier = bodyModifier,
+                            )
+                        }
                     }
                 }
             }
@@ -1692,61 +1793,104 @@ private fun AssistantMessageRow(
 }
 
 /**
- * 2026-11-21 流式单行归一轮：桌面打字机包装（iOS HubViews.swift StreamingTypewriter 镜像）。
- * 投影层行键归一为 dstream:<runId> 单行原地追加后，delta 块（桥 2s 合并窗）经本组件从
- * 「已见前缀」向新内容逐字放出，消除整块瞬显。
+ * 桌面打字机包装（iOS Chat/StreamingTypewriter.swift 镜像；2026-11-21 流式单行归一轮引入，
+ * 2026-11-28 流式逐字轮重写为恒逐字 + 等待期光标闪烁 + final 续打）。投影层行键归一为
+ * dstream:<runId> 单行原地追加后，delta 块（桥 2s 合并窗）经本组件从「已揭示前缀」向新内容
+ * **逐字**放出。节拍与步进见 [typewriterTickMs] / [typewriterStep]。
  *
  * 语义边界（与 iOS 逐条对齐）：
- * - 挂载首帧贴齐现有内容（快照行/列表滚动往返物化不重打；列表 key=messageId 行身份稳定，
- *   本组合项 @State 跨重组存活，仅挂载/重挂载时贴齐），仅存活期间的 append 逐字；
- * - 改写跳变（replace=true 语义、内容收缩、非前缀续写）不逐字、直接贴齐；
- * - 行收敛 final 时外层分支切回整段 MarkdownText（本组合项离场），剩余积压一次性补齐；
- * - 计量与推进以字素 Cluster 为最小单位（2026-11-21 簇计量统一轮，与 iOS String.count/
- *   Character 同义）：内部状态=已揭示簇数，步进=typewriterRevealStep(积压簇数) 簇/tick，
- *   显示切点=typewriterClusterEnds 簇表查 UTF-16 偏移——切点恒簇边界，代理对/ZWJ/CRLF
- *   多码元簇恒整簇揭示。终审的 typewriterSnapToCodePointBoundary（UTF-16 贴齐）被簇口径
- *   天然覆盖而退役、无行为回归：贴齐函数只修复「码元算术产生劈半索引」这一种病，簇计数
- *   语义下该索引不可构造（簇数→切点恒查表命中边界）；旧贴齐覆盖的代理对劈半在新口径下
- *   切点逐字节同旧（如 "a😀b" 旧贴齐后切 3=新表 ends[1]，"中文" 同值），且簇口径额外
- *   免疫旧贴齐不防的 ZWJ/组合符中位劈切（iOS 字素索引行为就此全量对齐）。
- *
- * 步长 = typewriterRevealStep(积压簇数) @ TYPEWRITER_TICK_MS——与 iOS 同参数同单位对锁
- * （见纯函数注；旧「桌面 UTF-16 码元/iOS 字素」计量知情差异废止）。
- * 揭示前缀喂 MarkdownText（showCursor=true，▌ 光标随前缀移动）；MarkdownText 本体零改动。
+ * - 首次出现的流式行（账本未见该 messageId、首窗 ≤ [TYPEWRITER_FIRST_CHUNK_LIMIT] 簇）从 0
+ *   逐字——首窗不再整块瞬显；重物化 / 非前缀改写 / 内容收缩直接贴齐（列表 key=messageId 行
+ *   身份稳定，本组合项 remember 跨重组存活，仅挂载/重挂载时定版起点）；
+ * - 光标恒挂已揭示前缀末尾：逐字期间常亮，积压放空等待期每 [TYPEWRITER_BLINK_MS] 翻转
+ *   （透明占位不增减字符，闪烁不动布局）；
+ * - [carryOverFrom] 非 null = final 行续打流式行剩余积压（[TypewriterHandoffLedger] 注），
+ *   打完经 [onCaughtUp] 交回常规 final 渲染；账本每 tick 记账，续打中行滚出再回来仍接续；
+ * - 计量以字素 Cluster 为最小单位（与 iOS String.count / Character 同义）：内部状态=已揭示
+ *   簇数，显示切点=[typewriterClusterEnds] 簇表查 UTF-16 偏移——切点恒簇边界，代理对/ZWJ/
+ *   CRLF 多码元簇恒整簇揭示。
  */
 @Composable
-private fun StreamingTypewriterText(content: String, modifier: Modifier = Modifier) {
-    // 已揭示字素 Cluster 数（单位与 iOS String.count 同义）；null = 未初始化（挂载即贴齐现内容，不重打）。
-    var revealedCount by remember { mutableStateOf<Int?>(null) }
-    // 上一帧内容（区分 append 前缀增长与改写跳变）。
-    var lastSeen by remember { mutableStateOf("") }
+private fun StreamingTypewriterText(
+    content: String,
+    modifier: Modifier = Modifier,
+    messageId: String = "",
+    conversationId: String = "",
+    carryOverFrom: Int? = null,
+    onCaughtUp: (() -> Unit)? = null,
+) {
     // 簇边界表：内容每变一次重建一次（=delta 块到达频率，与 MarkdownText remember(content)
     // 重解析同触发同量级）；揭示循环只做簇数算术，显示前缀查表取 UTF-16 切点——零逐 tick 重扫。
     val clusterEnds = remember(content) { typewriterClusterEnds(content) }
+    // 起点须在首次组合定版（remember 无键 = 行身份存活期内只算一次；等 LaunchedEffect 再定
+    // 会让 final 行先闪一帧全文再缩回前缀重打）：续打 → 记录进度；首次出现的流式行且首窗
+    // 不大 → 0；其余 → null 贴齐。
+    val freshStream = remember {
+        TypewriterHandoff.ledger.isNewStream(conversationId, messageId) &&
+            clusterEnds.size <= TYPEWRITER_FIRST_CHUNK_LIMIT
+    }
+    val initialStart = carryOverFrom ?: if (freshStream) 0 else null
+    // 已揭示字素 Cluster 数；null = 未初始化（挂载即贴齐现内容，不重打）。
+    var revealedCount by remember { mutableStateOf<Int?>(initialStart) }
+    // 上一帧内容（区分 append 前缀增长与改写跳变）。
+    var lastSeen by remember { mutableStateOf(if (initialStart == null) "" else content) }
+    // 光标可见性（等待期翻转；逐字期间恒 true）。
+    var cursorOn by remember { mutableStateOf(true) }
+
     LaunchedEffect(content) {
         val target = clusterEnds.size
-        val progress = revealedCount
-        if (progress == null) {
-            // 挂载首帧贴齐（iOS onAppear 同语义：首跑即初始化，竞态兜底并入）
+        val start = revealedCount
+        if (start == null || !content.startsWith(lastSeen)) {
+            // 挂载首帧贴齐 / 非前缀跳变（改写/收缩）：直接贴齐
             revealedCount = target
             lastSeen = content
-            return@LaunchedEffect
-        }
-        if (!content.startsWith(lastSeen)) {
-            // 非前缀跳变（改写/收缩）：直接贴齐
-            revealedCount = target
-            lastSeen = content
+            TypewriterHandoff.ledger.record(conversationId, messageId, target, content)
+            if (carryOverFrom != null) onCaughtUp?.invoke()
             return@LaunchedEffect
         }
         lastSeen = content
-        var shown = progress.coerceAtMost(target)
+        var shown = start.coerceIn(0, target)
         revealedCount = shown
-        while (shown < target) {
-            // 纯簇数推进（与 iOS shown + revealStep(...) 同式）：簇数为整，切点查表恒簇边界，
-            // 代理对/ZWJ 劈半无从产生（typewriterSnapToCodePointBoundary 职责被天然覆盖，见头注）
-            shown = (shown + typewriterRevealStep(target - shown)).coerceAtMost(target)
+        cursorOn = true
+        TypewriterHandoff.ledger.record(conversationId, messageId, shown, content)
+        if (shown >= target) {
+            if (carryOverFrom != null) onCaughtUp?.invoke()
+            return@LaunchedEffect
+        }
+        // dt 记账：按真实流逝时间折算本 tick 应放簇数（tick 抖动不改变平均速率）；封顶 2——
+        // 卡顿/后台回来不倾泻。
+        var credit = 0.0
+        var lastTick = System.nanoTime()
+        while (true) {
+            val backlog = target - shown
+            if (backlog <= 0) {
+                // 等待新字符：光标闪烁（delay 即取消点——新内容到达经 LaunchedEffect(content)
+                // 重启本协程，取消于 delay，进度跨重启保留）。
+                delay(TYPEWRITER_BLINK_MS)
+                cursorOn = !cursorOn
+                continue
+            }
+            val tick = typewriterTickMs(backlog)
+            delay(tick)
+            val now = System.nanoTime()
+            credit = minOf(credit + (now - lastTick) / 1_000_000.0 / tick, 2.0)
+            lastTick = now
+            var n = credit.toInt()
+            credit -= n
+            // 纯簇数推进：簇数为整，切点查表恒簇边界，代理对/ZWJ 劈半无从产生
+            n = minOf(maxOf(n, typewriterStep(backlog, catchUp = carryOverFrom != null)), backlog)
+            shown += n
             revealedCount = shown
-            delay(TYPEWRITER_TICK_MS) // 新内容到达经 LaunchedEffect(content) 重启，取消本循环（iOS task(id:) 同语义）
+            cursorOn = true
+            TypewriterHandoff.ledger.record(conversationId, messageId, shown, content)
+            if (shown >= target) {
+                if (carryOverFrom != null) {
+                    onCaughtUp?.invoke() // final 行续打完成，交回常规渲染
+                    return@LaunchedEffect
+                }
+                credit = 0.0
+                lastTick = System.nanoTime()
+            }
         }
     }
     // 显示前缀：簇数 → UTF-16 切点（防御性 coerce 同旧版；表与 content 同源同 key remember，恒一致）
@@ -1754,6 +1898,7 @@ private fun StreamingTypewriterText(content: String, modifier: Modifier = Modifi
     MarkdownText(
         content = content.substring(0, if (revealed == 0) 0 else clusterEnds[revealed - 1]),
         showCursor = true,
+        cursorOn = cursorOn,
         modifier = modifier,
     )
 }

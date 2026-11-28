@@ -3,124 +3,124 @@ package dev.sharpxia.agentreins.desktopui
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * 2026-11-21 流式单行归一轮：打字机步进纯函数单测（:desktopApp:test 锁行为不只锁存取——
- * StreamingRowPresentationTest/TimelineScrollTest 纯函数回归锚同纪律）。
+ * 打字机节拍 + 交接账本单测（:desktopApp:test 锁行为不只锁存取——StreamingRowPresentationTest/
+ * TimelineScrollTest 纯函数回归锚同纪律）。
  *
- * 桌面↔iOS parity 契约：iOS 侧 HubViews.swift StreamingTypewriter `revealStep` 双档 @ 16ms
- * ——本表锁 desktopui.typewriterRevealStep 同参数同单位；iOS 无单测 target，桌面回归锚兼作
- * 两端行为契约不漂移（单端改值须双端同步）。2026-11-21 走查②双端同扩洪泛档（积压>8192 转
- * 积压/3）；同日簇计量统一轮：积压/步长单位 UTF-16 码元 → 字素 Cluster
- * （typewriterClusterEnds = java.text.BreakIterator extended grapheme cluster，与 iOS
- * String.count 同义）；2026-11-22 pacing 对齐轮（B2）：常规档 max(8, 积压/12) →
- * max(1, 积压/90)——步长与桥 2s 合并窗时长对齐（≈90 tick×16ms≈1.4s 抽干一个窗、慢流
- * 1 簇/16ms 逐字），旧档 ≤~12 tick 抽干+500 簇/秒下限是数据节拍的 30-100 倍、打字体感
- * 在数学上不存在，双端同轮同改，双端常量 8192//90//3 @16ms 从此同义——单位语义锁在⑥⑦⑧，
- * 纯数值账（①②③④⑤）随档改写。
+ * 桌面↔iOS parity 契约：iOS Chat/StreamingTypewriter.swift `TypewriterPacing` 同值同义
+ * （baseTickNs=32ms / minTickNs=16ms / horizonMs=2000 / lagLimitChars=300 / catchUpTicks=75，
+ * tick 同为毫秒整数除法）——iOS 无单测 target，本表兼作两端行为契约不漂移（单端改值须
+ * 双端同步）。2026-11-28 流式逐字轮重写：旧「max(1, 积压/90) + 洪泛档 积压/3」废止，新口径
+ * 恒逐字（步进恒 1，靠缩短 tick 提速；仅积压超滞后上限/final 续打才升档）。
  */
 class StreamingTypewriterPacingTest {
 
-    // ── ① 小积压恒 1（2026-11-22 pacing 对齐轮：慢流逐字档 1 簇/16ms≈62.5 簇/秒，贴数据节拍） ──
-    // 簇计量统一轮改写：单位口径 码元→簇，值表零变化——步进纯函数与单位无关（入参即积压
-    // 簇数、返回值即步进簇数），簇口径由 typewriterClusterEnds/推进方落地，锁在⑥⑦⑧。
+    // ── ① tick 钳位：视界/积压，钳 [帧率档 16ms, 慢速档 32ms] ──
 
     @Test
-    fun smallBacklogFloorsAt1() {
-        assertEquals(1, typewriterRevealStep(0))
-        assertEquals(1, typewriterRevealStep(1))
-        assertEquals(1, typewriterRevealStep(89))  // 89/90=0（整数除）→ max(1, 0)=1
-        assertEquals(1, typewriterRevealStep(90))  // 90/90=1，恒 1
-        assertEquals(1, typewriterRevealStep(179)) // 179/90=1，180/90=2 才越界（见②）
+    fun tickClampsBetweenMinAndBase() {
+        assertEquals(32L, typewriterTickMs(0)) // 非正积压按 1 → 2000/1 → 钳慢速档
+        assertEquals(32L, typewriterTickMs(1))
+        assertEquals(32L, typewriterTickMs(62)) // 2000/62=32：慢速档顶
+        assertEquals(16L, typewriterTickMs(125)) // 2000/125=16：帧率档起点
+        assertEquals(16L, typewriterTickMs(8192))
+        assertEquals(16L, typewriterTickMs(262144))
     }
 
-    // ── ② 大块积压比例步进（2s 合并窗整块到达：~90 步（≈1.4s）内抽干，贴数据节拍） ──
-    // 簇计量统一轮改写：同①，单位=簇。2026-11-22 pacing 对齐轮：比例 1/12→1/90。
+    // ── ② 两档之间线性过渡，且对积压单调不增 ──
 
     @Test
-    fun largeBacklogScalesProportionally() {
-        assertEquals(2, typewriterRevealStep(180))   // 180/90=2（恒 1 档出界点）
-        assertEquals(10, typewriterRevealStep(900))  // 锚例：积压 900 簇 → 步 10 簇
-        assertEquals(20, typewriterRevealStep(1800))
-        assertEquals(50, typewriterRevealStep(4500))
-        assertEquals(91, typewriterRevealStep(8192)) // 常规档顶：8192/90=91（8193 起洪泛，见④）
-    }
-
-    // ── ③ 追平敛零：整块积压按调用方 clamp 语义迭代收敛（几何 ≈89/90 递减 + 恒 1 尾段） ──
-    // 簇计量统一轮改写：模拟循环升格为簇口径实演——target 取自 typewriterClusterEnds(实串)
-    // （同 StreamingTypewriterText 求值序），步进按簇数推进；BMP 文案簇数==码元数（2400 簇）。
-    // 2026-11-22 pacing 对齐轮：比例 1/12→1/90，收敛步数账随之拉长（实算 434 步≈7s 追平
-    // 一块 2400 簇——贴 2s 数据节拍的逐字揭示即本意，洪泛档兜底特大块）。
-
-    @Test
-    fun backlogConvergesToZeroBoundedSteps() {
-        val content = "字".repeat(2400)
-        val clusterEnds = typewriterClusterEnds(content)
-        assertEquals(2400, clusterEnds.size) // BMP：1 字 1 簇，锚定 target 口径
-        val target = clusterEnds.size
-        var shown = 0
-        var steps = 0
-        while (shown < target) {
-            val backlog = target - shown
-            val step = typewriterRevealStep(backlog)
-            assertTrue(step >= 1, "step=$step < 下限 1 @ backlog=$backlog")
-            assertTrue(step <= backlog, "step=$step 超积压 @ backlog=$backlog") // clamp 前上界
-            shown = minOf(target, shown + step)
-            steps++
-            assertTrue(steps < 1000, "1000 步未收敛：shown=$shown")
+    fun tickTransitionsLinearlyBetweenTiers() {
+        assertEquals(20L, typewriterTickMs(100)) // 2000/100
+        assertEquals(19L, typewriterTickMs(105)) // 2000/105=19.04 → 19（毫秒整数除，与 iOS 同式）
+        assertEquals(17L, typewriterTickMs(117)) // 2000/117=17.09 → 17
+        var prev = Long.MAX_VALUE
+        for (backlog in 1..400 step 7) {
+            val t = typewriterTickMs(backlog)
+            assertTrue(t <= prev, "tick 随积压增大反而变长：$t > $prev @ backlog=$backlog")
+            prev = t
         }
-        assertEquals(target, shown)
-        // 几何相位（积压 ≈89/90 递减）2400→~90 约 344 步 + 恒 1 尾段 ~90 步 = 实算 434 步；
-        // 上界 480 防步进公式被改成更慢档（更快的 /12、/90→/180 由①②值表另锁）。
-        assertTrue(steps in 400..480, "收敛步数 $steps 越界（几何 ~344 + 尾段 ~90 = 434 量级）")
-        assertEquals(0, target - shown)
     }
 
-    // ── ④ 洪泛档（2026-11-21 走查②）：积压 >8192 转 积压/3 快速追平，特大块不逐字拖帧 ──
-    // 簇计量统一轮改写：阈值语义 码元→簇（8192 簇，与 iOS floodBacklogChars=String.count
-    // 同义）；簇口径阈值边界实演在⑧。2026-11-22 pacing 对齐轮：8192 簇常规档步长随 /90 改。
+    // ── ③ 步进恒 1：积压 ≤ 滞后上限（300 簇）全程逐字，超限才 ceil(积压/上限) 升档 ──
 
     @Test
-    fun floodTierActivatesAboveThreshold() {
-        // 阈值边界：8192 簇本身仍常规档（> 才洪泛），8193 簇起洪泛
-        assertEquals(91, typewriterRevealStep(8192))    // 8192/90=91（常规档顶）
-        assertEquals(2731, typewriterRevealStep(8193))  // 8193/3=2731
-        // 桥合并缓冲硬帽量级（256KiB）：步长比例档，不再是常规档的 backlog/90
-        assertEquals(65536 / 3, typewriterRevealStep(65536))
-        assertEquals(262144 / 3, typewriterRevealStep(262144))
+    fun stepIsOneUntilLagLimit() {
+        assertEquals(1, typewriterStep(0))
+        assertEquals(1, typewriterStep(-5)) // 非正按 0 处理
+        assertEquals(1, typewriterStep(300))
+        assertEquals(2, typewriterStep(301)) // 301/300 向上取整
+        assertEquals(2, typewriterStep(600))
+        assertEquals(3, typewriterStep(601))
+        assertEquals(4, typewriterStep(901))
+        assertEquals(874, typewriterStep(262143)) // 桥合并缓冲硬帽量级：滞后仍有界
     }
 
-    // ── ⑤ 洪泛相位有界 tick 收敛（2026-11-21 走查②：洪泛 ~2/3 几何递减 + 常规尾段封顶） ──
-    // 簇计量统一轮改写：模拟积压数按簇计量——同硬帽下簇数 ≤ 码元数，收敛只会更快。
-    // 2026-11-22 pacing 对齐轮：常规档改 /90 后尾段拉长（8192 簇起实算 ~545 tick≈8.7s
-    // 逐字收尾，即新档的贴节拍语义），tick 上界随之改。
+    // ── ④ final 续打收敛：ceil(积压/75) 步进——尾 75 簇恒逐字，总 tick 对数有界 ──
 
     @Test
-    fun floodBacklogConvergesBoundedTicks() {
-        // 洪泛相位 ~2/3 递减：256KiB → ≤8.2k 约 9 tick（走查②行为不变）
-        var shown = 0
-        val target = 262144
-        var floodTicks = 0
-        while (target - shown > TYPEWRITER_FLOOD_BACKLOG_CHARS) {
-            shown = minOf(target, shown + typewriterRevealStep(target - shown))
-            floodTicks++
-            assertTrue(floodTicks < 20, "洪泛相位 $floodTicks tick 未收口（~9 tick 量级）")
+    fun catchUpStepBoundsTailTicks() {
+        assertEquals(1, typewriterStep(75, catchUp = true))
+        assertEquals(2, typewriterStep(76, catchUp = true))
+        assertEquals(4, typewriterStep(300, catchUp = true))
+        // 步进 = 积压/75 时积压按指数消退：总 tick ≈ 75×(1+ln(积压/75))，尾 75 簇回到逐字
+        fun catchUpTicks(target: Int): Int {
+            var shown = 0
+            var ticks = 0
+            while (shown < target) {
+                val n = minOf(typewriterStep(target - shown, catchUp = true), target - shown)
+                if (target - shown <= 75) assertEquals(1, n) // 尾段恒 1 簇收口，不整块跳出
+                shown += n
+                ticks++
+            }
+            return ticks
         }
-        // 全程（洪泛 + 常规尾段）以有界 tick 收敛：洪泛 ~9 + 常规档尾段（≤8192 簇 ≈89/90
-        // 递减 + 恒 1 段）~528 = 实算 537；上界 640 防步进公式被改成更慢档（①②④值表另锁）。
-        var total = floodTicks
-        while (shown < target) {
-            shown = minOf(target, shown + typewriterRevealStep(target - shown))
-            total++
-            assertTrue(total < 640, "$total tick 未收敛")
+        assertEquals(75, catchUpTicks(75))
+        assertEquals(112, catchUpTicks(150)) // ≈1.8s
+        assertEquals(156, catchUpTicks(300)) // ≈2.5s（帧率档 16ms/tick）
+        for (target in listOf(600, 8192, 262144)) { // 桥合并缓冲硬帽量级仍有界
+            val bound = kotlin.math.ceil(TYPEWRITER_CATCH_UP_TICKS * (1 + kotlin.math.ln(target.toDouble() / TYPEWRITER_CATCH_UP_TICKS))).toInt() + 1
+            assertTrue(catchUpTicks(target) <= bound, "续打 $target 簇超对数上界 $bound")
         }
-        assertEquals(target, shown)
     }
 
-    // ── ⑥ 簇边界表值表（2026-11-21 簇计量统一轮；改写原因：旧⑥「typewriterSnapToCodePoint-
-    //    Boundary 贴齐值表」随该函数退役——簇计数语义下劈半索引不可构造、贴齐职责被天然
-    //    覆盖，值表改锁簇表本值；JDK21 BreakIterator 实测钉点，与 Swift Character 同语义） ──
+    // ── ⑤ 揭示循环仿真：窗积压逐字放完，耗时落在「两档上下界」内（不整块倾泻、不拖沓） ──
+
+    @Test
+    fun windowBacklogDrainsCharByCharWithinTierBounds() {
+        // 与 StreamingTypewriterText 求值序同式：dt 记账（理想 tick 准点到达 → 每 tick 恒 1 簇）
+        fun drainMs(backlog: Int): Pair<Long, Int> {
+            var shown = 0
+            var elapsed = 0L
+            var maxStep = 0
+            while (shown < backlog) {
+                val step = minOf(typewriterStep(backlog - shown), backlog - shown)
+                maxStep = maxOf(maxStep, step)
+                shown += step
+                elapsed += typewriterTickMs(backlog - shown + step)
+            }
+            return elapsed to maxStep
+        }
+        // 慢流：每窗 60 簇全程慢速档 32ms → 1.92s，全程逐字
+        assertEquals(1_920L to 1, drainMs(60))
+        // 中速：每窗 120 簇——帧率档起头、随积压消退放慢到慢速档收尾；耗时严格落在
+        // 120×16ms 与 120×32ms 之间（两端都不贴：起头压到帧率档故 > 下界，尾段减速故 < 上界）
+        val (midMs, midStep) = drainMs(120)
+        assertEquals(1, midStep)
+        assertTrue(midMs > 1_920L && midMs < 3_840L, "midMs=$midMs 越出两档上下界")
+        // 滞后上限内的大窗仍逐字：300 簇——全程逐字，耗时落在 300×16ms 与 300×32ms 之间
+        //（帧率档压满仍慢于 2s 窗=滞后开始累积，到 301 簇起才升档——有界滞后的来源）
+        val (bigMs, bigStep) = drainMs(300)
+        assertEquals(1, bigStep)
+        assertTrue(bigMs > 4_800L && bigMs < 9_600L, "bigMs=$bigMs 越出两档上下界")
+        // 升档后步进才 >1：600 簇积压起手 2 簇/tick
+        assertEquals(2, drainMs(600).second)
+    }
+
+    // ── ⑥ 簇边界表值表（JDK21 BreakIterator 实测钉点，与 Swift Character 同语义） ──
 
     @Test
     fun clusterEndsValueTableLocksGraphemeUnits() {
@@ -139,13 +139,10 @@ class StreamingTypewriterPacingTest {
         assertEquals(4, typewriterClusterEnds("a😀b").last())
     }
 
-    // ── ⑦ 揭示循环仿真（簇口径；改写原因：旧⑦断言「前缀不劈代理对」建立在码元推进+贴齐
-    //    修复上——簇推进下断言升格为「切点恒取自簇表、前缀恒不出孤立高位代理尾」，严格强于
-    //    不劈代理对：ZWJ/CRLF 等多码元簇同样不劈，旧码元口径对这些本无防护） ──
+    // ── ⑦ 揭示循环仿真：切点恒取自簇表、前缀恒不出孤立高位代理尾（含升档步进路径） ──
 
     @Test
     fun clusterRevealSimulationAlwaysCutsAtClusterBoundaries() {
-        // 同旧⑦仿真串：码元 102 vs 簇 52——对比锁定「推进单位已换」且步数账减半量级
         val content = "流" + "😀".repeat(50) + "尾"
         assertEquals(102, content.length)
         val clusterEnds = typewriterClusterEnds(content)
@@ -153,8 +150,9 @@ class StreamingTypewriterPacingTest {
         assertEquals(52, target)
         var shown = 0
         while (shown < target) {
-            // 同 StreamingTypewriterText 求值序：簇数 + 步进（簇）→ clamp → 查表取显示切点
-            shown = minOf(target, shown + typewriterRevealStep(target - shown))
+            // 同 StreamingTypewriterText 求值序：簇数 + 步进（簇）→ clamp → 查表取显示切点；
+            // catchUp=true 走升档步进（多簇一步）仍恒落簇边界
+            shown = minOf(target, shown + typewriterStep(target - shown, catchUp = true))
             assertTrue(shown <= target, "簇推进越界 @ shown=$shown")
             val cut = clusterEnds[shown - 1]
             assertFalse(
@@ -165,16 +163,64 @@ class StreamingTypewriterPacingTest {
         assertEquals(target, shown)
     }
 
-    // ── ⑧ 洪泛阈值按簇（2026-11-21 簇计量统一轮扩例）：「8192」语义 = 8192 簇，非 8192 码元 ──
+    // ── ⑧ 簇口径：步进入参是簇数非码元——非 BMP 大串不误触滞后升档 ──
 
     @Test
-    fun floodThresholdCountsClustersNotCodeUnits() {
-        // 纯 BMP：簇数==码元数，阈值账与旧口径同值（8192 簇恰常规档顶、8193 簇起洪泛；
-        // 常规档步长随 2026-11-22 pacing 对齐轮改 /90）
-        assertEquals(91, typewriterRevealStep(typewriterClusterEnds("字".repeat(8192)).size))
-        assertEquals(2731, typewriterRevealStep(typewriterClusterEnds("字".repeat(8193)).size))
-        // 非 BMP 锁「簇」语义：8642 码元 > 8192 旧码元口径会误入洪泛档；簇口径 4321 簇恒常规
-        assertEquals(4321, typewriterClusterEnds("😀".repeat(4321)).size)
-        assertEquals(48, typewriterRevealStep(4321)) // 4321/90=48
+    fun lagLimitCountsClustersNotCodeUnits() {
+        // 300 个 emoji = 600 码元 > 300，簇数 300 仍恒逐字；301 簇（602 码元）才升档
+        assertEquals(1, typewriterStep(typewriterClusterEnds("😀".repeat(300)).size))
+        assertEquals(2, typewriterStep(typewriterClusterEnds("😀".repeat(301)).size))
+        // 首窗逐字上限按簇：300 emoji 首窗可从 0 逐字
+        assertTrue(typewriterClusterEnds("😀".repeat(300)).size <= TYPEWRITER_FIRST_CHUNK_LIMIT)
+        assertFalse(typewriterClusterEnds("😀".repeat(301)).size <= TYPEWRITER_FIRST_CHUNK_LIMIT)
+    }
+
+    // ── ⑨ 交接账本：首窗逐字 / 重物化不重打 ──
+
+    @Test
+    fun ledgerTreatsUnseenMessageAsNewStream() {
+        val ledger = TypewriterHandoffLedger(now = { 0L })
+        assertTrue(ledger.isNewStream("c1", "dstream:run-1")) // 首次出现的流式行
+        assertFalse(ledger.isNewStream("", "m")) // 空会话键：不记账不触发首窗逐字
+        assertFalse(ledger.isNewStream("c1", "")) // 空行键同理
+        ledger.record("c1", "dstream:run-1", 10, "0123456789")
+        assertFalse(ledger.isNewStream("c1", "dstream:run-1")) // 滚动往返重物化：已见=贴齐不重打
+        assertTrue(ledger.isNewStream("c1", "dstream:run-2")) // 下一 run 的新流式行：重新逐字
+        // 空会话键不落账：记了也读不到（恒不新流、不续打）
+        ledger.record("", "m", 1, "x")
+        assertFalse(ledger.isNewStream("", "m"))
+        assertNull(ledger.carryStart("", "x"))
+    }
+
+    // ── ⑩ 交接账本：final 续打起点校验（前缀吻合 + 确有剩余 + TTL） ──
+
+    @Test
+    fun ledgerCarryStartValidatesPrefixBacklogAndTtl() {
+        var now = 1_000L
+        val ledger = TypewriterHandoffLedger(now = { now })
+        assertNull(ledger.carryStart("c1", "abc")) // 无记录
+        assertNull(ledger.carryStart("", "abc")) // 空会话键恒不续打
+        ledger.record("c1", "dstream:run-1", 2, "abcd")
+        assertEquals(2, ledger.carryStart("c1", "abcdef")) // 前缀吻合 + 有剩余积压
+        assertNull(ledger.carryStart("c1", "ab")) // 内容收缩：已揭示不小于全文
+        assertNull(ledger.carryStart("c1", "abXXXX")) // 非前缀改写（replace 语义）：贴齐
+        assertNull(ledger.carryStart("c2", "abcdef")) // 他人会话不串账
+        ledger.record("c1", "dstream:run-1", 4, "abcd")
+        assertNull(ledger.carryStart("c1", "abcd")) // 流式期已打完：无剩余，final 直接整段渲染
+        ledger.record("c1", "dstream:run-2", 1, "ab")
+        now += 4_999L
+        assertEquals(1, ledger.carryStart("c1", "abc")) // TTL 内有效
+        now += 1L
+        assertNull(ledger.carryStart("c1", "abc")) // TTL 外：迟到物化贴齐
+        assertNull(ledger.carryStart("c1", "abc")) // 过期即清：账本无残留
+    }
+
+    @Test
+    fun ledgerResetClearsEverything() {
+        val ledger = TypewriterHandoffLedger(now = { 0L })
+        ledger.record("c1", "dstream:run-1", 2, "abcd")
+        ledger.reset()
+        assertTrue(ledger.isNewStream("c1", "dstream:run-1"))
+        assertNull(ledger.carryStart("c1", "abcdef"))
     }
 }

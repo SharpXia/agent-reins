@@ -1110,6 +1110,7 @@ struct HubChatView: View {
                     ForEach(hub.messages, id: \.messageId) { m in
                         HubMessageRow(
                             m: m,
+                            conversationId: conv.conversationId,
                             cardHit: interactiveCard?.messageId == m.messageId ? interactiveCard : nil,
                             onDelete: { pendingDeleteMessage = m },
                             onOpenImages: { pages, idx in openViewer(pages, index: idx) },
@@ -1492,6 +1493,10 @@ struct HubChatView: View {
                 // .onKeyPress 双保险挂载与文本视图层 composer（Catalyst 分支见下）同帧同
                 // 快照注入，分流全走 ComposerKeyRouter 纯表语义恒同。同日债清轮补第四个：
                 // 附件在场快照（分流表②真空白/③强发的附件半边，见 routeEnter 注）。
+                // 2026-11-28 Enter 四态收口轮：文本视图层 composer（Catalyst 主通道）的 Enter
+                // 不再吃空白/多行/面板三个渲染期快照——键时按文本视图实况正文现算
+                //（ComposerTextViewBase.Key.enter 注，快照滞后 = 「多行 Enter 误判发送」的
+                // 竞态面）；本处快照只剩 .onKeyPress 双保险挂载与 ↑↓/Tab 门在用。
                 let panelVisibleNow = !slashSuggestions.isEmpty
                 let draftTextIsBlankNow = draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 let draftHasAttachmentsNow = !hub.draft(for: conv.conversationId).attachments.isEmpty
@@ -1532,9 +1537,8 @@ struct HubChatView: View {
                             markedTextActive: $composerMarkedTextActive,
                             maxHeightLines: 4,
                             panelVisible: panelVisibleNow,
-                            draftTextIsBlank: draftTextIsBlankNow,
                             draftHasAttachments: draftHasAttachmentsNow,
-                            draftIsMultiline: draftIsMultilineNow,
+                            slashCatalog: slashCommands,
                             onSend: { sendDraft() },
                             onSendHighlighted: { sendSlashHighlighted() },
                             onMoveHighlight: { slashMoveSelection($0) },
@@ -2432,15 +2436,14 @@ private struct ComposerTextView: UIViewRepresentable {
     let markedTextActive: Binding<Bool>
     /// 最大可见行数帽（帽内自适应、超帽滚动）。
     let maxHeightLines: Int
-    /// 渲染期快照：斜杠面板可见（= !slashSuggestions.isEmpty）。
+    /// 渲染期快照：斜杠面板可见（= !slashSuggestions.isEmpty）——仅供 ↑↓/Tab 门（Enter 的
+    /// 面板可见性与空白/多行判定键时按实况正文现算，见 Key.enter 注）。
     let panelVisible: Bool
-    /// 渲染期快照：草稿纯文本 trim 后为空（不含附件；与 draftHasAttachments 成对进分流表，
-    /// 见 ComposerKeyRouter.routeEnter ②/③ 债清轮口径）。
-    let draftTextIsBlank: Bool
-    /// 渲染期快照：草稿 pending 附件槽位在场。
+    /// 渲染期快照：草稿 pending 附件槽位在场（附件集不随键入变化，快照无竞态面）。
     let draftHasAttachments: Bool
-    /// 渲染期快照：草稿已含换行（多行）。
-    let draftIsMultiline: Bool
+    /// 斜杠命令目录快照（动态 ∪ 静态，随 #21 拉取与刷新频率变化）：Enter 键时按实况正文现算
+    /// 面板可见性用——目录本身不随键入变化，无竞态面。
+    let slashCatalog: [SlashCommand]
     let onSend: () -> Void
     /// ④ 面板可见 Enter = 发送高亮完整斜杠命令（selectSlashCommand 同通道）。
     let onSendHighlighted: () -> Void
@@ -2477,26 +2480,30 @@ private struct ComposerTextView: UIViewRepresentable {
         // 键位分流快照每帧重封（与渲染同帧；IME 门在文本视图内建，不经此处）。
         view.routeKey = { key in
             switch key {
-            case let .enter(shift, metaOrCtrl):
+            case let .enter(shift, metaOrCtrl, liveText):
+                // 文本派生三标志（空白/多行/面板可见）键时按实况正文现算（Key.enter 注）——
+                // 渲染期快照在主线程忙时会滞后一拍，是「多行 Enter 误判发送」的竞态面。
+                let blank = liveText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                let panel = !SlashCommandCatalog.suggestions(forDraft: liveText, from: slashCatalog).isEmpty
                 return ComposerKeyRouter.routeEnter(
                     shift: shift,
                     metaOrCtrl: metaOrCtrl,
-                    draftTextIsBlank: draftTextIsBlank,
-                    draftHasAttachments: draftHasAttachments,
-                    panelVisible: panelVisible,
-                    draftIsMultiline: draftIsMultiline,
+                    draftTextIsBlank: blank,
+                    draftHasAttachments: draftHasAttachments, // 附件集不随键入变化，快照无竞态面
+                    panelVisible: panel,
+                    draftIsMultiline: liveText.contains("\n"),
                     onSend: onSend,
                     onSendHighlighted: onSendHighlighted,
                 )
-            case .enterFromFallback:
+            case let .enterFromFallback(liveText):
                 // insertText 兜底限权模式：永不触发 onSend（见 Key.enterFromFallback 注）。
                 return ComposerKeyRouter.routeEnter(
                     shift: false,
                     metaOrCtrl: false,
-                    draftTextIsBlank: draftTextIsBlank,
+                    draftTextIsBlank: liveText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                     draftHasAttachments: draftHasAttachments,
-                    panelVisible: panelVisible,
-                    draftIsMultiline: draftIsMultiline,
+                    panelVisible: false,
+                    draftIsMultiline: liveText.contains("\n"),
                     onSend: onSend,
                     allowsSend: false,
                 )
@@ -2596,13 +2603,17 @@ final class ComposerTextViewBase: UITextView {
         fatalError("init(coder:) 未支持：UIViewRepresentable 走 init(frame:)")
     }
 
-    /// 键型（修饰键由本类从 UIEvent.modifierFlags 解出，分流闭包只收语义键）。
+    /// 键型（修饰键由本类从 UIKeyCommand/UIEvent 解出，分流闭包只收语义键）。
     enum Key {
-        case enter(shift: Bool, metaOrCtrl: Bool)
-        /// insertText 兜底专用：pressesBegan 未见的直插（软键盘/程序注入，Catalyst 恒硬件
-        /// 键盘理论不达）——无修饰键上下文，分流表只允许消费②真空白 no-op，发送分支
-        /// （③④⑤-send）一律让行默认换行，永不触发 onSend。
-        case enterFromFallback
+        /// text = 键按下瞬间文本视图的实况正文（2026-11-28 Enter 四态收口轮：空白/多行/面板
+        /// 可见三项文本派生标志一律键时现算，不再读渲染期快照——快照要等 SwiftUI 下一帧
+        /// 重封 routeKey，主线程忙时（流式行逐帧重排）用户紧跟着的下一键会拿到旧快照：
+        /// Shift+Enter 刚插入换行、下一记 Enter 仍按「单行」判成发送）。
+        case enter(shift: Bool, metaOrCtrl: Bool, text: String)
+        /// insertText 兜底专用：pressesBegan/keyCommands 未见的直插（软键盘/程序注入，Catalyst
+        /// 恒硬件键盘理论不达）——无修饰键上下文，分流表只允许消费②真空白 no-op，发送分支
+        /// （③④⑤-send）一律让行默认换行，永不触发 onSend。text = 调用瞬间正文实况。
+        case enterFromFallback(text: String)
         case tab
         case upArrow
         case downArrow
@@ -2637,6 +2648,13 @@ final class ComposerTextViewBase: UITextView {
             UIKeyCommand(input: "\r", modifierFlags: .shift, action: #selector(keyEnter(_:))),
             UIKeyCommand(input: "\r", modifierFlags: .command, action: #selector(keyEnter(_:))),
             UIKeyCommand(input: "\r", modifierFlags: .control, action: #selector(keyEnter(_:))),
+            // 数字键盘 ⌅ Enter（外接全尺寸键盘，Mac mini 常见）：UIKit 对小键盘键附带
+            // .numericPad 修饰位，与主键盘 Return 是两套键码——同四形态补注册，否则小键盘
+            // Enter 落默认行为（单行只换行不发送）。action 内只看 shift/⌘/⌃，忽略该位。
+            UIKeyCommand(input: "\r", modifierFlags: .numericPad, action: #selector(keyEnter(_:))),
+            UIKeyCommand(input: "\r", modifierFlags: [.numericPad, .shift], action: #selector(keyEnter(_:))),
+            UIKeyCommand(input: "\r", modifierFlags: [.numericPad, .command], action: #selector(keyEnter(_:))),
+            UIKeyCommand(input: "\r", modifierFlags: [.numericPad, .control], action: #selector(keyEnter(_:))),
             UIKeyCommand(input: "\t", modifierFlags: [], action: #selector(keyTab(_:))),
             UIKeyCommand(input: UIKeyCommand.inputUpArrow, modifierFlags: [], action: #selector(keyArrow(_:))),
             UIKeyCommand(input: UIKeyCommand.inputDownArrow, modifierFlags: [], action: #selector(keyArrow(_:))),
@@ -2649,13 +2667,15 @@ final class ComposerTextViewBase: UITextView {
     }
 
     /// Enter action：修饰键从 UIKeyCommand 实读（不再依赖 pressesBegan 的 UIEvent 面——
-    /// Catalyst 真机该通道未达）。未消费分支（Shift 换行/多行换行/附件独发）手动补默认
-    /// 换行：注册即吞内建，super 默认不再发生。
+    /// Catalyst 真机该通道未达）；正文取本视图实况（text，键时现算——见 Key.enter 注）。
+    /// 未消费分支（Shift 换行/多行换行/附件独发）手动补默认换行：注册即吞内建，super 默认
+    /// 不再发生。
     @objc private func keyEnter(_ cmd: UIKeyCommand) {
         let m = cmd.modifierFlags
         let consumed = routeKey?(
             .enter(shift: m.contains(.shift),
-                   metaOrCtrl: m.contains(.command) || m.contains(.control))
+                   metaOrCtrl: m.contains(.command) || m.contains(.control),
+                   text: text)
         ) ?? false
         if !consumed { super.insertText("\n") }
     }
@@ -2729,7 +2749,8 @@ final class ComposerTextViewBase: UITextView {
             case .keyboardReturnOrEnter:
                 consumed = routeKey?(
                     .enter(shift: flags.contains(.shift),
-                           metaOrCtrl: flags.contains(.command) || flags.contains(.control))
+                           metaOrCtrl: flags.contains(.command) || flags.contains(.control),
+                           text: text)
                 ) ?? false
             case .keyboardTab:
                 consumed = routeKey?(.tab) ?? false
@@ -2764,7 +2785,7 @@ final class ComposerTextViewBase: UITextView {
         // 闸二——pressesBegan 未见过该 press 的直插（软键盘/程序注入，Catalyst 恒硬件键盘
         // 理论不达）：走 enterFromFallback 限权分流，永不触发 onSend（发送只能由带修饰键
         // 实况的 presses 主通道或发送键承担；②真空白 no-op 消费保持，附件独发让行默认换行）。
-        if markedTextRange == nil, text == "\n", routeKey?(.enterFromFallback) == true {
+        if markedTextRange == nil, text == "\n", routeKey?(.enterFromFallback(text: self.text)) == true {
             return
         }
         if markedTextRange == nil, text == "\t", routeKey?(.tab) == true {
@@ -3059,6 +3080,8 @@ private final class ScrollProbeBox {
 /// executedCommand 非 nil = 已执行，卡呈结果态）。
  fileprivate struct HubMessageRow: View {
     let m: UiMessage
+    /// 所属会话（流式打字机交接账本 TypewriterHandoff 的记账键）。
+    let conversationId: String
     /// 非 nil = 本行是最新一次裸交互命令交换的回复行——就地渲染对应交互卡**替代原回复
     /// 文本**（models → REST #22 模型卡；options → 通用选项卡）。
     var cardHit: HubChatView.InteractiveCardHit? = nil
@@ -3075,6 +3098,10 @@ private final class ScrollProbeBox {
     var bubbleActive: Bool = false
     /// 气泡活跃态上抛（开=本行 messageId、收=nil）：父级单例态唯一写入面。
     var onLinkBubbleActiveChange: ((String?) -> Void)? = nil
+    /// final 续打起点（2026-11-28 流式逐字轮）：非 nil = 本行接管流式行剩余积压，先经
+    /// StreamingTypewriter 逐字放完再切常规 final 渲染；打完置 nil。须首帧定版（init 读
+    /// 账本）——等 onAppear 再查会先闪一帧全文。
+    @State private var carryStart: Int?
     @State private var hub = HubStore.shared
     /// 需求3（2026-11-23 批次一）：在途链接动作气泡——正文 Text 的 .link run 与 Link 视图
     /// 点击经 openURL 环境拦截置此（不再直开浏览器），气泡呈「打开/复制」两动作；点行内
@@ -3083,9 +3110,38 @@ private final class ScrollProbeBox {
     @State private var pendingLink: URL?
     @Environment(\.inkColors) private var ink
 
+    init(
+        m: UiMessage,
+        conversationId: String,
+        cardHit: HubChatView.InteractiveCardHit? = nil,
+        onDelete: @escaping () -> Void,
+        onOpenImages: @escaping ([ImageViewerPage], Int) -> Void,
+        bubbleActive: Bool = false,
+        onLinkBubbleActiveChange: ((String?) -> Void)? = nil
+    ) {
+        self.m = m
+        self.conversationId = conversationId
+        self.cardHit = cardHit
+        self.onDelete = onDelete
+        self.onOpenImages = onOpenImages
+        self.bubbleActive = bubbleActive
+        self.onLinkBubbleActiveChange = onLinkBubbleActiveChange
+        // 续打只对「助手 final 文本行」成立：交互卡行/空正文/非 final 无流式积压可接。
+        let eligible = m.role == "assistant" && m.state == "final"
+            && cardHit == nil && !m.content.isEmpty
+        _carryStart = State(initialValue: eligible
+            ? TypewriterHandoff.shared.carryStart(conversationId: conversationId, content: m.content)
+            : nil)
+    }
+
     /// 会话活跃 run 现值（liveSelected 列表现值，同 Stop 态 wp-8② 口径）：僵尸流式行门控共用
     ///（2026-11-19 清账①，桌面 streamingRowPresentation runActive 分支同语义 parity）。
     private var runActive: Bool { hub.liveSelected?.hasActiveRun == true }
+
+    /// 正文打开图块回调（流式/续打/常规三路同用）。
+    private func openRemoteImages(_ urls: [URL], _ idx: Int) {
+        onOpenImages(urls.map { ImageViewerPage.remote($0) }, idx)
+    }
 
     var body: some View {
         // 空白判据与桌面 contentBlank=m.content.isBlank() 同语义（2026-11-19 清账②拉齐：桌面
@@ -3151,14 +3207,16 @@ private final class ScrollProbeBox {
                                     .foregroundStyle(Color.secondary)
                             }
                         } else if m.state == "streaming" && runActive {
-                            // wp-7 可选增强：流式行 typewriter 渐进揭示——数据 2s 一块、渲染逐字放出
-                            //（runActive 门控：僵尸流式行走下方 Markdown 静态渲染，2026-11-19 清账①）
-                            // v1.4 查看器：流式期已成块的 ![...](url) 图块同样可点开查看（入口 b）
+                            // 流式行打字机逐字揭示（Chat/StreamingTypewriter.swift；runActive 门控：
+                            // 僵尸流式行走下方 Markdown 静态渲染，2026-11-19 清账①）。
+                            // v1.4 查看器：流式期已成块的 ![...](url) 图块同样可点开查看（入口 b）。
+                            // 2026-11-28：messageId/conversationId 进交接账本——首窗从 0 逐字、
+                            // 重物化不重打、final 行续打剩余积压。
                             StreamingTypewriter(
                                 content: m.content,
-                                onOpenImage: { urls, idx in
-                                    onOpenImages(urls.map { ImageViewerPage.remote($0) }, idx)
-                                },
+                                messageId: m.messageId,
+                                conversationId: conversationId,
+                                onOpenImage: { urls, idx in openRemoteImages(urls, idx) },
                             )
                         } else if m.content.isEmpty && m.attachments.isEmpty {
                             // wp-8③：final/failed 空正文助手行渲染占位文案，不再出现空气泡
@@ -3168,14 +3226,26 @@ private final class ScrollProbeBox {
                                 .font(.footnote)
                                 .italic()
                                 .foregroundStyle(.secondary)
+                        } else if let start = carryStart {
+                            // final 续打（2026-11-28 流式逐字轮）：流式行被 final 权威行替换时行身份
+                            // 更换、旧打字机连同剩余积压离场——旧口径尾包一次性跳出。账本查得剩余
+                            // 积压（init 首帧定版）即从记录进度逐字放完，再经 onCaughtUp 切回下方
+                            // 常规 final 渲染（JSON 卡嗅探/交互卡在收尾后接管）。streaming=true
+                            // 期间同样绕过嗅探，防半流前缀闪卡。
+                            StreamingTypewriter(
+                                content: m.content,
+                                messageId: m.messageId,
+                                conversationId: conversationId,
+                                carryOverFrom: start,
+                                onOpenImage: { urls, idx in openRemoteImages(urls, idx) },
+                                onCaughtUp: { carryStart = nil },
+                            )
                         } else {
                             // 助手内容走自研轻量 Markdown 渲染器（0.4.8 滑动性能专项资产，P4 接入 Hub 面）
                             // v1.4 查看器：Markdown 图片块点开查看（入口 b；页集 = 同消息全部 https 图块，可左右翻页）
                             MarkdownView(
                                 content: m.content,
-                                onOpenImage: { urls, idx in
-                                    onOpenImages(urls.map { ImageViewerPage.remote($0) }, idx)
-                                },
+                                onOpenImage: { urls, idx in openRemoteImages(urls, idx) },
                             )
                         }
                     }
@@ -4628,76 +4698,8 @@ private struct PagedChoiceGrid<Item, ID: Hashable, Card: View>: View {
     }
 }
 
-/// wp-7 可选增强：流式行 typewriter 渐进揭示（grokbot 逐字体感）。
-///
-/// 数据侧 2s 合并大块到达（bridge 2s 窗，delta-coalesce DEFAULT_COALESCE_WINDOW_MS=2_000），
-/// 渲染侧从「已见前缀」向新内容逐字放出，双档步长 @ 16ms（2026-11-21 走查②与桌面
-/// desktopui/ConversationScreen.kt typewriterRevealStep 双端对锁，单端改值必须双端同步；
-/// 2026-11-22 pacing 对齐轮——步长从「尽快抽干积压」改为与合并窗时长对齐）：
-/// - 常规档 max(1, 积压/90)：≈90 tick×16ms≈1.4s 抽干一个 2s 窗，贴数据节拍——人眼打字
-///   感知量级 5~15 字/秒，CJK 慢流每窗 10-60 字积压呈 1 字/16ms 逐字揭示。旧档
-///   max(8, 积压/12) 以 ≤~12 tick（≈200ms）抽干全部积压、下限 8 字/16ms≈500 字/秒，是
-///   数据节拍的 30-100 倍，流式行呈「逐 2s 块瞬增」、打字体感在数学上不存在（B2 根因），废止；
-/// - 洪泛档 积压/3（积压>8192 字）不变：特大块（桥合并缓冲硬帽 256KiB 量级）走常规档需
-///   数百 tick、每 tick 对已揭示前缀整体重解析累计上百×积压，主线程掉帧；洪泛档 ~9 tick
-///   追平、累计 ~2×积压——洪泛量级逐字观感本已不可信（常规档 8192 字需 ~545 tick≈8.7s），
-///   快速追平无体感损失（走查②判定维持）。
-///
-/// 语义边界：
-/// - 挂载首帧贴齐现有内容（快照行/滚动往返物化不重打），仅本行存活期间的 append 逐字；
-/// - 改写跳变（replace=true 语义、内容收缩、非前缀续写）不逐字、直接贴齐；
-/// - 行收敛 final 时外层分支切回 MarkdownView 整段渲染，剩余积压一次性补齐。
-private struct StreamingTypewriter: View {
-    let content: String
-    /// v1.4 查看器（入口 b）回调穿线：流式期已成块的 https 图块点按上抛（nil = 不接）。
-    var onOpenImage: (([URL], Int) -> Void)? = nil
-    /// 已揭示字符数；nil = 未初始化（挂载即贴齐现内容）。
-    @State private var revealedCount: Int? = nil
-    /// 上一帧内容（区分 append 前缀增长与改写跳变）。
-    @State private var lastSeen = ""
-
-    private static let tickNanos: UInt64 = 16_000_000
-    /// 洪泛档阈值（字符，> 阈值转洪泛档；与桌面 TYPEWRITER_FLOOD_BACKLOG_CHARS 同值对锁）。
-    private static let floodBacklogChars = 8_192
-
-    /// 双档步长（与桌面 typewriterRevealStep 同表 8192//90//3；回归值表锁在桌面
-    /// StreamingTypewriterPacingTest）。
-    private static func revealStep(_ backlog: Int) -> Int {
-        backlog > floodBacklogChars ? backlog / 3 : max(1, backlog / 90)
-    }
-
-    var body: some View {
-        // streaming=true：typewriter 逐字前缀行跳过 JSON 卡嗅探（仅 final 嗅探，对位桌面
-        // jsonCardPayloadOrNull 的 streaming 闸——[]/{} 这类瞬时合法前缀不闪卡）。
-        MarkdownView(content: String(content.prefix(revealedCount ?? content.count)),
-                     streaming: true, onOpenImage: onOpenImage)
-            .onAppear {
-                if revealedCount == nil { revealedCount = content.count; lastSeen = content }
-            }
-            .task(id: content) {
-                let target = content.count
-                guard let progress = revealedCount else {
-                    // onAppear 竞态兜底：仍未初始化则贴齐，不重打
-                    revealedCount = target
-                    lastSeen = content
-                    return
-                }
-                guard content.hasPrefix(lastSeen) else {
-                    revealedCount = target
-                    lastSeen = content
-                    return
-                }
-                lastSeen = content
-                var shown = min(progress, target)
-                revealedCount = shown
-                while shown < target && !Task.isCancelled {
-                    shown = min(target, shown + Self.revealStep(target - shown))
-                    revealedCount = shown
-                    try? await Task.sleep(nanoseconds: Self.tickNanos)
-                }
-            }
-    }
-}
+// 流式行打字机（StreamingTypewriter）与交接账本（TypewriterHandoff）2026-11-28 流式逐字轮
+// 迁至 Chat/StreamingTypewriter.swift：逐字揭示 + 等待期光标闪烁 + final 续打。
 
 /// 设置页：账号态 + 设备管理 + 登出（登出 = 服务端撤销设备 + 清 Keychain）。
 struct HubSettingsView: View {

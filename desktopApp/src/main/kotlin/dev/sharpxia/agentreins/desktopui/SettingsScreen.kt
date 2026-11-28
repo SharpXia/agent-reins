@@ -334,6 +334,9 @@ internal fun SettingsScreen(
                                     // 确认评审收口（对齐 iOS MediaDiskCache 登出清空）：媒体缓存是
                                     // 账号派生数据，随登出清空不跨账号残留。
                                     MediaCache.clearAll()
+                                    // 2026-11-28 流式逐字轮：打字机交接账本随登出清空（流式行进度
+                                    // 与消息正文属账号数据，不跨账号残留——对齐 iOS HubStore.logout）。
+                                    TypewriterHandoff.resetForLogout()
                                     onLoggedOut()
                                 }
                             },

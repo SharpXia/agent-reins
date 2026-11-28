@@ -36,6 +36,7 @@
 		1A6FBB000000000000000020 /* BotCharacterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000020 /* BotCharacterView.swift */; };
 		1A6FBB000000000000000021 /* ConversationAvatarSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000021 /* ConversationAvatarSheet.swift */; };
 		1A6FBB000000000000000022 /* MediaDiskCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000022 /* MediaDiskCache.swift */; };
+		1A6FBB000000000000000023 /* StreamingTypewriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6FAA000000000000000023 /* StreamingTypewriter.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -71,6 +72,7 @@
 		1A6FAA000000000000000020 /* BotCharacterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BotCharacterView.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000021 /* ConversationAvatarSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationAvatarSheet.swift; sourceTree = "<group>"; };
 		1A6FAA000000000000000022 /* MediaDiskCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaDiskCache.swift; sourceTree = "<group>"; };
+		1A6FAA000000000000000023 /* StreamingTypewriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamingTypewriter.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -206,6 +208,7 @@
 			isa = PBXGroup;
 			children = (
 				1A6FAA00000000000000000B /* MarkdownView.swift */,
+				1A6FAA000000000000000023 /* StreamingTypewriter.swift */,
 			);
 			path = Chat;
 			sourceTree = "<group>";
@@ -381,6 +384,7 @@
 				1A6FBB000000000000000011 /* BackSwipe.swift in Sources */,
 				1A6FBB000000000000000013 /* ScrollBench.swift in Sources */,
 				1A6FBB00000000000000000B /* MarkdownView.swift in Sources */,
+				1A6FBB000000000000000023 /* StreamingTypewriter.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
